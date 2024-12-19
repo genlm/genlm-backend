@@ -1,4 +1,3 @@
-import gc
 import torch
 import pytest
 from async_llm.cache import OutputCache
@@ -20,7 +19,7 @@ def cache(cache_size):
 @requires_cuda
 def test_memory_freed_on_eviction(cache, cache_size):
     initial_memory = torch.cuda.memory_allocated()
-    
+
     for i in range(cache_size):
         cache[f'tensor{i}'] = torch.rand(1000, 1000, device='cuda')
     
