@@ -27,7 +27,7 @@ class OutputCache:
     def __setitem__(self, key, value):
         if len(self.cache) >= self.maxsize:
             old_key, (_, old_tensor) = self.cache.popitem(last=False)
-            del old_tensor # XXX 
+            del old_tensor
             
         self.cache[key] = (value.device, value.cpu() if self.move_to_cpu else value)
     
@@ -36,4 +36,3 @@ class OutputCache:
 
     def clear(self):
         self.cache.clear()
-        torch.cuda.empty_cache()
