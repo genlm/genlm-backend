@@ -1,14 +1,25 @@
 import torch
 import asyncio
+import numpy as np
 from contextlib import contextmanager
- 
-from vllm.utils import Counter
-from vllm.inputs import TokensPrompt
-from vllm.distributed.parallel_state import (
-    destroy_model_parallel,
-    destroy_distributed_environment,
-)
-from vllm import SamplingParams, AsyncLLMEngine, AsyncEngineArgs
+
+try:
+    from vllm.utils import Counter
+    from vllm.inputs import TokensPrompt
+    from vllm.distributed.parallel_state import (
+        destroy_model_parallel,
+        destroy_distributed_environment,
+    )
+    from vllm import (
+        LLM, AsyncLLMEngine, SamplingParams, AsyncEngineArgs
+    )
+    VLLM_AVAILABLE = True
+except ImportError:
+    VLLM_AVAILABLE = False
+    warnings.warn(
+        "vLLM is not available. CPU fallback will be used. "
+        "To enable GPU acceleration, install vLLM: pip install vllm"
+    )
 
 from async_llm.cache import OutputCache
 from async_llm.sampler import DeferredSampler
@@ -23,41 +34,68 @@ class AsyncLLM:
     )
 
     def __init__(self, async_llm_engine, cache_size=0, cache_opts={}):
+        """Initialize an AsyncLLM instance.
+
+        Args:
+            async_llm_engine (AsyncLLMEngine): The vLLM engine instance to use to process requests.
+            cache_size (int, optional): Maximum size of the output cache. If 0, caching is disabled. Defaults to 0.
+            cache_opts (dict, optional): Additional options to pass to the OutputCache constructor. Defaults to {}.
+
+        Note:
+            The cache stores the log probabilities for previously seen token sequences to avoid
+            redundant requests. This can significantly improve performance when the same sequences are evaluated multiple times.
+        """
         self.async_llm_engine = async_llm_engine
         self.request_counter = Counter()
         self.custom_sampler = DeferredSampler()
 
-        self.tokenizer = asyncio.run(async_llm_engine.get_tokenizer())
+        self.tokenizer = async_llm_engine.engine.get_tokenizer()
         self.byte_vocab, self.str_vocab = decode_vocab(self.tokenizer)
 
         self.cache = OutputCache(maxsize=cache_size, **cache_opts) if cache_size > 0 else None
 
     @classmethod
-    def from_name(cls, model_name, engine_opts={}, **kwargs):
+    def from_name(cls, model_name, engine_opts=None, **kwargs):
         """Create a AsyncLLM instance from a Hugging Face model name.
         
         This is a convenience method that handles the creation and configuration of the underlying vLLM engine.
         
         Args:
             model_name: Name of the model to load
-            engine_opts: Additional options to pass to the vLLM engine
+            engine_opts: Additional options to pass to the AsyncLLMEngine. The engine will be 
+                configured with prefix caching enabled and request logging disabled by default.
             **kwargs: Additional arguments passed to AsyncLLM constructor
             
         Returns:
             An AsyncLLM instance
         """
-        default_engine_opts = {
-            'enable_prefix_caching' : True,
-            'disable_log_requests' : True
-        }
-        engine_opts = {**default_engine_opts, **engine_opts}
-        engine_args = AsyncEngineArgs(
-            model=model_name, 
-            tokenizer=model_name, 
-            **engine_opts
-        )
-        engine = AsyncLLMEngine.from_engine_args(engine_args)
+        if not VLLM_AVAILABLE:
+            raise ImportError("vLLM not available. For CPU inference, use AsyncTransformer instead.")
+        engine = cls.init_engine(model_name, engine_opts)
         return cls(engine, **kwargs)
+
+    @classmethod
+    def init_engine(cls, model_name, engine_opts):
+        """Initialize a vLLM engine with default settings.
+
+        Args:
+            model_name (str): Name of the model to load from HuggingFace
+            engine_opts (dict, optional): Additional options to pass to the vLLM engine.
+                Will be merged with default options. Defaults to None.
+
+        Returns:
+            AsyncLLMEngine: Configured vLLM engine instance with prefix caching enabled
+            and request logging disabled by default.
+        """
+        engine_opts = {
+            'enable_prefix_caching': True,
+            'disable_log_requests': True,
+            **(engine_opts or {})
+        }
+        engine_args = AsyncEngineArgs(
+            model=model_name, tokenizer=model_name, **engine_opts
+        )
+        return AsyncLLMEngine.from_engine_args(engine_args)
 
     async def next_token_logprobs(self, token_ids):
         """Request log probabilities of next token asynchronously with output caching.
@@ -159,11 +197,20 @@ class AsyncLLM:
             for i, scheduler in enumerate(schedulers):
                 scheduler._allow_async_output_proc = org_async_procs[i]
 
-import numpy as np
-from vllm import LLM
+    def clear_cache(self):
+        self.cache.clear()
+
+    def __del__(self):
+        self.async_llm_engine.shutdown_background_loop()
+        if executor := getattr(self.async_llm_engine.engine, 'model_executor'):
+            destroy_model_parallel()
+            destroy_distributed_environment()
+            del executor
+        del self.async_llm_engine
+
 
 class ReferenceLLM:
-    """ Reference implementation used for testing. Synchronous and significantly slower than AsyncLLM (~15x slower). """
+    """ Reference vLLM implementation used for testing. Synchronous and significantly slower than AsyncLLM (~15x slower). """
     def __init__(self, llm):
         self.llm = llm
         self.byte_vocab, self.str_vocab = decode_vocab(llm.llm_engine.get_tokenizer())
@@ -177,12 +224,12 @@ class ReferenceLLM:
         self.llm.llm_engine.log_stats = False
 
     @classmethod
-    def from_name(cls, model_name, llm_opts={}):
-        default_llm_opts = {
+    def from_name(cls, model_name, llm_opts=None):
+        llm_opts = {
             'enable_prefix_caching' : True,
-            'disable_log_stats' : True
+            'disable_log_stats' : True,
+            **{llm_opts or {}}
         }
-        llm_opts = {**default_llm_opts, **llm_opts}
         llm = LLM(
             model=model_name, 
             tokenizer=model_name, 
@@ -212,3 +259,9 @@ class ReferenceLLM:
             for out in outputs
         ])
         return logprobs
+
+    def __del__(self):
+        if hasattr(self.llm.llm_engine, 'model_executor'):
+            destroy_model_parallel()
+            destroy_distributed_environment()
+            del self.llm.llm_engine.model_executor
