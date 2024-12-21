@@ -3,17 +3,18 @@ from setuptools import setup
 requirements = [
     'vllm',
     'torch',
-    'transformers'
+    'transformers',
+    # for hf backend
+    'accelarate', 
+    'bitsandbytes' 
 ]
 
 test_requirements = [
     'pytest',
     'arsenal @ git+https://github.com/timvieira/arsenal',
-    'datasets' # for wikitext corpus
-]
-
-experiment_requirements = [
-    'viztracer' # for profiling
+    'datasets', # for wikitext corpus
+    'viztracer', # for profiling
+    'pandas'
 ]
 
 setup(
@@ -21,7 +22,7 @@ setup(
     version='0.0.1',
     description='',
     install_requires=requirements,
-    extras_require={'test' : test_requirements, 'exp' : experiment_requirements},
+    extras_require={'test' : test_requirements},
     python_requires='>=3.10',
     authors=['Ben LeBrun'],
     readme='',
