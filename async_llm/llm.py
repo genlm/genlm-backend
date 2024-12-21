@@ -75,7 +75,7 @@ class AsyncLLM:
         return cls(engine, **kwargs)
 
     @classmethod
-    def init_engine(cls, model_name, engine_opts):
+    def init_engine(cls, model_name, engine_opts=None):
         """Initialize a vLLM engine with default settings.
 
         Args:
