@@ -1,5 +1,6 @@
 import torch
 import asyncio
+import warnings
 import numpy as np
 from contextlib import contextmanager
 
@@ -17,8 +18,7 @@ try:
 except ImportError:
     VLLM_AVAILABLE = False
     warnings.warn(
-        "vLLM is not available. CPU fallback will be used. "
-        "To enable GPU acceleration, install vLLM: pip install vllm"
+        "vLLM is not available. To enable faster serving, install vLLM: pip install vllm"
     )
 
 from async_llm.cache import OutputCache
