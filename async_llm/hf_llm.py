@@ -84,19 +84,21 @@ class AsyncTransformer:
     """
 
     @classmethod 
-    def from_name(cls, model_id, load_in_8bit=True, **kwargs):
+    def from_name(cls, model_id, load_in_8bit=True, bitsandbytes_opts=None, **kwargs):
         """Create an AsyncTransformer instance from a pretrained HuggingFace model.
 
         Args:
             model_id (str): Model identifier in HuggingFace's model hub.
             load_in_8bit (bool): Whether to load model in 8-bit quantized form using bitsandbytes.
                 Defaults to True.
-             **kwargs: Additional arguments passed to AsyncTransformer constructor
+            bitsandbytes_opts (dict, optional): Additional configuration options for bitsandbytes quantization.
+                Defaults to None.
+            **kwargs: Additional arguments passed to AsyncTransformer constructor
 
         Returns:
             AsyncTransformer: An initialized instance interfacing with the specified model.
         """
-        bnb_config = BitsAndBytesConfig(load_in_8bit=load_in_8bit)
+        bnb_config = BitsAndBytesConfig(load_in_8bit=load_in_8bit, **(bitsandbytes_opts or {}))
         tok = AutoTokenizer.from_pretrained(model_id)
         mod = AutoModelForCausalLM.from_pretrained(
             model_id,
@@ -121,7 +123,7 @@ class AsyncTransformer:
         self.tokenizer = hf_tokenizer
         self.device = hf_model.device
 
-        self.cache = TokenTrie(None, [])
+        self.cache = TokenTrie()
 
         self.str_vocab, self.byte_vocab = decode_vocab(self.tokenizer)
 
@@ -261,7 +263,7 @@ class AsyncTransformer:
             token_ids (list[int]): a list of token ids, representing a prompt to the language model.
 
         Returns:
-            logprobs (numpy.array): a numpy array of `len(vocab)`, with the language model's log (normalized) probabilities for the next token following the prompt.
+            logprobs (torch.Tensor): a tensor of `len(vocab)`, with the language model's log (normalized) probabilities for the next token following the prompt.
         """
 
         node, next_token_index, past, base = self.walk_cache(token_ids)
@@ -288,7 +290,7 @@ class AsyncTransformer:
             token_ids (list[int]): a list of token ids, representing a prompt to the language model.
 
         Returns:
-            logprobs (numpy.array): a numpy array of `len(vocab)`, with the language model's log (normalized) probabilities for the next token following the prompt.
+            logprobs (torch.Tensor): a tensor of `len(vocab)`, with the language model's log (normalized) probabilities for the next token following the prompt.
         """
 
         # Walk while tokens can be found
@@ -314,8 +316,8 @@ class AsyncTransformer:
             token_ids_list (List[List[int]]): A list of token ID lists, each representing a prompt to the language model.
                 
         Returns:
-            (numpy.array): An array of log probability tensors, one for each input sequence.
+            (torch.Tensor): A tensor of log probability tensors, one for each input sequence.
         """
-        return await asyncio.gather(
+        return torch.stack(await asyncio.gather(
             *[self.next_token_logprobs(token_ids) for token_ids in token_ids_list]
-        )
+        ))

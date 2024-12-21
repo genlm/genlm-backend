@@ -201,12 +201,13 @@ class AsyncLLM:
         self.cache.clear()
 
     def __del__(self):
-        self.async_llm_engine.shutdown_background_loop()
-        if executor := getattr(self.async_llm_engine.engine, 'model_executor'):
-            destroy_model_parallel()
-            destroy_distributed_environment()
-            del executor
-        del self.async_llm_engine
+        if async_engine := getattr(self, 'async_llm_engine'):
+            async_engine.shutdown_background_loop()
+            if executor := getattr(async_engine.engine, 'model_executor'):
+                destroy_model_parallel()
+                destroy_distributed_environment()
+                del executor
+            del async_engine
 
 
 class ReferenceLLM:
@@ -228,7 +229,7 @@ class ReferenceLLM:
         llm_opts = {
             'enable_prefix_caching' : True,
             'disable_log_stats' : True,
-            **{llm_opts or {}}
+            **(llm_opts or {})
         }
         llm = LLM(
             model=model_name, 
@@ -261,7 +262,8 @@ class ReferenceLLM:
         return logprobs
 
     def __del__(self):
-        if hasattr(self.llm.llm_engine, 'model_executor'):
-            destroy_model_parallel()
-            destroy_distributed_environment()
-            del self.llm.llm_engine.model_executor
+        if llm_engine := getattr(self.llm, 'llm_engine'):
+            if executor := getattr(llm_engine, 'model_executor'):
+                destroy_model_parallel()
+                destroy_distributed_environment()
+                del executor

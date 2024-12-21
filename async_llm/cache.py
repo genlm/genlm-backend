@@ -89,6 +89,6 @@ class TokenTrie:
             token_logits = logits[j - base]
             token_logprobs = torch.log_softmax(token_logits, 0)
 
-            node = node.add_token(token_id, token_logprobs.cpu().numpy())
+            node = node.add_token(token_id, token_logprobs.cpu())
 
         return node
