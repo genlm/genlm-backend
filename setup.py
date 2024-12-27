@@ -6,7 +6,9 @@ requirements = [
     'transformers',
     # for hf backend
     'accelarate', 
-    'bitsandbytes' 
+    'bitsandbytes',
+    # trie
+    'numba'
 ]
 
 test_requirements = [
