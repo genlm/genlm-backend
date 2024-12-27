@@ -100,17 +100,24 @@ class TokenCharacterTrie:
         return np.zeros(len(self.children), dtype=np.float64)
 
     def mass_sum(self, p_llm):
+        if isinstance(p_llm, torch.Tensor):
+            if p_llm.device.type != 'cpu':
+                p_llm = p_llm.cpu()
+            p_llm = p_llm.numpy()
         mass = self.alloc_mass()
         # convert llm.eos to guide.eos
-        mass[self.word2leaf[self.new_eos]] = p_llm._p[self.old_eos_id]
+        mass[self.word2leaf[self.new_eos]] = p_llm[self.old_eos_id]
         _update_trie_numba(
             mass=mass,
-            _p=p_llm._p,
+            _p=p_llm,
             token_id_to_leaf=self.token_id_to_leaf,
             jump=self.jump,
             ordering=self.ordering,
         )
         return mass
+
+    def batch_mass_sum(self, p_llms):
+        return np.array([self.mass_sum(p_llm) for p_llm in p_llms])
 
     def _order(self, node):
         "Topological ordering of nodes beneath `node`."
@@ -260,8 +267,15 @@ class AsyncTokenCharacterTrie(AsyncWorker):
     def __init__(self, async_llm, new_eos, vocab='byte', device=None):
         # TODO: Cache mass sum results.
         super().__init__()
+
         self.async_llm = async_llm
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+        if not device:
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        elif device == 'cpu' or device == 'gpu':
+            self.device = device
+        else:
+            raise ValueError(f"Invalid device: {device}. Must be 'cpu', 'gpu' or None to automatically select it.")
 
         if vocab == 'byte':
             decode = async_llm.byte_vocab

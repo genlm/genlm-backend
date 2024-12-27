@@ -45,6 +45,7 @@ class AsyncLLM:
             The cache stores the log probabilities for previously seen token sequences to avoid
             redundant requests. This can significantly improve performance when the same sequences are evaluated multiple times.
         """
+        # TODO: Custom eos token
         self.async_llm_engine = async_llm_engine
         self.request_counter = Counter()
         self.custom_sampler = DeferredSampler()
@@ -70,23 +71,7 @@ class AsyncLLM:
             An AsyncLLM instance
         """
         if not VLLM_AVAILABLE:
-            raise ImportError("vLLM not available. For CPU inference, use AsyncTransformer instead.")
-        engine = cls.init_engine(model_name, engine_opts)
-        return cls(engine, **kwargs)
-
-    @classmethod
-    def init_engine(cls, model_name, engine_opts=None):
-        """Initialize a vLLM engine with default settings.
-
-        Args:
-            model_name (str): Name of the model to load from HuggingFace
-            engine_opts (dict, optional): Additional options to pass to the vLLM engine.
-                Will be merged with default options. Defaults to None.
-
-        Returns:
-            AsyncLLMEngine: Configured vLLM engine instance with prefix caching enabled
-            and request logging disabled by default.
-        """
+            raise ImportError("vLLM not available. Install vLLM or use AsyncTransformer instead.")
         engine_opts = {
             'enable_prefix_caching': True,
             'disable_log_requests': True,
@@ -95,7 +80,8 @@ class AsyncLLM:
         engine_args = AsyncEngineArgs(
             model=model_name, tokenizer=model_name, **engine_opts
         )
-        return AsyncLLMEngine.from_engine_args(engine_args)
+        engine = AsyncLLMEngine.from_engine_args(engine_args)
+        return cls(engine, **kwargs)
 
     async def next_token_logprobs(self, token_ids):
         """Request log probabilities of next token asynchronously with output caching.
