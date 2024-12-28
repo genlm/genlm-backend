@@ -5,7 +5,7 @@ requirements = [
     'torch',
     'transformers',
     # for hf backend
-    'accelarate', 
+    'accelerate', 
     'bitsandbytes',
     # trie
     'numba'
