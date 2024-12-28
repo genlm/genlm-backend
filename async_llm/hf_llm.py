@@ -84,7 +84,7 @@ class AsyncTransformer:
     """
 
     @classmethod 
-    def from_name(cls, model_id, load_in_8bit=True, bitsandbytes_opts=None, **kwargs):
+    def from_name(cls, model_id, load_in_8bit=True, bitsandbytes_opts=None, hf_opts=None, **kwargs):
         """Create an AsyncTransformer instance from a pretrained HuggingFace model.
 
         Args:
@@ -92,6 +92,8 @@ class AsyncTransformer:
             load_in_8bit (bool): Whether to load model in 8-bit quantized form using bitsandbytes.
                 Defaults to True.
             bitsandbytes_opts (dict, optional): Additional configuration options for bitsandbytes quantization.
+                Defaults to None.
+            hf_opts (dict, optional): Additional configuration options for loading the HuggingFace model.
                 Defaults to None.
             **kwargs: Additional arguments passed to AsyncTransformer constructor
 
@@ -104,6 +106,7 @@ class AsyncTransformer:
             model_id,
             device_map="auto", 
             quantization_config=bnb_config,
+            **(hf_opts or {})
         )
         return cls(mod, tok, **kwargs)
 
