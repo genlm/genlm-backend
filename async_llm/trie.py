@@ -1,12 +1,14 @@
 import numba
 import torch
+import asyncio
 import numpy as np
 from numba.typed import List
+from dataclasses import dataclass
 
 from async_llm.async_worker import AsyncWorker
 
 class TokenCharacterTrie:
-    def __init__(self, decode, encode, old_eos, new_eos):
+    def __init__(self, decode, old_eos, new_eos):
         use_bytes = isinstance(decode[0], bytes)
         if use_bytes:
             if not isinstance(old_eos, bytes):
@@ -15,7 +17,8 @@ class TokenCharacterTrie:
                 new_eos = new_eos.encode('utf-8')
 
         self.old_eos = old_eos
-        self.old_eos_id = encode[old_eos]
+        self.old_eos_id = decode.index(old_eos)
+        assert self.old_eos_id is not None
         self.new_eos = new_eos
 
         word2leaf = {}
@@ -25,7 +28,7 @@ class TokenCharacterTrie:
 
         token_id_to_leaf = []
 
-        for word in decode:
+        for token_id, word in enumerate(decode):
             # coerce old eos to new eos
             _word = word
             if word == self.old_eos:
@@ -38,11 +41,17 @@ class TokenCharacterTrie:
                     children.append({})
                 curr = children[curr][letter]
 
-            children[curr][None] = last = len(children)
-            children.append({})
-            word2leaf[word] = last
+            # Reuse existing leaf node if the word was seen before.
+            # This can happen when decode contains duplicates, which is unfortunately
+            # the case for the string vocabularies of certain tokenizers.
+            if word in word2leaf:
+                last = word2leaf[word]
+            else:
+                children[curr][None] = last = len(children)
+                children.append({})
+                word2leaf[word] = last
 
-            token_id_to_leaf.append((encode[_word], last))
+            token_id_to_leaf.append((token_id, last))
 
         self.token_id_to_leaf = token_id_to_leaf
         self.root = root
@@ -160,7 +169,7 @@ def _update_trie_numba(
         mass[node] = total_mass
 
 
-class GPUTokenCharacterTrie(TokenCharacterTrie):
+class ParallelTokenCharacterTrie(TokenCharacterTrie):
     """A GPU-optimized version of TokenCharacterTrie that performs mass_sum in parallel.
 
     The mass at leaf nodes is propagated to their ancestors
@@ -188,8 +197,8 @@ class GPUTokenCharacterTrie(TokenCharacterTrie):
     When computing masses (batch_size × num_leafs) @ M, each leaf node's mass
     flows up to all its ancestors.
     """
-    def __init__(self, decode, encode, old_eos, new_eos, device=None):
-        super().__init__(decode, encode, old_eos, new_eos)
+    def __init__(self, decode, old_eos, new_eos, device=None):
+        super().__init__(decode, old_eos, new_eos)
         self.device = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
         self.M = self._build_reachability_matrix()
         self.token_ids = torch.tensor(
@@ -231,23 +240,29 @@ class GPUTokenCharacterTrie(TokenCharacterTrie):
         return M
 
     def batch_mass_sum(self, p_llms):
-        return torch.sparse.mm(p_llms[:, self.token_ids], self.M)
+        if p_llms.device != self.device:
+            p_llms = p_llms.to(self.device)
+        masses = torch.sparse.mm(p_llms[:, self.token_ids], self.M)
+        return masses.cpu().numpy()
 
 
+@dataclass(frozen=True, slots=True)
 class NextTokenTrie:
-    def __init__(self, trie, mass):
-        self.mass = mass
-        self.root = trie.root
-        self.children = trie.children
-        self.word2leaf = trie.word2leaf
-        self.leaf2word = trie.leaf2word
-        self.jump = trie.jump
-        self.ordering = trie.ordering
-        self.node2prefix = trie.node2prefix
-        self.old_eos = trie.old_eos
-        self.old_eos_id = trie.old_eos_id
-        self.new_eos = trie.new_eos
-        self.token_id_to_leaf = trie.token_id_to_leaf
+    mass: np.ndarray
+    root: int
+    children: list
+    old_eos: str | bytes
+    new_eos: str | bytes
+
+    @classmethod
+    def from_trie(cls, trie, mass):
+        return cls(
+            mass=mass,
+            root=trie.root,
+            children=trie.children,
+            old_eos=trie.old_eos,
+            new_eos=trie.new_eos,
+        )
 
 
 class AsyncTokenCharacterTrie(AsyncWorker):
@@ -272,10 +287,10 @@ class AsyncTokenCharacterTrie(AsyncWorker):
 
         if not device:
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        elif device == 'cpu' or device == 'gpu':
+        elif device == 'cpu' or device == 'cuda':
             self.device = device
         else:
-            raise ValueError(f"Invalid device: {device}. Must be 'cpu', 'gpu' or None to automatically select it.")
+            raise ValueError(f"Invalid device: {device}. Must be 'cpu', 'cuda' or None to automatically select it.")
 
         if vocab == 'byte':
             decode = async_llm.byte_vocab
@@ -284,16 +299,15 @@ class AsyncTokenCharacterTrie(AsyncWorker):
         else:
             raise ValueError(f"Invalid vocab type: {vocab}. Must be 'byte' or 'str'.")
         
-        encode = {x:i for i,x in enumerate(decode)}
         old_eos = async_llm.tokenizer.eos_token 
 
         if self.device == 'cuda':
-            self.trie = GPUTokenCharacterTrie(
-                decode=decode, encode=encode, new_eos=new_eos, old_eos=old_eos, device=device
+            self.trie = ParallelTokenCharacterTrie(
+                decode=decode, new_eos=new_eos, old_eos=old_eos, device=self.device
             )
         else:
             self.trie = TokenCharacterTrie(
-                decode=decode, encode=encode, new_eos=new_eos, old_eos=old_eos
+                decode=decode, new_eos=new_eos, old_eos=old_eos
             )
 
     async def next_token_trie(self, token_ids):
@@ -301,9 +315,14 @@ class AsyncTokenCharacterTrie(AsyncWorker):
         # Queue the request and wait for it to complete.
         return await self.add_request(request_id, token_ids)
 
+    async def batch_next_token_trie(self, all_token_ids):
+        return await asyncio.gather(*[
+            self.next_token_trie(token_ids) for token_ids in all_token_ids
+        ])
+
     async def batch_process_requests(self, all_token_ids):
         logp_llms = await self.async_llm.batch_next_token_logprobs(all_token_ids)
         p_llms = torch.exp(logp_llms)
         masses = self.trie.batch_mass_sum(p_llms)
-        tries = [NextTokenTrie(self.trie, mass) for mass in masses]
+        tries = [NextTokenTrie.from_trie(self.trie, mass) for mass in masses]
         return tries

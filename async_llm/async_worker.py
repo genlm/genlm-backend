@@ -204,3 +204,6 @@ class AsyncWorker(ABC):
             List of results corresponding to the input requests
         """
         pass
+
+    def __del__(self):
+        self.shutdown_background_loop()
