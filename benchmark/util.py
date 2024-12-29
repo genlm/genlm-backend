@@ -65,3 +65,16 @@ def token_prefix_batches(text, tokenizer, batch_size, prepend=''):
         if len(batch) == batch_size:
             yield batch
             batch = []
+
+from genlm_backend.trie.base import TokenCharacterTrie
+from genlm_backend.trie.parallel import ParallelTokenCharacterTrie
+
+def load_trie(llm, implementation):
+    if implementation == "sequential":
+        return TokenCharacterTrie(decode=llm.byte_vocab)
+    elif implementation == "parallel-cpu":
+        return ParallelTokenCharacterTrie(decode=llm.byte_vocab, device='cpu')
+    elif implementation == "parallel-gpu":
+        return ParallelTokenCharacterTrie(decode=llm.byte_vocab, device='cuda')
+    else:
+        raise ValueError(f"Unknown implementation: {implementation}")
