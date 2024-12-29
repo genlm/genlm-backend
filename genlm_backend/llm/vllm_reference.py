@@ -11,7 +11,7 @@ except ImportError:
 
 import numpy as np
 
-from genlm_backend.vocabulary import decode_vocab
+from genlm_backend.tokenization import decode_vocab
 
 class ReferenceVirtualLM:
     """ Reference vLLM implementation used for testing. Synchronous and significantly slower than AsyncVirtualLM (~15x slower). """

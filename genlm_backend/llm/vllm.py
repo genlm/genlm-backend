@@ -22,7 +22,6 @@ except ImportError:
 
 from genlm_backend.llm.base import AsyncLM
 from genlm_backend.cache import OutputCache
-from genlm_backend.vocabulary import decode_vocab
 
 class AsyncVirtualLM(AsyncLM): 
 
