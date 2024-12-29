@@ -17,11 +17,10 @@ test_requirements = [
     'datasets', # for wikitext corpus
     'viztracer', # for profiling
     'pandas',
-    'pytest-benchmark'
 ]
 
 setup(
-    name='async-llm',
+    name='genlm-backend',
     version='0.0.1',
     description='',
     install_requires=requirements,
@@ -30,5 +29,5 @@ setup(
     authors=['Ben LeBrun'],
     readme='',
     scripts=[],
-    packages=['async_llm'],
+    packages=['genlm_backend'],
 )

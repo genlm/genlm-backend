@@ -37,7 +37,7 @@ def decode_vocab(tokenizer, byte2str_fallback='tokenizer'):
     try:
         byte_vocab = get_byte_vocab(tokenizer)
     except ByteVocabError:
-        warnings.warn("Could not decode vocabulary from slow tokenizer. Trying using fast tokenizer.")
+        # warnings.warn("Could not decode vocabulary from slow tokenizer. Trying using fast tokenizer.")
         
         # Try fast tokenizer.
         tokenizer = AutoTokenizer.from_pretrained(tokenizer.name_or_path, use_fast=True)
@@ -77,7 +77,8 @@ def get_byte_vocab(tokenizer):
             check_byte_decoder(tokenizer, byte_decoder)
             return get_byte_tokens_from_byte_decoder(tokenizer, byte_decoder)
         except ByteDecoderError as e:
-            warnings.warn(f"Could not decode vocabulary using byte_decoder: {e!r}")
+            pass
+            #warnings.warn(f"Could not decode vocabulary using byte_decoder: {e!r}")
 
     # Try SentencePiece model.
     if hasattr(tokenizer, 'sp_model'):
@@ -87,7 +88,8 @@ def get_byte_vocab(tokenizer):
     try:
         return get_byte_tokens_by_encoding_token_strings(tokenizer)
     except Exception as e:
-        warnings.warn(f"Could not decode vocabulary through string encoding: {e!r}")
+        #warnings.warn(f"Could not decode vocabulary through string encoding: {e!r}")
+        pass 
 
     # Try using GPT2 byte decoder.
     try:
@@ -314,20 +316,35 @@ def _get_default_byte_decoder():
 def bytes_to_strs(tokenizer, byte_vocab, byte2str_fallback):
     """Convert byte representations to UTF-8 strings."""
     str_vocab = []
+    seen_tokens = {}
     for token_id, raw_token in enumerate(byte_vocab):
         try:
-            str_vocab.append(raw_token.decode('utf-8'))
+            token = raw_token.decode('utf-8')
         except UnicodeDecodeError:
             if byte2str_fallback == 'latin1':
                 try:
-                    fallback = raw_token.decode('latin1')
+                    token = raw_token.decode('latin1')
                 except UnicodeDecodeError:
-                    fallback = tokenizer.convert_ids_to_tokens(token_id)
+                    token = tokenizer.convert_ids_to_tokens(token_id)
             elif byte2str_fallback == 'tokenizer':
-                fallback = tokenizer.convert_ids_to_tokens(token_id)
+                token = tokenizer.convert_ids_to_tokens(token_id)
             elif byte2str_fallback == 'replace':
-                fallback = raw_token.decode('utf-8', errors='replace')
-            str_vocab.append(fallback)
+                token = raw_token.decode('utf-8', errors='replace')
+        
+        if token in seen_tokens:
+            seen_tokens[token].append(token_id)
+        else:
+            seen_tokens[token] = [token_id]
+            
+        str_vocab.append(token)
+
+    duplicates = {token: indices for token, indices in seen_tokens.items() if len(indices) > 1}
+    if duplicates:
+        warnings.warn(
+            "Duplicate tokens found in string vocabulary. "
+            "This may lead to downstream issues with the string vocabulary; we recommend using the byte vocabulary."
+        )
+
     return str_vocab
 
 def assert_roundtrip_bytes(test_case, tokenizer, byte_vocab):

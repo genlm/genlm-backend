@@ -7,8 +7,8 @@ from transformers import AutoModelForCausalLM
 from transformers import AutoTokenizer
 from transformers import BitsAndBytesConfig
 
-from async_llm.cache import TokenTrie
-from async_llm.vocabulary import decode_vocab
+from genlm_backend.cache import TokenTrie
+from genlm_backend.llm.base import AsyncLM
 
 class Query:
     """A query to a language model, waiting to be batched."""
@@ -65,22 +65,11 @@ class Query:
             *[0 for _ in range(total_seq_length - len(self.prompt))],
         ]
 
-class AsyncTransformer:
+class AsyncTransformer(AsyncLM):
     """Asynchronous wrapper around a HuggingFace causal language model with caching support.
 
     This class provides an asynchronous interface to HuggingFace language models with automatic batching
     and caching of previous computations for improved efficiency.
-
-    Attributes:
-        model: The underlying HuggingFace causal language model.
-        tokenizer: The underlying HuggingFace tokenizer.
-        device (str): PyTorch device identifier (e.g. "cpu" or "cuda:0") where the model is loaded.
-        cache (TokenTrie): Cache storing previously evaluated log probabilities and key/value vectors.
-        str_vocab (list[str]): List mapping token IDs to string tokens.
-        byte_vocab (list[bytes]): List mapping token IDs to byte sequences.
-        batch_size (int): Maximum number of queries to process in one batch during auto-batching.
-        timeout (float): Seconds to wait since last query before processing current batch, even if not full.
-        timer: Timer for tracking batch timeouts.
     """
 
     @classmethod 
@@ -111,7 +100,7 @@ class AsyncTransformer:
         return cls(mod, tok, **kwargs)
 
     @torch.no_grad()
-    def __init__(self, hf_model, hf_tokenizer, batch_size=20, timeout=0.02):
+    def __init__(self, hf_model, hf_tokenizer, eos_token=None, batch_size=20, timeout=0.02):
         """Initialize an AsyncTransformer instance.
 
         Args:
@@ -119,16 +108,15 @@ class AsyncTransformer:
             hf_tokenizer: A HuggingFace Tokenizer instance matching the model.
             batch_size (int, optional): Maximum queries to process in one batch during auto-batching.
                 Defaults to 20.
+            eos_token (str, optional): End of sequence token. If not provided, uses tokenizer's eos_token.
+                Defaults to None.
             timeout (float, optional): Seconds to wait since last query before processing current batch.
                 Defaults to 0.02.
         """
         self.model = hf_model
         self.tokenizer = hf_tokenizer
         self.device = hf_model.device
-
         self.cache = TokenTrie()
-
-        self.str_vocab, self.byte_vocab = decode_vocab(self.tokenizer)
 
         # Queries to be batched. Each query is a sequence of tokens,
         # and a Future to be called when the query is resolved.
@@ -136,6 +124,10 @@ class AsyncTransformer:
         self.batch_size = batch_size
         self.timeout = timeout
         self.timer = None
+
+        self.model.eval()
+
+        super().__init__(tokenizer=self.tokenizer, eos_token=eos_token)
 
     def clear_cache(self):
         """Clear the cache of log probabilities and key/value pairs."""
@@ -311,16 +303,3 @@ class AsyncTransformer:
         node = node.extend_cache(next_token_index, token_ids, logits, base)
 
         return node.logprobs
-
-    async def batch_next_token_logprobs(self, token_ids_list):
-        """Batch request log probabilities for multiple token sequences asynchronously.
-        
-        Args:
-            token_ids_list (List[List[int]]): A list of token ID lists, each representing a prompt to the language model.
-                
-        Returns:
-            (torch.Tensor): A tensor of log probability tensors, one for each input sequence.
-        """
-        return torch.stack(await asyncio.gather(
-            *[self.next_token_logprobs(token_ids) for token_ids in token_ids_list]
-        ))

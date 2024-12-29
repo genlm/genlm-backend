@@ -4,7 +4,7 @@ from functools import wraps
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
-from async_llm.vocabulary import decode_vocab, assert_roundtrip_bytes
+from genlm_backend.vocabulary import decode_vocab, assert_roundtrip_bytes
 
 def skip_if_gated(f):
     @wraps(f)

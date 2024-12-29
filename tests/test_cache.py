@@ -1,11 +1,7 @@
 import torch
 import pytest
-from async_llm.cache import OutputCache
-
-requires_cuda = pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is not available"
-)
+from conftest import cuda_only
+from genlm_backend.cache import OutputCache
 
 @pytest.fixture(scope='function')
 def cache_size():
@@ -16,7 +12,7 @@ def cache(cache_size):
     cache = OutputCache(maxsize=cache_size, move_to_cpu=False)
     return cache
 
-@requires_cuda
+@cuda_only
 def test_memory_freed_on_eviction(cache, cache_size):
     initial_memory = torch.cuda.memory_allocated()
 
@@ -34,7 +30,7 @@ def test_memory_freed_on_eviction(cache, cache_size):
         # memory shouldn't grow significantly beyond when at capacity
         assert torch.cuda.memory_allocated() <= memory_at_capacity * 1.2
             
-@requires_cuda
+@cuda_only
 def test_memory_freed_on_clear(cache, cache_size):
     initial_memory = torch.cuda.memory_allocated()
 
