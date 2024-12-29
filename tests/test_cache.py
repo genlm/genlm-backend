@@ -5,7 +5,8 @@ from genlm_backend.cache import OutputCache
 
 @cuda_only
 def test_memory_freed_on_eviction():
-    cache = OutputCache(maxsize=2, move_to_cpu=False)
+    cache_size = 2
+    cache = OutputCache(maxsize=cache_size, move_to_cpu=False)
 
     initial_memory = torch.cuda.memory_allocated()
 
@@ -25,7 +26,8 @@ def test_memory_freed_on_eviction():
             
 @cuda_only
 def test_memory_freed_on_clear():
-    cache = OutputCache(maxsize=2, move_to_cpu=False)
+    cache_size = 2
+    cache = OutputCache(maxsize=cache_size, move_to_cpu=False)
 
     initial_memory = torch.cuda.memory_allocated()
 
