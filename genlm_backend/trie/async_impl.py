@@ -9,25 +9,6 @@ from genlm_backend.trie.parallel import ParallelTokenCharacterTrie
 
 logger = logging.getLogger(__name__)
 
-@dataclass(frozen=True, slots=True)
-class NextTokenTrie:
-    mass: np.ndarray
-    root: int
-    children: list
-    old_eos: str | bytes
-    new_eos: str | bytes
-
-    @classmethod
-    def from_trie(cls, trie, mass):
-        return cls(
-            mass=mass,
-            root=trie.root,
-            children=trie.children,
-            old_eos=trie.old_eos,
-            new_eos=trie.new_eos,
-        )
-
-
 class AsyncTokenCharacterTrie:
     def __init__(self, trie):
         self.trie = trie
