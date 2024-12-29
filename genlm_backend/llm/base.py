@@ -57,18 +57,18 @@ class MockAsyncLM(AsyncLM):
     @classmethod
     def from_name(cls, model_name, **kwargs):
         from transformers import AutoTokenizer
-        return cls(AutoTokenizer.from_pretrained(model_name, **kwargs))
-        
-    def _get_logits(self, token_ids):
+        return cls(AutoTokenizer.from_pretrained(model_name), **kwargs)
+
+    async def next_token_logprobs(self, token_ids):
+        return self._get_logprobs(token_ids)
+
+    def next_token_logprobs_sync(self, token_ids):
+        return self._get_logprobs(token_ids)
+
+    def _get_logprobs(self, token_ids):
         # Use token_ids to seed the random generator
         # This ensures same token_ids always produce same logits
         seed = sum([(i + 1) * t for i, t in enumerate(token_ids)])
         self._rng.seed(seed)
         logits = torch.from_numpy(self._rng.rand(len(self.tokenizer)).astype(np.float32))
         return torch.softmax(logits, dim=-1)
-
-    async def next_token_logprobs(self, token_ids):
-        return self._get_logits(token_ids)
-
-    def next_token_logprobs_sync(self, token_ids):
-        return self._get_logits(token_ids)

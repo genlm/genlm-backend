@@ -1,4 +1,3 @@
-import numpy as np
 try:
     from vllm import LLM, SamplingParams
     from vllm.inputs import TokensPrompt
@@ -9,6 +8,8 @@ try:
     HAS_VLLM = True
 except ImportError:
     HAS_VLLM = False
+
+import numpy as np
 
 from genlm_backend.vocabulary import decode_vocab
 
@@ -30,7 +31,7 @@ class ReferenceVirtualLM:
     @classmethod
     def from_name(cls, model_name, llm_opts=None):
         if not HAS_VLLM:
-            raise ImportError("vLLM not installed. Run 'pip install vllm' for faster serving.")
+            raise ImportError("vLLM not installed.")
         llm_opts = {
             'enable_prefix_caching' : True,
             'disable_log_stats' : True,
@@ -43,7 +44,7 @@ class ReferenceVirtualLM:
         )
         return cls(llm)
 
-    def next_token_logprobs(self, token_ids):
+    def next_token_logprobs_sync(self, token_ids):
         outputs = self.llm.generate(
             prompts=TokensPrompt(prompt_token_ids=token_ids), 
             sampling_params=self.DEFAULT_SAMPLING_PARAMS,
@@ -55,7 +56,12 @@ class ReferenceVirtualLM:
         ])
         return logprobs
 
-    def batch_next_token_logprobs(self, token_ids_list):
+    async def next_token_logprobs(self, token_ids):
+        # Note: async method only to support protocol, actual implementation is synchronous
+        return self.next_token_logprobs_sync(token_ids)
+
+    async def batch_next_token_logprobs(self, token_ids_list):
+        # Note: async method only to support protocol, actual implementation is synchronous
         prompts = [TokensPrompt(prompt_token_ids=token_ids) for token_ids in token_ids_list]
         outputs = self.llm.generate(
             prompts=prompts, sampling_params=self.DEFAULT_SAMPLING_PARAMS, use_tqdm=False

@@ -65,6 +65,7 @@ class Query:
             *[0 for _ in range(total_seq_length - len(self.prompt))],
         ]
 
+
 class AsyncTransformer(AsyncLM):
     """Asynchronous wrapper around a HuggingFace causal language model with caching support.
 
@@ -150,7 +151,6 @@ class AsyncTransformer(AsyncLM):
             prompt_tokens (list[int]): token ids for the prompt to cache.
         """
         result = self.model(torch.tensor([prompt_tokens]).to(self.device))
-
         node = self.cache.extend_cache(1, prompt_tokens, result.logits[0], 0)
         node.past_key_values = result.past_key_values
 
@@ -260,6 +260,7 @@ class AsyncTransformer(AsyncLM):
         Returns:
             logprobs (torch.Tensor): a tensor of `len(vocab)`, with the language model's log (normalized) probabilities for the next token following the prompt.
         """
+        assert token_ids, 'Token ids must not be empty'
 
         node, next_token_index, past, base = self.walk_cache(token_ids)
 

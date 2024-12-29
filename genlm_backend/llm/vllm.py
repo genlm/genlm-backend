@@ -117,8 +117,7 @@ class AsyncVirtualLM(AsyncLM):
             return asyncio.run(self.next_token_logprobs(token_ids))
 
     default_params = SamplingParams(
-        max_tokens=1, n=1, logprobs=1, detokenize=False,
-        stop=None, ignore_eos=True
+        max_tokens=1, n=1, logprobs=1, detokenize=False, stop=None, ignore_eos=True
     )
 
     async def _next_token_logprobs(self, token_ids):

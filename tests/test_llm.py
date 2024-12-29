@@ -35,13 +35,13 @@ def test_next_token_logprobs(async_llm, reference_llm, token_ids_list):
     for token_ids in token_ids_list:
         have = asyncio.run(async_llm.next_token_logprobs(token_ids))
         have = have.cpu().numpy()
-        want = reference_llm.next_token_logprobs(token_ids)
+        want = asyncio.run(reference_llm.next_token_logprobs(token_ids))
         assert compare(have, want).max_rel_err < 1e-5, token_ids
 
 @cuda_only
 def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list):
     haves = asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list))
     haves = haves.cpu().numpy()
-    wants = reference_llm.batch_next_token_logprobs(token_ids_list)
+    wants = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
     for i, (have, want) in enumerate(zip(haves, wants)):          
         assert compare(have, want).max_rel_err < 1e-5, token_ids_list[i]

@@ -3,17 +3,10 @@ import pytest
 from conftest import cuda_only
 from genlm_backend.cache import OutputCache
 
-@pytest.fixture(scope='function')
-def cache_size():
-    return 2
-
-@pytest.fixture(scope='function')
-def cache(cache_size):
-    cache = OutputCache(maxsize=cache_size, move_to_cpu=False)
-    return cache
-
 @cuda_only
-def test_memory_freed_on_eviction(cache, cache_size):
+def test_memory_freed_on_eviction():
+    cache = OutputCache(maxsize=2, move_to_cpu=False)
+
     initial_memory = torch.cuda.memory_allocated()
 
     for i in range(cache_size):
@@ -31,7 +24,9 @@ def test_memory_freed_on_eviction(cache, cache_size):
         assert torch.cuda.memory_allocated() <= memory_at_capacity * 1.2
             
 @cuda_only
-def test_memory_freed_on_clear(cache, cache_size):
+def test_memory_freed_on_clear():
+    cache = OutputCache(maxsize=2, move_to_cpu=False)
+
     initial_memory = torch.cuda.memory_allocated()
 
     for i in range(cache_size):
