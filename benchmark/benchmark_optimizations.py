@@ -6,10 +6,15 @@ pytest benchmark/benchmark_optimizations.py --benchmark-only --benchmark-group-b
 """
 
 import pytest
-import asyncio
+from .util import (
+    get_wikitext, 
+    token_prefixes,
+    token_prefix_batches,
+    run_await_next_token_logprobs,
+    run_await_batch_next_token_logprobs, 
+)
 from genlm_backend.llm import AsyncVirtualLM
 from genlm_backend.llm.vllm_reference import ReferenceVirtualLM
-from .util import get_wikitext, token_prefixes, prefix_batches
 
 text = get_wikitext()
 
@@ -20,42 +25,14 @@ def load_model(model):
     else:
         return ReferenceVirtualLM.from_name(model_name)
 
-def run_single(benchmark, llm):
-    loop = asyncio.new_event_loop()
-
-    prefixes = token_prefixes(text, llm.tokenizer)
-    async def run():
-        await llm.next_token_logprobs(next(prefixes))
-
-    benchmark.pedantic(
-        lambda: loop.run_until_complete(run()), 
-        iterations=1, 
-        rounds=200, 
-        warmup_rounds=20, 
-    )
-
-    loop.close()
-
-def run_batch(benchmark, llm, batch_size):
-    loop = asyncio.new_event_loop()
-
-    batches = prefix_batches(text, llm.tokenizer, batch_size)
-    async def run():
-        await llm.batch_next_token_logprobs(next(batches))
-
-    benchmark.pedantic(
-        lambda: loop.run_until_complete(run()), 
-        iterations=1, 
-        rounds=50, 
-        warmup_rounds=5, 
-    )
-
-    loop.close()
-
 @pytest.mark.parametrize("model", ["optimized", "reference"])
 def test_await_next_token_logprobs(benchmark, model):
-    run_single(benchmark, load_model(model))
+    llm = load_model(model)
+    sequences = token_prefixes(text, tokenizer=llm.tokenizer)
+    run_await_next_token_logprobs(benchmark=benchmark, llm=llm, sequences=sequences)
 
 @pytest.mark.parametrize("model", ["optimized", "reference"])
 def test_await_batch_next_token_logprobs(benchmark, model, batch_size=20):
-    run_batch(benchmark, load_model(model), batch_size=batch_size)
+    llm = load_model(model)
+    batches = token_prefix_batches(text, tokenizer=llm.tokenizer, batch_size=batch_size)
+    run_await_batch_next_token_logprobs(benchmark=benchmark, llm=llm, batches=batches)
