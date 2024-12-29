@@ -4,7 +4,6 @@ import logging
 import numpy as np
 from dataclasses import dataclass
 
-from genlm_backend.util import resolve_device
 from genlm_backend.trie.base import TokenCharacterTrie
 from genlm_backend.trie.parallel import ParallelTokenCharacterTrie
 
@@ -30,52 +29,44 @@ class NextTokenTrie:
 
 
 class AsyncTokenCharacterTrie:
-    """An asynchronous worker that builds character tries over next tokens.
-
-    Args:
-        llm (AsyncLM): The language model to use for generating token probabilities
-        new_eos (bytes): The new end-of-sequence token to replace the model's default EOS token
-        device (str, optional): The device to use ('cuda' or 'cpu'). If None, automatically selects
-            'cuda' if available, else 'cpu'.
-    """
-    def __init__(self, async_llm, new_eos, device=None):
-        self.async_llm = async_llm
-        self.device = resolve_device(device)
-
+    def __init__(self, trie):
+        self.trie = trie
         self._queue = asyncio.Queue()
         self._pending = {}
-        self._task = None        
+        self._task = None 
 
-        self.trie = ParallelTokenCharacterTrie(
-            decode=self.async_llm.byte_vocab,
-            new_eos=new_eos,
-            old_eos=self.async_llm.eos_token,
-            device=self.device
-        ) if self.device == 'cuda' else TokenCharacterTrie(
-            decode=self.async_llm.byte_vocab,
-            new_eos=new_eos,
-            old_eos=self.async_llm.eos_token
-        )
+    @classmethod
+    def from_llm(cls, async_llm, backend='parallel', **kwargs):
+        """Creates an AsyncTokenCharacterTrie from a language model.
 
-    def start(self):
-        if not self._task:
-            self._task = asyncio.create_task(self._background_loop())
+        Args:
+            async_llm (AsyncLM): The asynchronous language model to use
+            backend (str, optional): The trie implementation to use - either 'sequential' or 'parallel'.
+                    Defaults to 'parallel' which uses GPU acceleration when available.
+            **kwargs: Additional arguments passed to the trie constructor
+        """
+        if backend == 'sequential':
+            trie = TokenCharacterTrie(decode=async_llm.byte_vocab, **kwargs)
+        elif backend == 'parallel':
+            trie = ParallelTokenCharacterTrie(decode=async_llm.byte_vocab, **kwargs)
+        else:
+            raise ValueError(f"Unknown backend: {backend}. Must be one of ['sequential', 'parallel']")
+        return cls(trie)
 
-    async def next_token_trie(self, token_ids):
+    async def mass_sum(self, p_llm):
         if not self._task:
             self.start()
             
         future = asyncio.Future()
-        await self._queue.put((token_ids, future))
+        await self._queue.put((p_llm, future))
         return await future
 
-    async def batch_next_token_trie(self, all_token_ids):
-        p_llms = torch.exp(
-            await self.async_llm.batch_next_token_logprobs(all_token_ids)
-        )
-        masses = self.trie.batch_mass_sum(p_llms) # TODO: Cache mass sum results.
-        tries = [NextTokenTrie.from_trie(self.trie, mass) for mass in masses]
-        return tries
+    async def do_mass_sums(self, p_llms):
+        return self.trie.batch_mass_sum(torch.stack(p_llms)) # XXX handle device
+
+    def start(self):
+        if not self._task:
+            self._task = asyncio.create_task(self._background_loop())
 
     async def _background_loop(self):
         while True:
@@ -93,7 +84,7 @@ class AsyncTokenCharacterTrie:
                     futures.append(future)
 
                 logger.debug(f'Processing batch of {len(requests)} requests.')
-                results = await self.batch_next_token_trie(requests)
+                results = await self.do_mass_sums(requests)
                 
                 for future, result in zip(futures, results):
                     future.set_result(result)

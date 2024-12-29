@@ -4,21 +4,27 @@ import numpy as np
 from numba.typed import List
 
 class TokenCharacterTrie:
-    def __init__(self, decode, old_eos, new_eos):
+    def __init__(self, decode, old_eos=None, new_eos=None):
         if not all(isinstance(x, bytes) for x in decode):
             raise ValueError("All elements in decode must be byte strings")
         
-        if not isinstance(old_eos, bytes):
-            old_eos = old_eos.encode('utf-8')
-        if not isinstance(new_eos, bytes):
-            new_eos = new_eos.encode('utf-8')
+        if bool(old_eos is not None) != bool(new_eos is not None):
+            raise ValueError("Both old_eos and new_eos must be provided together, or neither should be provided")
+        
+        self.convert_eos = old_eos is not None and new_eos is not None
 
-        self.old_eos = old_eos
-        try:
-            self.old_eos_id = decode.index(old_eos)
-        except ValueError:
-            raise ValueError(f"Could not find old_eos token {old_eos} in vocabulary")
-        self.new_eos = new_eos
+        if self.convert_eos:
+            if not isinstance(old_eos, bytes):
+                old_eos = old_eos.encode('utf-8')
+            if not isinstance(new_eos, bytes):
+                new_eos = new_eos.encode('utf-8')
+
+            self.old_eos = old_eos
+            try:
+                self.old_eos_id = decode.index(old_eos)
+            except ValueError:
+                raise ValueError(f"Could not find old_eos token {old_eos} in vocabulary")
+            self.new_eos = new_eos
 
         word2leaf = {}
         children = {}
@@ -30,7 +36,7 @@ class TokenCharacterTrie:
         for token_id, word in enumerate(decode):
             # coerce old eos to new eos
             _word = word
-            if word == self.old_eos:
+            if self.convert_eos and word == self.old_eos:
                 word = self.new_eos
 
             curr = root
@@ -108,8 +114,8 @@ class TokenCharacterTrie:
                 p_llm = p_llm.cpu()
             p_llm = p_llm.numpy()
         mass = self.alloc_mass()
-        # convert llm.eos to guide.eos
-        mass[self.word2leaf[self.new_eos]] = p_llm[self.old_eos_id]
+        if self.convert_eos:
+            mass[self.word2leaf[self.new_eos]] = p_llm[self.old_eos_id]
         _update_trie_numba(
             mass=mass,
             _p=p_llm,

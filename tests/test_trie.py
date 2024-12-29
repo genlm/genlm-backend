@@ -74,25 +74,24 @@ def test_mass_sum_agreement_cpu(vocab):
 def test_mass_sum_agreement_gpu(vocab):
     _test_mass_sum_agreement(vocab, 'cuda')
 
-def _test_async_trie(mock_llm, device):
-    async_trie = AsyncTokenCharacterTrie(
-        mock_llm, new_eos=mock_llm.tokenizer.eos_token, device=device,
-    )
+def _test_async_trie(mock_llm, backend):
+    async_trie = AsyncTokenCharacterTrie.from_llm(mock_llm, backend=backend)
     all_token_ids = [[0,1,3], [10,20,30], [8,100]]
-    next_token_tries = asyncio.run(async_trie.batch_next_token_trie(all_token_ids))
-    haves = [trie.mass for trie in next_token_tries]
+    p_llms = torch.exp(asyncio.run(mock_llm.batch_next_token_logprobs(all_token_ids)))
+    
+    async def async_trie_batch_mass_sum(p_llms):
+        return await asyncio.gather(*[async_trie.mass_sum(p_llm) for p_llm in p_llms])
 
-    logp_llms = asyncio.run(mock_llm.batch_next_token_logprobs(all_token_ids))
-    wants = async_trie.trie.batch_mass_sum(np.exp(logp_llms))
+    haves = asyncio.run(async_trie_batch_mass_sum(p_llms))
+    wants = async_trie.trie.batch_mass_sum(p_llms)
 
     assert len(haves) == len(wants)
 
     for have, want in zip(haves, wants):
         assert compare(have, want).max_rel_err <= 0.001, [have, want]
 
-def test_async_trie_cpu(mock_llm):
-    _test_async_trie(mock_llm, 'cpu')
+def test_async_trie_sequential(mock_llm):
+    _test_async_trie(mock_llm, backend='sequential')
 
-@cuda_only
-def test_async_trie_gpu(mock_llm):
-    _test_async_trie(mock_llm, 'cuda')
+def test_async_trie_parallel(mock_llm):
+    _test_async_trie(mock_llm, backend='parallel')

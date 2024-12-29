@@ -30,8 +30,8 @@ class ParallelTokenCharacterTrie(TokenCharacterTrie):
     When computing masses (batch_size × num_leafs) @ M, each leaf node's mass
     flows up to all its ancestors.
     """
-    def __init__(self, decode, old_eos, new_eos, device=None):
-        super().__init__(decode, old_eos, new_eos)
+    def __init__(self, decode, device=None, **kwargs):
+        super().__init__(decode, **kwargs)
         self.device = resolve_device(device)
         self.M = self._build_reachability_matrix()
         self.token_ids = torch.tensor(
