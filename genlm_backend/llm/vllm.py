@@ -2,6 +2,7 @@ import torch
 import asyncio
 import warnings
 import numpy as np
+import concurrent.futures
 from collections import OrderedDict
 from contextlib import contextmanager
 
@@ -29,15 +30,13 @@ class AsyncVirtualLM(AsyncLM):
         """Initialize an AsyncVirtualLM instance.
 
         Args:
-            async_llm_engine (AsyncLLMEngine): The vLLM engine instance to use to process requests.
+            async_llm_engine (AsyncLLMEngine): The async vLLM engine instance.
             eos_token (str, optional): End of sequence token. If not provided, uses tokenizer's eos_token.
-                Defaults to None.
             cache_size (int, optional): Maximum size of the output cache. If 0, caching is disabled. Defaults to 0.
             cache_opts (dict, optional): Additional options to pass to the OutputCache constructor. Defaults to {}.
 
         Note:
-            The cache stores the log probabilities for previously seen token sequences to avoid
-            redundant requests. This can significantly improve performance when the same sequences are evaluated multiple times.
+            The cache stores the log probabilities for previously seen token sequences to avoid redundant requests. 
         """
         self.async_llm_engine = async_llm_engine
         self.tokenizer = async_llm_engine.engine.get_tokenizer()
@@ -50,8 +49,6 @@ class AsyncVirtualLM(AsyncLM):
     @classmethod
     def from_name(cls, model_name, engine_opts=None, **kwargs):
         """Create a AsyncVirtualLM instance from a model name.
-        
-        This is a convenience method that handles the creation and configuration of the underlying vLLM engine.
         
         Args:
             model_name: Name of the model to load
@@ -101,7 +98,13 @@ class AsyncVirtualLM(AsyncLM):
         return result
 
     def next_token_logprobs_sync(self, token_ids):
-        """Request log probabilities of next token synchronously. Synchronous version of next_token_logprobs. 
+        """Request log probabilities of next token synchronously.
+
+        Note:
+            This method is not recommended for use in async contexts. If you're already in an 
+            async context, use `await next_token_logprobs(token_ids)` instead. Calling this 
+            method from an async context will create a new thread with its own event loop to 
+            handle the async operation.
 
         Args:
             token_ids_list (List[int]): A list of token IDs, representing the prompt to the language model.
@@ -111,9 +114,15 @@ class AsyncVirtualLM(AsyncLM):
         """
         try:
             loop = asyncio.get_running_loop()
-            return loop.run_until_complete(self.next_token_logprobs(token_ids))
         except RuntimeError:
+            # No running loop.
             return asyncio.run(self.next_token_logprobs(token_ids))
+
+        # We are in a running loop.
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            return pool.submit(
+                asyncio.run, self.next_token_logprobs(token_ids)
+            ).result()
 
     default_params = SamplingParams(
         max_tokens=1, n=1, logprobs=1, detokenize=False, stop=None, ignore_eos=True
