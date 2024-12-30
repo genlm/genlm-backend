@@ -1,4 +1,4 @@
-from setuptools import setup
+from setuptools import setup, find_packages
 
 requirements = [
     'vllm',
@@ -29,5 +29,5 @@ setup(
     authors=['Ben LeBrun'],
     readme='',
     scripts=[],
-    packages=['genlm_backend'],
+    packages=find_packages(),
 )
