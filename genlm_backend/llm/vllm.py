@@ -174,9 +174,9 @@ class AsyncVirtualLM(AsyncLM):
             Tensor of log probabilities for the next token
             
         Raises:
-            AssertionError: If output structure doesn't match single-step, single-sequence format
+            AssertionError: If output structure doesn't match expected format
         """
-        assert len(outputs) == 1, 'Expected exactly one output for single-step decoding'
+        assert len(outputs) == 1, 'Expected exactly one sequence group'
         seq_group = outputs[0]
         
         assert len(seq_group.outputs) == 1, 'Expected exactly one sequence in output'
