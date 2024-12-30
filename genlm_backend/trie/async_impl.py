@@ -10,18 +10,37 @@ from genlm_backend.trie.parallel import ParallelTokenCharacterTrie
 logger = logging.getLogger(__name__)
 
 class AsyncTokenCharacterTrie:
+    """An asynchronous wrapper for TokenCharacterTrie implementations.
+
+    This class provides asynchronous access to mass sum calculations, with automatic batching of concurrent requests. 
+    It maintains a background task that processes queued requests.
+
+    Attributes:
+        trie: The underlying TokenCharacterTrie or ParallelTokenCharacterTrie instance
+        _queue (asyncio.Queue): Queue for processing mass sum requests
+        _task (asyncio.Task): Background task handling request processing
+
+    Example:
+        >>> async_trie = AsyncTokenCharacterTrie.from_llm(llm)
+        >>> mass = await async_trie.mass_sum(p_llm)
+    """
+
     def __init__(self, trie):
+        """Initialize an AsyncTokenCharacterTrie.
+
+        Args:
+            trie: The underlying TokenCharacterTrie or ParallelTokenCharacterTrie instance
+        """
         self.trie = trie
         self._queue = asyncio.Queue()
-        self._pending = {}
         self._task = None 
 
     @classmethod
     def from_llm(cls, async_llm, backend='parallel', **kwargs):
-        """Creates an AsyncTokenCharacterTrie from a language model.
+        """Creates an AsyncTokenCharacterTrie from a language model's byte vocabulary.
 
         Args:
-            async_llm (AsyncLM): The asynchronous language model to use
+            async_llm (AsyncLM): The asynchronous language model to use.
             backend (str, optional): The trie implementation to use - either 'sequential' or 'parallel'.
                     Defaults to 'parallel' which uses GPU acceleration when available.
             **kwargs: Additional arguments passed to the trie constructor
@@ -35,6 +54,17 @@ class AsyncTokenCharacterTrie:
         return cls(trie)
 
     async def mass_sum(self, p_llm):
+        """Asynchronously computes the mass at each node of the trie.
+
+        This method queues the mass calculation to be processed in a background task.
+        Multiple concurrent requests are automatically batched together.
+
+        Args:
+            p_llm (torch.Tensor): Probability distribution over the trie's vocabulary of length `len(trie.decode)`. 
+
+        Returns:
+            float: The calculated mass sum for the given distribution.
+        """
         if not self._task:
             self.start()
             
@@ -42,14 +72,31 @@ class AsyncTokenCharacterTrie:
         await self._queue.put((p_llm, future))
         return await future
 
-    async def do_mass_sums(self, p_llms):
-        return self.trie.batch_mass_sum(torch.stack(p_llms)) # XXX handle device
-
     def start(self):
+        """Start the background processing task if not already running."""
         if not self._task:
             self._task = asyncio.create_task(self._background_loop())
 
+    async def _do_mass_sums(self, p_llms):
+        """Compute mass sums for a batch of distributions.
+
+        Args:
+            p_llms (list[torch.Tensor]): List of distributions over trie vocabulary.
+
+        Returns:
+            torch.Tensor: Batch of computed mass sums
+        """
+        return self.trie.batch_mass_sum(torch.stack(p_llms)) # XXX handle device
+
     async def _background_loop(self):
+        """Background task that processes queued mass sum requests.
+        
+        Continuously monitors the queue for new requests and processes them using the underlying trie implementation.
+        
+        Raises:
+            Exception: If any error occurs during processing, it is propagated to all
+                      pending futures in the current batch.
+        """
         while True:
             try:
                 requests = []
@@ -65,7 +112,7 @@ class AsyncTokenCharacterTrie:
                     futures.append(future)
 
                 logger.debug(f'Processing batch of {len(requests)} requests.')
-                results = await self.do_mass_sums(requests)
+                results = await self._do_mass_sums(requests)
                 
                 for future, result in zip(futures, results):
                     future.set_result(result)
@@ -77,6 +124,7 @@ class AsyncTokenCharacterTrie:
                 raise
 
     def shutdown(self):
+        """Stop the background processing task and cleanup resources."""
         if self._task:
             self._task.cancel()
             self._task = None

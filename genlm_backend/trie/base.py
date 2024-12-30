@@ -4,61 +4,76 @@ import numpy as np
 from numba.typed import List
 
 class TokenCharacterTrie:
+    """A trie data structure for efficient token-to-character mapping and probability mass computation.
+
+    Each node in the trie corresponds to a token prefix. The probability mass computation provides the marginal 
+    probability of each prefix under a given distribution over the token vocabulary. 
+    
+    Args:
+        decode (list[bytes]): List of byte strings representing the vocabulary. 
+            The elements in this list correspond to the leaf nodes of the trie.
+        old_eos (str|bytes|None): Original EOS token to be converted
+        new_eos (str|bytes|None): New EOS token to convert to
+    """
     def __init__(self, decode, old_eos=None, new_eos=None):
         if not all(isinstance(x, bytes) for x in decode):
             raise ValueError("All elements in decode must be byte strings")
+
+        self.decode = decode
+        self._convert_eos(old_eos, new_eos)
+        self._build_trie()
+
+    def _convert_eos(self, old_eos, new_eos):
+        """Configure EOS token conversion settings.
         
-        if bool(old_eos is not None) != bool(new_eos is not None):
+        Args:
+            old_eos (str|bytes|None): Original EOS token to be converted
+            new_eos (str|bytes|None): New EOS token to convert to
+        
+        Raises:
+            ValueError: If only one of old_eos or new_eos is provided
+        """
+        if (old_eos is None) != (new_eos is None):
             raise ValueError("Both old_eos and new_eos must be provided together, or neither should be provided")
         
-        self.convert_eos = old_eos is not None and new_eos is not None
+        old_eos = old_eos.encode('utf-8') if old_eos and not isinstance(old_eos, bytes) else old_eos
+        new_eos = new_eos.encode('utf-8') if new_eos and not isinstance(new_eos, bytes) else new_eos
 
-        if self.convert_eos:
-            if not isinstance(old_eos, bytes):
-                old_eos = old_eos.encode('utf-8')
-            if not isinstance(new_eos, bytes):
-                new_eos = new_eos.encode('utf-8')
+        if (new_eos is not None) and (new_eos in self.decode):
+            raise ValueError(f"new_eos token {new_eos!r} already exists in vocabulary")
 
-            self.old_eos = old_eos
-            try:
-                self.old_eos_id = decode.index(old_eos)
-            except ValueError:
-                raise ValueError(f"Could not find old_eos token {old_eos} in vocabulary")
-            self.new_eos = new_eos
+        self.old_eos = old_eos
+        self.new_eos = new_eos
+        self.convert_eos = (old_eos is not None) and (new_eos is not None)
+        self.old_eos_id = self.decode.index(self.old_eos) if self.convert_eos else None
 
-        word2leaf = {}
-        children = {}
-        root = 0
-        children = [{}]
+    def _build_trie(self):
+        """Construct the trie structure from the vocabulary."""
+        self.word2leaf = {}
+        self.children = [{}]  # First node is root
+        self.root = 0
+        self.token_id_to_leaf = []
 
-        token_id_to_leaf = []
-
-        for token_id, word in enumerate(decode):
-            # coerce old eos to new eos
-            _word = word
+        for token_id, word in enumerate(self.decode):
             if self.convert_eos and word == self.old_eos:
-                word = self.new_eos
+                word = self.new_eos # coerce old eos to new eos
 
-            curr = root
+            curr = self.root
             for letter in word:
-                if letter not in children[curr]:
-                    children[curr][letter] = len(children)
-                    children.append({})
-                curr = children[curr][letter]
+                if letter not in self.children[curr]:
+                    self.children[curr][letter] = len(self.children)
+                    self.children.append({})
+                curr = self.children[curr][letter]
 
-            children[curr][None] = last = len(children)
-            children.append({})
-            assert word not in word2leaf
-            word2leaf[word] = last
+            self.children[curr][None] = last = len(self.children)
+            self.children.append({})
+            assert word not in self.word2leaf, "Can't have duplicate words in vocabulary"
+            self.word2leaf[word] = last
 
-            token_id_to_leaf.append((token_id, last))
+            self.token_id_to_leaf.append((token_id, last))
 
-        self.token_id_to_leaf = token_id_to_leaf
-        self.root = root
-        self.children = children
-        self.word2leaf = word2leaf
         self.leaf2word = dict(zip(self.word2leaf.values(), self.word2leaf.keys()))
-        self.jump = List([np.array(sorted(x.values()), dtype=np.int32) for x in children])
+        self.jump = List([np.array(sorted(x.values()), dtype=np.int32) for x in self.children])
         self.ordering = np.array(list(self._order(self.root)), np.int32)
 
         # Renumber the states of the trie so that they are named by a contiguous
@@ -82,6 +97,11 @@ class TokenCharacterTrie:
         self.node2prefix = node2prefix
 
     def rename(self, f):
+        """Rename all node indices in the trie using the provided mapping function.
+        
+        Args:
+            f (callable): Function that maps old node indices to new node indices
+        """
         N = len(self.children)
 
         new_children = [{} for _ in range(N)]
@@ -106,9 +126,23 @@ class TokenCharacterTrie:
         )
 
     def alloc_mass(self):
+        """Allocate an array to store probability mass values for all nodes.
+        
+        Returns:
+            np.ndarray: Zero-initialized array for storing probability mass values
+        """
         return np.zeros(len(self.children), dtype=np.float64)
 
     def mass_sum(self, p_llm):
+        """Compute probability mass for each node in the trie.
+        
+        Args:
+            p_llm (torch.Tensor|np.ndarray): Token probabilities from language model
+            
+        Returns:
+            np.ndarray: Probability mass values for each node in the trie. 
+                The mass corresponds to the marginal probability under `p_llm` of the prefix represented by the node.
+        """
         if isinstance(p_llm, torch.Tensor):
             if p_llm.device.type != 'cpu':
                 p_llm = p_llm.cpu()
@@ -126,10 +160,25 @@ class TokenCharacterTrie:
         return mass
 
     def batch_mass_sum(self, p_llms):
+        """Compute probability mass for multiple distributions over tokens.
+        
+        Args:
+            p_llms (list[torch.Tensor|np.ndarray]): Batch of token probability distributions
+            
+        Returns:
+            np.ndarray: Batch of probability mass values for each node in the trie
+        """
         return np.array([self.mass_sum(p_llm) for p_llm in p_llms])
 
     def _order(self, node):
-        "Topological ordering of nodes beneath `node`."
+        """Generate a topological ordering of nodes beneath the given node.
+        
+        Args:
+            node (int): Starting node index
+            
+        Yields:
+            int: Node indices in topological order
+        """
         for a in self.children[node]:
             if a is None:
                 pass
@@ -138,7 +187,14 @@ class TokenCharacterTrie:
         yield node
 
     def _order_full(self, node):
-        "Topological ordering of nodes beneath `node`."
+        """Generate a complete topological ordering including all child nodes.
+        
+        Args:
+            node (int): Starting node index
+            
+        Yields:
+            int: Node indices in complete topological order
+        """
         for a in self.children[node]:
             yield from self._order_full(self.children[node][a])
         yield node
