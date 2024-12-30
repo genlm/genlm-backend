@@ -26,6 +26,10 @@ from genlm_backend.cache import OutputCache
 
 class AsyncVirtualLM(AsyncLM): 
 
+    default_params = SamplingParams(
+        max_tokens=1, n=1, logprobs=1, detokenize=False, stop=None, ignore_eos=True
+    )
+
     def __init__(self, async_llm_engine, eos_token=None, cache_size=0, cache_opts={}):
         """Initialize an AsyncVirtualLM instance.
 
@@ -43,6 +47,8 @@ class AsyncVirtualLM(AsyncLM):
         self.request_counter = Counter()
         self.custom_sampler = DeferredSampler()
         self.cache = OutputCache(maxsize=cache_size, **cache_opts) if cache_size > 0 else None
+        
+        async_llm_engine.engine.log_stats = False
 
         super().__init__(tokenizer=self.tokenizer, eos_token=eos_token)
 
@@ -53,7 +59,7 @@ class AsyncVirtualLM(AsyncLM):
         Args:
             model_name: Name of the model to load
             engine_opts: Additional options to pass to the AsyncLLMEngine. The engine will be 
-                configured with prefix caching enabled and request logging disabled by default.
+                configured with prefix caching enabled and async output processing disabled by default.
             **kwargs: Additional arguments passed to AsyncVirtualLM constructor
             
         Returns:
@@ -65,6 +71,7 @@ class AsyncVirtualLM(AsyncLM):
         engine_opts = {
             'enable_prefix_caching': True,
             'disable_log_requests': True,
+            'disable_async_output_proc': True,
             **(engine_opts or {})
         }
         
@@ -97,6 +104,28 @@ class AsyncVirtualLM(AsyncLM):
         
         return result
 
+    async def _next_token_logprobs(self, token_ids):
+        """Request log probabilities of next token asynchronously. 
+        
+        Args:
+            token_ids_list (List[int]): A list of token IDs, representing the prompt to the language model.
+                
+        Returns:
+            torch.Tensor: Normalized log probability tensor.
+        """
+        request_id = str(next(self.request_counter))
+        prompt = TokensPrompt(prompt_token_ids=token_ids)
+        
+        outputs = []
+        with self._optimized_sampling_context():
+            async for output in self.async_llm_engine.generate(
+                prompt=prompt, sampling_params=self.default_params, request_id=request_id
+            ):
+                if output.finished:
+                    outputs.append(output)
+
+        return self._validate_outputs(outputs)
+
     def next_token_logprobs_sync(self, token_ids):
         """Request log probabilities of next token synchronously.
 
@@ -118,66 +147,45 @@ class AsyncVirtualLM(AsyncLM):
             # No running loop.
             return asyncio.run(self.next_token_logprobs(token_ids))
 
-        # We are in a running loop.
+        # We are in a running loop. XXX 
         with concurrent.futures.ThreadPoolExecutor() as pool:
             return pool.submit(
                 asyncio.run, self.next_token_logprobs(token_ids)
             ).result()
 
-    default_params = SamplingParams(
-        max_tokens=1, n=1, logprobs=1, detokenize=False, stop=None, ignore_eos=True
-    )
-
-    async def _next_token_logprobs(self, token_ids):
-        """Request log probabilities of next token asynchronously. 
-        
-        Args:
-            token_ids_list (List[int]): A list of token IDs, representing the prompt to the language model.
-                
-        Returns:
-            torch.Tensor: Normalized log probability tensor.
-        """
-        request_id = str(next(self.request_counter))
-        prompt = TokensPrompt(prompt_token_ids=token_ids)
-        outputs = []
-        with self._optimized_sampling_context():
-            async for output in self.async_llm_engine.generate(
-                prompt=prompt, sampling_params=self.default_params, request_id=request_id
-            ):
-                if output.finished:
-                    outputs.append(output)
-
-        return self._validate_outputs(outputs)
-
     @contextmanager
     def _optimized_sampling_context(self):
         """Context manager for optimized sampling configuration."""
         model = self.async_llm_engine.engine.model_executor.driver_worker.model_runner.model
-        schedulers = self.async_llm_engine.engine.scheduler
-        
-        original_state = {
-            'sampler': model.sampler,
-            'async_procs': [s._allow_async_output_proc for s in schedulers]
-        }
-        
+        original_sampler = model.sampler
         try:
             model.sampler = self.custom_sampler
-            for scheduler in schedulers:
-                scheduler._allow_async_output_proc = lambda x: False
             yield
         finally:
-            model.sampler = original_state['sampler']
-            for scheduler, orig_proc in zip(schedulers, original_state['async_procs']):
-                scheduler._allow_async_output_proc = orig_proc
+            model.sampler = original_sampler
 
     def _validate_outputs(self, outputs):
-        """Validate and extract logprobs from a vLLM output."""
-        assert len(outputs) == 1 # Single step decoding.
-        output = outputs[0]
-        assert len(output.outputs) == 1 # Single sequence.
-        sequence = output.outputs[0]
-        assert len(sequence.logprobs) == 1 
-        return sequence.logprobs[0].logprobs
+        """Validate and extract logprobs from a vLLM output.
+        
+        Args:
+            outputs: List of sequence group outputs from vLLM generation
+            
+        Returns:
+            Tensor of log probabilities for the next token
+            
+        Raises:
+            AssertionError: If output structure doesn't match single-step, single-sequence format
+        """
+        assert len(outputs) == 1, 'Expected exactly one output for single-step decoding'
+        seq_group = outputs[0]
+        
+        assert len(seq_group.outputs) == 1, 'Expected exactly one sequence in output'
+        sequence = seq_group.outputs[0]
+        
+        assert len(sequence.logprobs) == 1, 'Expected exactly one set of logprobs'
+        token_logprobs = sequence.logprobs[0].logprobs
+        
+        return token_logprobs
 
     def clear_cache(self):
         self.cache.clear()
@@ -188,18 +196,8 @@ class AsyncVirtualLM(AsyncLM):
 
     def _cleanup_engine(self):
         """Clean up the vLLM engine and associated resources."""
-        if not hasattr(self, 'async_llm_engine'):
-            return
-            
-        async_engine = self.async_llm_engine
-        async_engine.shutdown_background_loop()
-        
-        if executor := getattr(async_engine.engine, 'model_executor', None):
-            destroy_model_parallel()
-            destroy_distributed_environment()
-            del executor
-            
-        del async_engine
+        if async_engine := getattr(self, 'async_llm_engine', None):
+            async_engine.shutdown_background_loop()
 
 class DeferredSampler(torch.nn.Module):
     """A custom vLLM sampler optimized for efficient next-token probability calculations.
