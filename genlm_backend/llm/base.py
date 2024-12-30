@@ -6,6 +6,15 @@ from abc import ABC, abstractmethod
 from genlm_backend.tokenization import decode_vocab
 
 class AsyncLM(ABC):
+    """Abstract base class for asynchronous language models.
+    
+    This class provides an interface for language models that can generate token probabilities
+    asynchronously. It handles tokenization and vocabulary management.
+
+    Args:
+        tokenizer: A tokenizer instance compatible with the language model
+        eos_token (str, optional): End of sequence token. If None, uses tokenizer's eos_token
+    """
     def __init__(self, tokenizer, eos_token=None):
         self.tokenizer = tokenizer
         self.byte_vocab, self.str_vocab = decode_vocab(self.tokenizer)
@@ -50,6 +59,12 @@ class AsyncLM(ABC):
 
 
 class MockAsyncLM(AsyncLM):
+    """Mock implementation of AsyncLM used for testing.
+    
+    Args:
+        tokenizer: A HuggingFace tokenizer
+        eos_token (str, optional): End of sequence token. If None, uses tokenizer's eos_token
+    """
     def __init__(self, tokenizer, eos_token=None):
         super().__init__(tokenizer, eos_token)
         self._rng = np.random.RandomState(42)
