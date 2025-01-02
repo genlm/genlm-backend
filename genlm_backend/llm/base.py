@@ -53,9 +53,11 @@ class AsyncLM(ABC):
         Returns:
             torch.Tensor: A tensor of log probability tensors.
         """
-        return torch.stack(await asyncio.gather(
+        logprobs = await asyncio.gather(
             *[self.next_token_logprobs(token_ids) for token_ids in token_ids_list]
-        ))
+        )
+
+        return torch.stack(logprobs)
 
 
 class MockAsyncLM(AsyncLM):

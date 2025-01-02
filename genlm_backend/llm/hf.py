@@ -234,7 +234,7 @@ class AsyncTransformer(AsyncLM):
     def walk_cache(self, token_ids):
         # Walk while tokens can be found
         node = self.cache
-        next_token_index = 1
+        next_token_index = 0
 
         past = None
         base = 0
@@ -260,7 +260,8 @@ class AsyncTransformer(AsyncLM):
         Returns:
             logprobs (torch.Tensor): a tensor of `len(vocab)`, with the language model's log (normalized) probabilities for the next token following the prompt.
         """
-        assert token_ids, 'Token ids must not be empty'
+        if not token_ids:
+            raise ValueError('Token ids must not be empty')
 
         node, next_token_index, past, base = self.walk_cache(token_ids)
 
@@ -288,6 +289,8 @@ class AsyncTransformer(AsyncLM):
         Returns:
             logprobs (torch.Tensor): a tensor of `len(vocab)`, with the language model's log (normalized) probabilities for the next token following the prompt.
         """
+        if not token_ids:
+            raise ValueError('Token ids must not be empty')
 
         # Walk while tokens can be found
         node, next_token_index, past, base = self.walk_cache(token_ids)
@@ -304,3 +307,23 @@ class AsyncTransformer(AsyncLM):
         node = node.extend_cache(next_token_index, token_ids, logits, base)
 
         return node.logprobs
+
+    async def next_token_logprobs_uncached(self, token_ids):
+        """Request log probabilities of next token. No KV or output caching, and does not support auto-batching.
+
+        Args:
+            token_ids (list[int]): a list of token ids, representing a prompt to the language model.
+
+        Returns:
+            logprobs (torch.Tensor): a tensor of `len(vocab)`, with the language model's log (normalized) probabilities for the next token following the prompt.
+        """
+        if not token_ids:
+            raise ValueError('Token ids must not be empty')
+
+        with torch.no_grad():
+            logits = self.model(
+                torch.tensor([token_ids]).to(self.device),
+                past_key_values=None,
+                use_cache=False,
+            ).logits[0]
+            return logits[0].log_softmax(dim=0, dtype=torch.float)

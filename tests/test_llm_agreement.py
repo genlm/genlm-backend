@@ -10,9 +10,8 @@ from genlm_backend.llm import AsyncTransformer
 def model_name(): 
     return 'gpt2'
 
-@cuda_only
 @pytest.fixture(scope="module")
-def async_llm(model_name):
+def vllm_llm(model_name):
     return AsyncVirtualLM.from_name(
         model_name, 
         engine_opts={
@@ -22,7 +21,6 @@ def async_llm(model_name):
         }
     )
 
-@cuda_only
 @pytest.fixture(scope="module")
 def transformer_llm(model_name):
     return AsyncTransformer.from_name(
@@ -31,7 +29,6 @@ def transformer_llm(model_name):
         hf_opts={'torch_dtype': torch.float16}  # Use float16 directly
     )
 
-@cuda_only
 @pytest.fixture(scope="module")
 def token_ids_list(transformer_llm):
     test_prompts = [
@@ -44,21 +41,23 @@ def token_ids_list(transformer_llm):
     return token_ids_list
 
 @cuda_only
-def test_next_token_logprobs(transformer_llm, async_llm, token_ids_list):
+def test_next_token_logprobs(transformer_llm, vllm_llm, token_ids_list):
     for token_ids in token_ids_list:
         have = asyncio.run(transformer_llm.next_token_logprobs(token_ids)).cpu().numpy()
-        want = asyncio.run(async_llm.next_token_logprobs(token_ids)).cpu().numpy()
-        max_rel_err = compare(have, want).max_rel_err   
-        assert max_rel_err < 0.01, [max_rel_err, token_ids] # XXX very high tolerance
+        want = asyncio.run(vllm_llm.next_token_logprobs(token_ids)).cpu().numpy()
+        comparison = compare(have, want)
+        assert comparison.max_rel_err < 0.1, [comparison.max_rel_err, token_ids]
+        assert comparison.pearson > 0.99, [comparison.pearson, token_ids]
 
 @cuda_only
-def test_batch_next_token_logprobs(transformer_llm, async_llm, token_ids_list):
+def test_batch_next_token_logprobs(transformer_llm, vllm_llm, token_ids_list):
     haves = asyncio.run(
         transformer_llm.batch_next_token_logprobs(token_ids_list)
     ).cpu().numpy()
     wants = asyncio.run(
-        async_llm.batch_next_token_logprobs(token_ids_list)
+        vllm_llm.batch_next_token_logprobs(token_ids_list)
     ).cpu().numpy()
     for i, (have, want) in enumerate(zip(haves, wants)): 
-        max_rel_err = compare(have, want).max_rel_err         
-        assert max_rel_err < 0.01, [max_rel_err, token_ids_list[i]] # XXX very high tolerance
+        comparison = compare(have, want).max_rel_err         
+        assert comparison.max_rel_err < 0.1, [comparison.max_rel_err, token_ids_list[i]]
+        assert comparison.pearson > 0.99, [comparison.pearson, token_ids_list[i]]

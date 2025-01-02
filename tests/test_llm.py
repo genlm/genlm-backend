@@ -9,12 +9,10 @@ from genlm_backend.llm.vllm_reference import ReferenceVirtualLM
 def model_name(): 
     return 'gpt2'
 
-@cuda_only
 @pytest.fixture(scope="module")
 def reference_llm(model_name):
     return ReferenceVirtualLM.from_name(model_name, llm_opts={'gpu_memory_utilization': 0.45})
 
-@cuda_only
 @pytest.fixture(scope="module")
 def async_llm(model_name):
     return AsyncVirtualLM.from_name(model_name, engine_opts={'gpu_memory_utilization': 0.45})
