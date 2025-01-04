@@ -161,9 +161,18 @@ class AsyncTransformer(AsyncLM):
         if len(queries) == 0:
             return
 
-        past_example = next((q.past for q in queries if q.past), False)
-        max_past_length = max(q.past_len for q in queries)
-        max_query_length = max(len(q.prompt) for q in queries)
+        # Group duplicate queries to avoid redundant computation
+        query_groups = defaultdict(list)
+        for query in queries:
+            key = tuple(query.prompt) # XXX: cache based on past_len too?
+            query_groups[key].append(query)
+
+        # Use one representative query from each group
+        unique_queries = [group[0] for group in query_groups.values()]
+
+        past_example = next((q.past for q in unique_queries if q.past), False)
+        max_past_length = max(q.past_len for q in unique_queries)
+        max_query_length = max(len(q.prompt) for q in unique_queries)
 
         padding_token_id = (
             self.tokenizer.pad_token_id
@@ -214,8 +223,10 @@ class AsyncTransformer(AsyncLM):
             use_cache=pasts is not None,
         )
 
-        for i, q in enumerate(queries):
-            q.future.set_result(results.logits[i])
+        for i, q in enumerate(unique_queries):
+            result = results.logits[i]
+            for dup_query in query_groups[tuple(q.prompt)]:
+                dup_query.future.set_result(result)
 
     @torch.no_grad()
     def add_query(self, query, future, past):
@@ -308,7 +319,7 @@ class AsyncTransformer(AsyncLM):
 
         return node.logprobs
 
-    async def next_token_logprobs_uncached(self, token_ids):
+    def next_token_logprobs_uncached(self, token_ids):
         """Request log probabilities of next token. No KV or output caching, and does not support auto-batching.
 
         Args:
@@ -326,4 +337,4 @@ class AsyncTransformer(AsyncLM):
                 past_key_values=None,
                 use_cache=False,
             ).logits[0]
-            return logits[0].log_softmax(dim=0, dtype=torch.float)
+            return logits[-1].log_softmax(dim=0, dtype=torch.float)
