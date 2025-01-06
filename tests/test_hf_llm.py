@@ -1,5 +1,6 @@
 import pytest
 import asyncio
+from conftest import cuda_only
 from arsenal.maths import compare
 from genlm_backend.llm import AsyncTransformer
 
@@ -11,6 +12,7 @@ def model_name():
 def async_llm(model_name):
     return AsyncTransformer.from_name(model_name)
 
+@cuda_only
 def test_async_batching(async_llm):
     test_prompts = [
         "There might be something wrong",
@@ -30,6 +32,7 @@ def test_async_batching(async_llm):
         max_rel_err = compare(have, want).max_rel_err
         assert max_rel_err == 0, [max_rel_err, token_ids_list[i]]
 
+@cuda_only
 def test_caching(async_llm):
     async_llm.clear_cache()
 
