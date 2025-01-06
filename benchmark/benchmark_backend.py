@@ -35,4 +35,4 @@ def test_await_next_token_logprobs(benchmark, model):
 def test_await_batch_next_token_logprobs(benchmark, model, batch_size=20):
     llm = load_model(model, batch_size=batch_size)
     batches = token_prefix_batches(text, tokenizer=llm.tokenizer, batch_size=batch_size)
-    run_await_batch_next_token_logprobs(benchmark=benchmark, llm=llm, batches=batches)
+    run_await_batch_next_token_logprobs(benchmark=benchmark, llm=llm, batches=batches, rounds=50, warmup_rounds=10)
