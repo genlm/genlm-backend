@@ -1,4 +1,3 @@
-import io
 import torch
 import logging
 import asyncio
@@ -22,6 +21,9 @@ try:
 except ImportError:
     HAS_VLLM = False
     warnings.warn("vLLM not installed. Run 'pip install vllm' to use the vLLM-based AsyncLM model.")
+
+if HAS_VLLM:
+    logging.getLogger('vllm.engine.async_llm_engine').setLevel(logging.WARNING)
 
 from genlm_backend.llm.base import AsyncLM
 from genlm_backend.cache import OutputCache
