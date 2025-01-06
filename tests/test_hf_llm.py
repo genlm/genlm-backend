@@ -1,6 +1,5 @@
 import pytest
 import asyncio
-from conftest import cuda_only
 from arsenal.maths import compare
 from genlm_backend.llm import AsyncTransformer
 
@@ -12,12 +11,11 @@ def model_name():
 def async_llm(model_name):
     return AsyncTransformer.from_name(model_name)
 
-@cuda_only
-def test_batch_next_token_logprobs(async_llm):
+def test_async_batching(async_llm):
     test_prompts = [
         "There might be something wrong",
         "with the language model code",
-        "with the language model code", # check duplicate logic
+        "with the language model code", # Check duplicate query logic
         "It's probably this or that",
     ]
     token_ids_list = [async_llm.tokenizer.encode(p) for p in test_prompts]
@@ -30,21 +28,28 @@ def test_batch_next_token_logprobs(async_llm):
 
     for i, (have, want) in enumerate(zip(haves, wants)):
         max_rel_err = compare(have, want).max_rel_err
-        assert max_rel_err < 1e-5, [max_rel_err, token_ids_list[i]]
+        assert max_rel_err == 0, [max_rel_err, token_ids_list[i]]
 
-@cuda_only
 def test_caching(async_llm):
-    preprompt = async_llm.tokenizer.encode('There might be something wrong ')
-    prompt = preprompt + async_llm.tokenizer.encode('with the caching logic', add_special_tokens=False)
+    async_llm.clear_cache()
+
+    preprompt = async_llm.tokenizer.encode('There might be something wrong')
+    prompt = preprompt + async_llm.tokenizer.encode(' with the caching logic', add_special_tokens=False)
     
+    # Cache preprompt
     have = asyncio.run(async_llm.next_token_logprobs(preprompt)).cpu().numpy()
     want = async_llm.next_token_logprobs_uncached(preprompt).cpu().numpy()
 
     max_rel_err = compare(have, want).max_rel_err
-    assert max_rel_err < 5e-4, max_rel_err
+    assert max_rel_err == 0, max_rel_err # Sanity check
+
+    curr = async_llm.cache
+    for token_id in preprompt:
+        assert curr.has_token(token_id), token_id
+        curr = curr.get_token(token_id)
 
     have = asyncio.run(async_llm.next_token_logprobs(prompt)).cpu().numpy()
     want = async_llm.next_token_logprobs_uncached(prompt).cpu().numpy()
 
     max_rel_err = compare(have, want).max_rel_err
-    assert max_rel_err < 5e-4, max_rel_err
+    assert max_rel_err == 0, max_rel_err

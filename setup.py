@@ -16,7 +16,8 @@ test_requirements = [
     'arsenal @ git+https://github.com/timvieira/arsenal',
     'datasets', # for wikitext corpus
     'viztracer', # for profiling
-    'pytest-benchmark'
+    'pytest-benchmark',
+    'IPython' # missing dep in arsenal
 ]
 
 setup(

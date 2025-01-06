@@ -1,4 +1,6 @@
+import io
 import torch
+import logging
 import asyncio
 import warnings
 import numpy as np
@@ -19,7 +21,7 @@ try:
     HAS_VLLM = True
 except ImportError:
     HAS_VLLM = False
-    warnings.warn("vLLM not installed. Run 'pip install vllm' for faster serving.")
+    warnings.warn("vLLM not installed. Run 'pip install vllm' to use the vLLM-based AsyncLM model.")
 
 from genlm_backend.llm.base import AsyncLM
 from genlm_backend.cache import OutputCache
@@ -49,6 +51,8 @@ class AsyncVirtualLM(AsyncLM):
         self.cache = OutputCache(maxsize=cache_size, **cache_opts) if cache_size > 0 else None
         
         async_llm_engine.engine.log_stats = False
+
+        self.thread_logs = []
 
         super().__init__(tokenizer=self.tokenizer, eos_token=eos_token)
 
@@ -113,13 +117,13 @@ class AsyncVirtualLM(AsyncLM):
         Returns:
             torch.Tensor: Normalized log probability tensor.
         """
-        request_id = str(next(self.request_counter))
+        req_id = str(next(self.request_counter))
         prompt = TokensPrompt(prompt_token_ids=token_ids)
         
         outputs = []
         with self._optimized_sampling_context():
             async for output in self.async_llm_engine.generate(
-                prompt=prompt, sampling_params=self.default_params, request_id=request_id
+                prompt=prompt, sampling_params=self.default_params, request_id=req_id
             ):
                 if output.finished:
                     outputs.append(output)
@@ -147,12 +151,10 @@ class AsyncVirtualLM(AsyncLM):
             # No running loop.
             return asyncio.run(self.next_token_logprobs(token_ids))
 
-        # We are in a running loop. XXX 
+        # We are in a running loop.
         with concurrent.futures.ThreadPoolExecutor() as pool:
-            return pool.submit(
-                asyncio.run, self.next_token_logprobs(token_ids)
-            ).result()
-
+            return pool.submit(asyncio.run, self.next_token_logprobs(token_ids)).result()
+    
     @contextmanager
     def _optimized_sampling_context(self):
         """Context manager for optimized sampling configuration."""

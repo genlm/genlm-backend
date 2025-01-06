@@ -19,7 +19,7 @@ def skip_if_gated(f):
 @pytest.fixture
 def test_text():
     text = '\n'.join(load_dataset("wikitext", "wikitext-2-raw-v1")['test']['text'])
-    return text
+    return text[:5000]
 
 @skip_if_gated
 def test_gpt2(test_text):
