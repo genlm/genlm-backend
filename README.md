@@ -1,4 +1,4 @@
-[![Docs](https://github.com/probcomp/genlm-backend/actions/workflows/docs.yml/badge.svg)](https://github.com/probcomp/genlm-backend/actions/workflows/docs.yml)
+[![Docs](https://github.com/probcomp/genlm-backend/actions/workflows/docs.yml/badge.svg)](https://probcomp.github.io/genlm-backend/)
 [![Tests](https://github.com/probcomp/genlm-backend/actions/workflows/pytest.yml/badge.svg)](https://github.com/probcomp/genlm-backend/actions/workflows/pytest.yml)
 
 # GenLM Backend
