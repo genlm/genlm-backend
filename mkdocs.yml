@@ -27,7 +27,7 @@ plugins:
   - section-index
 
 nav:
-  - Home: ../README.md
+  - Home: index.md
   - Code Reference: reference/
 
 markdown_extensions:
