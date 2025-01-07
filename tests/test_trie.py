@@ -75,7 +75,7 @@ def test_mass_sum_agreement_gpu(vocab):
     _test_mass_sum_agreement(vocab, 'cuda')
 
 def _test_async_trie(mock_llm, backend):
-    async_trie = AsyncTokenCharacterTrie.from_llm(mock_llm, backend=backend)
+    async_trie = AsyncTokenCharacterTrie.from_vocab(mock_llm.byte_vocab, backend=backend)
     all_token_ids = [[0,1,3], [10,20,30], [8,100]]
     p_llms = torch.exp(asyncio.run(mock_llm.batch_next_token_logprobs(all_token_ids)))
     
