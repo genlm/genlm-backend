@@ -6,7 +6,7 @@ GenLM Backend is a high-performance backend for language model probabilistic pro
 
 * **Asynchronous LLM Interfaces**: Asynchronous computation of next-token probabilities with `vllm` and `transformer` language models.
 * **Tokenizer Vocabulary Decoding**: Decode Hugging Face tokenizer vocabularies into their byte and string representations.
-* **Token-Character Tries**: Efficient conversion from token distributions to byte-level distributions using a trie datastructure.
+* **Token-Character Tries**: Efficient conversion from token distributions to byte level distributions using a trie datastructure.
 
 ## Quick Start
 
@@ -30,7 +30,7 @@ pip install -e ".[test,docs]"
 
 ### Asynchronous Language Model Backends
 
-The [`genlm_backend.llm`](reference/genlm_backend/llm/__init__/) module provides interfaces for language models that can generate distributions over the next token asynchronously, with support for vLLM and HuggingFace language models. 
+The [`genlm_backend.llm`](reference/genlm_backend/llm/__init__/) module provides asynchronous interfaces for computing next-token probabilities with `vllm` and `transformer` language models.
 
 ```python
 from genlm_backend.llm import AsyncVirtualLM
@@ -88,9 +88,9 @@ trie.visualize(mass)
 
 This submodule includes three key classes:
 
-- **TokenCharacterTrie** (CPU): Base implementation. For CPU usage.
-- **ParallelTokenCharacterTrie** (GPU): GPU-optimized version which uses sparse matrix operations for mass summing. Extends **TokenCharacterTrie** with a `batch_mass_sum` function.
-- **AsyncTokenCharacterTrie** (Async): Asynchronous wrapper with automatic request batching. For use in asynchronous contexts; this class can wrap either the sequential or parallel trie implementations.
+- **TokenCharacterTrie** (CPU): Base implementation for CPU usage.
+- **ParallelTokenCharacterTrie** (GPU): GPU-accelerated version which uses sparse matrix operations for mass summing. Extends **TokenCharacterTrie** with a `batch_mass_sum` function.
+- **AsyncTokenCharacterTrie** (Async): Asynchronous wrapper with automatic request batching. For use in asynchronous contexts; enables automatic batching of concurrent requests. This class can wrap either the sequential or parallel trie implementations.
 
 See the [Trie Code Reference](reference/genlm_backend/trie/__init__/) for detailed API documentation.
 
