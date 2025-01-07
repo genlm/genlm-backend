@@ -9,18 +9,19 @@ from genlm_backend.tokenization.bytes import ByteVocabError, get_byte_vocab
 def decode_vocab(tokenizer, byte2str_fallback='tokenizer'):
     """Convert tokenizer vocabulary into byte and string representations.
     
-    The byte representation is the canonical form. The string representation is provided for 
-    convenience but may not decode properly for all tokens, especially those containing invalid UTF-8 sequences.
+    Warning:
+        The byte representation is the canonical form. The string representation is provided for 
+        convenience but may not decode properly for all tokens, especially those containing invalid UTF-8 sequences.
     
     Args:
         tokenizer: A Hugging Face tokenizer instance
-        byte2str_fallback: Strategy for converting invalid UTF-8 bytes to strings. Options:
-            - 'tokenizer': Use tokenizer's convert_ids_to_tokens (default)
+        byte2str_fallback (str): Strategy for converting invalid UTF-8 bytes to strings. Options:\n
+            - 'tokenizer': Use tokenizer's `convert_ids_to_tokens` (default)
             - 'latin1': Decode using latin1 encoding
             - 'replace': Use Unicode replacement character '�'
     
     Returns:
-        tuple: (byte_vocab, str_vocab)
+        (tuple): (byte_vocab, str_vocab)
     """
     if byte2str_fallback not in ['latin1', 'tokenizer', 'replace']:
         raise ValueError(f"Unknown byte2str_fallback strategy: {byte2str_fallback}")

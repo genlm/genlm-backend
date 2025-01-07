@@ -8,13 +8,9 @@ from collections import OrderedDict
 from contextlib import contextmanager
 
 try:
-    from vllm import LLM, AsyncLLMEngine, SamplingParams, AsyncEngineArgs
+    from vllm import AsyncLLMEngine, SamplingParams, AsyncEngineArgs
     from vllm.utils import Counter
     from vllm.inputs import TokensPrompt
-    from vllm.distributed.parallel_state import (
-        destroy_model_parallel,
-        destroy_distributed_environment,
-    )
     from vllm.model_executor.layers.sampler import SamplerOutput, Sampler
     from vllm.sequence import SequenceOutput, CompletionSequenceGroupOutput, Logprob
     HAS_VLLM = True
@@ -29,22 +25,27 @@ from genlm_backend.llm.base import AsyncLM
 from genlm_backend.cache import OutputCache
 
 class AsyncVirtualLM(AsyncLM): 
+    """A wrapper around vLLM's `AsyncLLMEngine` for asynchronous next token log probability computations.
+
+    This class provides an asynchronous interface for computing log probabilities using vLLM's engine. 
+    It is optimized for next token log probability computations and supports caching of results (outputs and KV).
+    """
 
     default_params = SamplingParams(
         max_tokens=1, n=1, logprobs=1, detokenize=False, stop=None, ignore_eos=True
     )
 
     def __init__(self, async_llm_engine, eos_token=None, cache_size=0, cache_opts={}):
-        """Initialize an AsyncVirtualLM instance.
+        """Initialize an `AsyncVirtualLM` instance.
 
         Args:
             async_llm_engine (AsyncLLMEngine): The async vLLM engine instance.
             eos_token (str, optional): End of sequence token. If not provided, uses tokenizer's eos_token.
             cache_size (int, optional): Maximum size of the output cache. If 0, caching is disabled. Defaults to 0.
-            cache_opts (dict, optional): Additional options to pass to the OutputCache constructor. Defaults to {}.
+            cache_opts (dict, optional): Additional options to pass to the [`OutputCache`][genlm_backend.cache.OutputCache] constructor. Defaults to {}.
 
         Note:
-            The cache stores the log probabilities for previously seen token sequences to avoid redundant requests. 
+            The cache stores the log probabilities for previously seen token sequences to avoid redundant requests. KV caching is handled internally by the vLLM engine. 
         """
         self.async_llm_engine = async_llm_engine
         self.tokenizer = async_llm_engine.engine.get_tokenizer()
@@ -54,22 +55,20 @@ class AsyncVirtualLM(AsyncLM):
         
         async_llm_engine.engine.log_stats = False
 
-        self.thread_logs = []
-
         super().__init__(tokenizer=self.tokenizer, eos_token=eos_token)
 
     @classmethod
     def from_name(cls, model_name, engine_opts=None, **kwargs):
-        """Create a AsyncVirtualLM instance from a model name.
+        """Create a `AsyncVirtualLM` instance from a model name.
         
         Args:
-            model_name: Name of the model to load
-            engine_opts: Additional options to pass to the AsyncLLMEngine. The engine will be 
+            model_name (str): Name of the model to load.
+            engine_opts (dict): Additional options to pass to the `AsyncLLMEngine`. The engine will be 
                 configured with prefix caching enabled and async output processing disabled by default.
-            **kwargs: Additional arguments passed to AsyncVirtualLM constructor
+            **kwargs: Additional arguments passed to `AsyncVirtualLM` constructor.
             
         Returns:
-            An AsyncVirtualLM instance
+            (AsyncVirtualLM): An `AsyncVirtualLM` instance.
         """
         if not HAS_VLLM:
             raise ImportError("vLLM not available. Install vLLM or use AsyncTransformer instead.")
@@ -93,10 +92,10 @@ class AsyncVirtualLM(AsyncLM):
         """Request log probabilities of next token asynchronously with output caching.
         
         Args:
-            token_ids_list (List[int]): A list of token IDs, representing the prompt to the language model.
+            token_ids_list (list[int]): A list of token IDs, representing a prompt to the language model.
                 
         Returns:
-            torch.Tensor: Normalized log probability tensor.
+            result (torch.Tensor): Normalized log probability tensor.
         """
         key = tuple(token_ids) 
         
@@ -114,10 +113,10 @@ class AsyncVirtualLM(AsyncLM):
         """Request log probabilities of next token asynchronously. 
         
         Args:
-            token_ids_list (List[int]): A list of token IDs, representing the prompt to the language model.
+            token_ids_list (list[int]): A list of token IDs, representing a prompt to the language model.
                 
         Returns:
-            torch.Tensor: Normalized log probability tensor.
+            (torch.Tensor): Normalized log probability tensor.
         """
         req_id = str(next(self.request_counter))
         prompt = TokensPrompt(prompt_token_ids=token_ids)
@@ -142,10 +141,10 @@ class AsyncVirtualLM(AsyncLM):
             handle the async operation.
 
         Args:
-            token_ids_list (List[int]): A list of token IDs, representing the prompt to the language model.
+            token_ids_list (list[int]): A list of token IDs, representing a prompt to the language model.
                 
         Returns:
-            torch.Tensor: Normalized log probability tensor.
+            (torch.Tensor): Normalized log probability tensor.
         """
         try:
             loop = asyncio.get_running_loop()
@@ -192,6 +191,7 @@ class AsyncVirtualLM(AsyncLM):
         return token_logprobs
 
     def clear_cache(self):
+        """Clear output cache."""
         self.cache.clear()
 
     def __del__(self):
@@ -202,6 +202,7 @@ class AsyncVirtualLM(AsyncLM):
         """Clean up the vLLM engine and associated resources."""
         if async_engine := getattr(self, 'async_llm_engine', None):
             async_engine.shutdown_background_loop()
+
 
 class DeferredSampler(torch.nn.Module):
     """A custom vLLM sampler optimized for efficient next-token probability calculations.

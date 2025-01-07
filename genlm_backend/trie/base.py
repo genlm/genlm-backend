@@ -8,14 +8,17 @@ class TokenCharacterTrie:
 
     Each node in the trie corresponds to a token prefix. The probability mass computation provides the marginal 
     probability of each prefix under a given distribution over the token vocabulary. 
-    
-    Args:
-        decode (list[bytes]): List of byte strings representing the vocabulary. 
-            The elements in this list correspond to the leaf nodes of the trie.
-        old_eos (str|bytes|None): Original EOS token to be converted
-        new_eos (str|bytes|None): New EOS token to convert to
     """
     def __init__(self, decode, old_eos=None, new_eos=None):
+        """Initialize a `TokenCharacterTrie`.
+
+        Args:
+            decode (list[bytes]): List of byte strings representing the token vocabulary.
+            old_eos (str|bytes|None): The current end-of-sequence token to be replaced. If provided as str,
+                                    will be encoded to bytes. 
+            new_eos (str|bytes|None): The new end-of-sequence token to use. If provided as str, will be
+                                    encoded to bytes. 
+        """
         if not all(isinstance(x, bytes) for x in decode):
             raise ValueError("All elements in decode must be byte strings")
 
@@ -83,7 +86,7 @@ class TokenCharacterTrie:
         ordering = {}
         for i, x in enumerate(self._order_full(self.root)):
             ordering[x] = i
-        self.rename(f=lambda x: ordering[x])
+        self._rename(f=lambda x: ordering[x])
 
         node2prefix = {self.root: b''}
         for x in reversed(range(len(self.children))):
@@ -96,7 +99,7 @@ class TokenCharacterTrie:
                     node2prefix[y] = node2prefix[x] + letter
         self.node2prefix = node2prefix
 
-    def rename(self, f):
+    def _rename(self, f):
         """Rename all node indices in the trie using the provided mapping function.
         
         Args:
@@ -125,7 +128,7 @@ class TokenCharacterTrie:
             [np.array(sorted(x.values()), dtype=np.int32) for x in new_children]
         )
 
-    def alloc_mass(self):
+    def _alloc_mass(self):
         """Allocate an array to store probability mass values for all nodes.
         
         Returns:
@@ -140,14 +143,14 @@ class TokenCharacterTrie:
             p_llm (torch.Tensor|np.ndarray): Token probabilities from language model
             
         Returns:
-            np.ndarray: Probability mass values for each node in the trie. 
+            (np.ndarray): Probability mass values for each node in the trie. 
                 The mass corresponds to the marginal probability under `p_llm` of the prefix represented by the node.
         """
         if isinstance(p_llm, torch.Tensor):
             if p_llm.device.type != 'cpu':
                 p_llm = p_llm.cpu()
             p_llm = p_llm.numpy()
-        mass = self.alloc_mass()
+        mass = self._alloc_mass()
         if self.convert_eos:
             mass[self.word2leaf[self.new_eos]] = p_llm[self.old_eos_id]
         _update_trie_numba(
@@ -166,7 +169,7 @@ class TokenCharacterTrie:
             p_llms (list[torch.Tensor|np.ndarray]): Batch of token probability distributions
             
         Returns:
-            np.ndarray: Batch of probability mass values for each node in the trie
+            (np.ndarray): Batch of probability mass values of `len(p_llms)` for each node in the trie
         """
         return np.array([self.mass_sum(p_llm) for p_llm in p_llms])
 
@@ -193,11 +196,96 @@ class TokenCharacterTrie:
             node (int): Starting node index
             
         Yields:
-            int: Node indices in complete topological order
+            (int): Node indices in complete topological order
         """
         for a in self.children[node]:
             yield from self._order_full(self.children[node][a])
         yield node
+
+    def visualize(self, mass=None):
+        """Visualize the trie structure using Graphviz.
+        
+        Args:
+            mass (np.ndarray|None): Optional mass vector to display at each node.
+                                Should be of length `len(self.children)`.
+        
+        Returns:
+            (graphviz.Digraph): The generated graph object
+        """
+        try:
+            import graphviz
+        except ImportError:
+            raise ImportError("Please install graphviz: pip install graphviz")
+        
+        if mass is not None and len(mass) != len(self.children):
+            raise ValueError(f"Mass vector length ({len(mass)}) must match number of nodes ({len(self.children)})")
+        
+        dot = graphviz.Digraph(comment='Token Character Trie')
+        dot.attr(rankdir='LR')
+        
+        # Create a subgraph for the legend
+        with dot.subgraph(name='cluster_legend') as legend:
+            legend.attr(label='Legend', fontsize='10')
+            legend.attr('node', fontsize='7', width='0.1', height='0.1')
+            
+            # Example internal node
+            legend.node('legend_internal', 
+                    'Internal Node ID\n\'Prefix\'\nMass (if provided)', 
+                    shape='circle')
+            
+            # Example leaf node
+            legend.node('legend_leaf', 
+                    'Complete Token', 
+                    shape='doublecircle')
+
+            legend.edge('legend_internal', 
+                    'legend_leaf', 
+                    label='Character (Byte value)',
+                    fontsize='10')
+            
+            # Align legend horizontally
+            legend.attr(rankdir='TB')
+            legend.attr(rank='same')
+        
+        # Add the main trie nodes and edges
+        for node_id in range(len(self.children)):
+            prefix = self.node2prefix[node_id].decode('utf-8', errors='replace')
+
+            if mass is not None:
+                label = f"{node_id}\n'{prefix}'\n{mass[node_id]:.4f}"
+            else:
+                label = f"{node_id}\n'{prefix}'"
+            
+            # Color nodes based on mass if provided
+            if mass is not None:
+                max_mass = mass.max()
+                if max_mass > 0:
+                    intensity = int(255 * (1 - mass[node_id] / max_mass))
+                    color = f"#{intensity:02x}{255:02x}{intensity:02x}"
+                else:
+                    color = "#ffffff"  # white for zero mass
+            else:
+                color = "#ffffff"  # default white
+            
+            if node_id in self.leaf2word:
+                dot.node(str(node_id), label, shape='doublecircle', style='filled', fillcolor=color)
+            else:
+                dot.node(str(node_id), label, shape='circle', style='filled', fillcolor=color)
+        
+        for node_id, children in enumerate(self.children):
+            for char, child_id in children.items():
+                if char is not None:
+                    if isinstance(char, int):
+                        s_char = bytes([char]).decode('utf-8', errors='replace')
+                        edge_label = str(s_char) + f" ({char})"
+                    else:
+                        edge_label = str(char)
+                else:
+                    edge_label = 'End-of-Token'
+                
+                dot.edge(str(node_id), str(child_id), label=edge_label)
+        
+        return dot
 
 
 @numba.jit(nopython=True)

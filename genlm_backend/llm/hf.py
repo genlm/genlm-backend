@@ -70,7 +70,7 @@ class AsyncTransformer(AsyncLM):
     """Asynchronous wrapper around a HuggingFace causal language model with caching support.
 
     This class provides an asynchronous interface to HuggingFace language models with automatic batching
-    and caching of previous computations for improved efficiency.
+    and caching (output and KV) for improved efficiency.
     """
 
     @classmethod 
@@ -85,10 +85,10 @@ class AsyncTransformer(AsyncLM):
                 Defaults to None.
             hf_opts (dict, optional): Additional configuration options for loading the HuggingFace model.
                 Defaults to None.
-            **kwargs: Additional arguments passed to AsyncTransformer constructor
+            **kwargs: Additional arguments passed to the `AsyncTransformer` constructor
 
         Returns:
-            AsyncTransformer: An initialized instance interfacing with the specified model.
+            (AsyncTransformer): An initialized `AsyncTransformer` instance.
         """
         bnb_config = BitsAndBytesConfig(load_in_8bit=load_in_8bit, **(bitsandbytes_opts or {}))
         tok = AutoTokenizer.from_pretrained(model_id)
@@ -106,7 +106,7 @@ class AsyncTransformer(AsyncLM):
 
         Args:
             hf_model: A HuggingFace CausalLM model instance.
-            hf_tokenizer: A HuggingFace Tokenizer instance matching the model.
+            hf_tokenizer: A HuggingFace Tokenizer.
             batch_size (int, optional): Maximum queries to process in one batch during auto-batching.
                 Defaults to 20.
             eos_token (str, optional): End of sequence token. If not provided, uses tokenizer's eos_token.
@@ -156,6 +156,11 @@ class AsyncTransformer(AsyncLM):
 
     @torch.no_grad()
     def batch_evaluate_queries(self):
+        """
+        Process a batch of queued language model queries. 
+        
+        This method is called internally when the `batch_size` has been met or the `timeout` has expired.
+        """
 
         queries, self.queries = self.queries, []
         if len(queries) == 0:
@@ -230,6 +235,16 @@ class AsyncTransformer(AsyncLM):
 
     @torch.no_grad()
     def add_query(self, query, future, past):
+        """Add a query to be evaluated in the next batch.
+
+        This method is called internally when a `next_token_logprobs` request is made.
+
+        Args:
+            query (list[int]): Token IDs representing the query prompt
+            future (asyncio.Future): Future to store the result in
+            past (list[tuple[torch.Tensor]]|None): Past key/value states from previous evaluation,
+                or None if this is a new query
+        """
         self.queries.append(Query(query, future, past))
 
         if self.timer:
@@ -243,6 +258,19 @@ class AsyncTransformer(AsyncLM):
             )
 
     def walk_cache(self, token_ids):
+        """Walk the cache tree to find the deepest node matching a sequence of tokens.
+
+        Args:
+            token_ids (list[int]): Sequence of token IDs to follow in the cache tree
+
+        Returns:
+            tuple:
+                - CacheNode: The deepest node in the cache tree that matches the token sequence
+                - int: Number of tokens matched from the start of token_ids
+                - list[tuple[torch.Tensor]]|None: Past key/value states from the deepest cached node,
+                    or None if no cached states were found
+                - int: Base index indicating where the past states start in token_ids
+        """
         # Walk while tokens can be found
         node = self.cache
         next_token_index = 0
@@ -269,7 +297,7 @@ class AsyncTransformer(AsyncLM):
             token_ids (list[int]): a list of token ids, representing a prompt to the language model.
 
         Returns:
-            logprobs (torch.Tensor): a tensor of `len(vocab)`, with the language model's log (normalized) probabilities for the next token following the prompt.
+            logprobs (torch.Tensor): a tensor of with the language model's log (normalized) probabilities for the next token following the prompt.
         """
         if not token_ids:
             raise ValueError('Token ids must not be empty')
@@ -298,7 +326,7 @@ class AsyncTransformer(AsyncLM):
             token_ids (list[int]): a list of token ids, representing a prompt to the language model.
 
         Returns:
-            logprobs (torch.Tensor): a tensor of `len(vocab)`, with the language model's log (normalized) probabilities for the next token following the prompt.
+            logprobs (torch.Tensor): a tensor with the language model's log (normalized) probabilities for the next token following the prompt.
         """
         if not token_ids:
             raise ValueError('Token ids must not be empty')
@@ -326,7 +354,7 @@ class AsyncTransformer(AsyncLM):
             token_ids (list[int]): a list of token ids, representing a prompt to the language model.
 
         Returns:
-            logprobs (torch.Tensor): a tensor of `len(vocab)`, with the language model's log (normalized) probabilities for the next token following the prompt.
+            logprobs (torch.Tensor): a tensor with the language model's log (normalized) probabilities for the next token following the prompt.
         """
         if not token_ids:
             raise ValueError('Token ids must not be empty')

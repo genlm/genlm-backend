@@ -10,45 +10,39 @@ from genlm_backend.trie.parallel import ParallelTokenCharacterTrie
 logger = logging.getLogger(__name__)
 
 class AsyncTokenCharacterTrie:
-    """An asynchronous wrapper for TokenCharacterTrie implementations.
+    """An asynchronous wrapper for `TokenCharacterTrie` implementations.
 
     This class provides asynchronous access to mass sum calculations, with automatic batching of concurrent requests. 
     It maintains a background task that processes queued requests.
-
-    Attributes:
-        trie: The underlying TokenCharacterTrie or ParallelTokenCharacterTrie instance
-        _queue (asyncio.Queue): Queue for processing mass sum requests
-        _task (asyncio.Task): Background task handling request processing
-
-    Example:
-        >>> async_trie = AsyncTokenCharacterTrie.from_llm(llm)
-        >>> mass = await async_trie.mass_sum(p_llm)
     """
 
     def __init__(self, trie):
-        """Initialize an AsyncTokenCharacterTrie.
+        """Initialize an `AsyncTokenCharacterTrie`.
 
         Args:
-            trie: The underlying TokenCharacterTrie or ParallelTokenCharacterTrie instance
+            trie (TokenCharacterTrie|ParallelTokenCharacterTrie): The underlying `TokenCharacterTrie` or `ParallelTokenCharacterTrie` instance
         """
         self.trie = trie
         self._queue = asyncio.Queue()
         self._task = None 
 
     @classmethod
-    def from_llm(cls, async_llm, backend='parallel', **kwargs):
-        """Creates an AsyncTokenCharacterTrie from a language model's byte vocabulary.
+    def from_vocab(cls, byte_vocab, backend='parallel', **kwargs):
+        """Creates an `AsyncTokenCharacterTrie` from a byte vocabulary.
 
         Args:
-            async_llm (AsyncLM): The asynchronous language model to use.
+            byte_vocab (list[byte]): The byte vocabulary over which the trie will be defined.
             backend (str, optional): The trie implementation to use - either 'sequential' or 'parallel'.
                     Defaults to 'parallel' which uses GPU acceleration when available.
             **kwargs: Additional arguments passed to the trie constructor
+
+        Returns:
+            (AsyncTokenCharacterTrie): The initialized asynchronous trie instance.
         """
         if backend == 'sequential':
-            trie = TokenCharacterTrie(decode=async_llm.byte_vocab, **kwargs)
+            trie = TokenCharacterTrie(decode=byte_vocab, **kwargs)
         elif backend == 'parallel':
-            trie = ParallelTokenCharacterTrie(decode=async_llm.byte_vocab, **kwargs)
+            trie = ParallelTokenCharacterTrie(decode=byte_vocab, **kwargs)
         else:
             raise ValueError(f"Unknown backend: {backend}. Must be one of ['sequential', 'parallel']")
         return cls(trie)
@@ -63,7 +57,7 @@ class AsyncTokenCharacterTrie:
             p_llm (torch.Tensor): Probability distribution over the trie's vocabulary of length `len(trie.decode)`. 
 
         Returns:
-            float: The calculated mass sum for the given distribution.
+            (float): The calculated mass sum for the given distribution.
         """
         if not self._task:
             self.start()
@@ -84,7 +78,7 @@ class AsyncTokenCharacterTrie:
             p_llms (list[torch.Tensor]): List of distributions over trie vocabulary.
 
         Returns:
-            torch.Tensor: Batch of computed mass sums
+            (torch.Tensor): Batch of computed mass sums
         """
         return self.trie.batch_mass_sum(torch.stack(p_llms)) # XXX handle device
 
