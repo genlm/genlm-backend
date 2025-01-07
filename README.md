@@ -1,5 +1,5 @@
 [![Docs](https://github.com/probcomp/genlm-backend/actions/workflows/docs.yml/badge.svg)](https://github.com/probcomp/genlm-backend/actions/workflows/docs.yml)
-[![Tests](https://github.com/probcomp/genlm-backend/actions/workflows/pytests.yml/badge.svg)](https://github.com/probcomp/genlm-backend/actions/workflows/pytest.yml)
+[![Tests](https://github.com/probcomp/genlm-backend/actions/workflows/pytest.yml/badge.svg)](https://github.com/probcomp/genlm-backend/actions/workflows/pytest.yml)
 
 # GenLM Backend
 
