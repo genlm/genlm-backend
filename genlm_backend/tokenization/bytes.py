@@ -24,7 +24,7 @@ def get_byte_vocab(tokenizer):
         tokenizer: A Hugging Face tokenizer instance. 
         
     Returns:
-        list: List of byte representations of tokens.
+        (list[byte]): List of byte representations of tokens.
         
     Raises:
         ByteVocabError: If vocabulary cannot be decoded using any of the available methods.
@@ -63,10 +63,10 @@ def get_byte_tokens_from_byte_decoder(tokenizer, byte_decoder):
     
     Args:
         tokenizer: A Hugging Face tokenizer instance
-        byte_decoder: Dictionary mapping characters to bytes
+        byte_decoder (dict): Dictionary mapping characters to bytes
         
     Returns:
-        list: List of byte representations for each token
+        byte_tokens (list[byte]): List of byte representations for each token
     """
     byte_tokens = [
         bytes([byte_decoder[b] for b in tokenizer.convert_ids_to_tokens(i)]) 
@@ -95,7 +95,7 @@ def get_byte_tokens_by_encoding_token_strings(tokenizer):
         tokenizer: A Hugging Face tokenizer instance.
         
     Returns:
-        list: List of byte representations for each token in the vocabulary.
+        byte_tokens (list[byte]): List of byte representations for each token in the vocabulary.
         
     Raises:
         ValueError: If token encoding fails (roundtrip produces multiple tokens), or if
@@ -146,7 +146,7 @@ def get_byte_tokens_from_sp(tokenizer):
         tokenizer: A Hugging Face tokenizer instance with a SentencePiece model
         
     Returns:
-        list: List of byte representations for each token in the vocabulary
+        byte_tokens (list[byte]): List of byte representations for each token in the vocabulary
         
     Note:
         Special tokens are handled by directly encoding their string representation,
@@ -175,7 +175,7 @@ def check_byte_decoder(tokenizer, byte_decoder):
     
     Args:
         tokenizer: A Hugging Face tokenizer instance
-        byte_decoder: Dictionary mapping characters to bytes
+        byte_decoder (dict): Dictionary mapping characters to bytes
         
     Raises:
         ByteDecoderError: If byte decoder fails validation checks
@@ -188,7 +188,7 @@ def _check_byte_decoder_has_all_bytes(tokenizer, byte_decoder):
     
     Args:
         tokenizer: A Hugging Face tokenizer instance
-        byte_decoder: Dictionary mapping characters to bytes
+        byte_decoder (dict): Dictionary mapping characters to bytes
         
     Raises:
         ByteDecoderError: If byte decoder is missing required bytes
@@ -207,7 +207,7 @@ def _check_complex_roundtrip(tokenizer, byte_decoder):
     
     Args:
         tokenizer: A Hugging Face tokenizer instance
-        byte_decoder: Dictionary mapping characters to bytes
+        byte_decoder (dict): Dictionary mapping characters to bytes
         
     Raises:
         ByteDecoderError: If round-trip conversion fails
@@ -239,7 +239,7 @@ def _bytes_to_unicode():
     """Create a mapping from bytes to Unicode characters.
     
     Returns:
-        dict: Mapping from byte values to Unicode characters
+        (dict): Mapping from byte values to Unicode characters
     """
     bs = (
         list(range(ord("!"), ord("~") + 1))
@@ -260,7 +260,7 @@ def _get_default_byte_decoder():
     """Get the default GPT-2 byte decoder with additional special character mappings.
     
     Returns:
-        dict: Mapping from characters to bytes including special characters
+        (dict): Mapping from characters to bytes including special characters
     """
     byte_decoder = AutoTokenizer.from_pretrained('gpt2', use_fast=False).byte_decoder
     byte_decoder.update({

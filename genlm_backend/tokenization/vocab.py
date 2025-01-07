@@ -47,7 +47,22 @@ def decode_vocab(tokenizer, byte2str_fallback='tokenizer'):
     return byte_vocab, str_vocab
 
 def bytes_to_strs(tokenizer, byte_vocab, byte2str_fallback):
-    """Convert byte representations to UTF-8 strings."""
+    """Convert byte representations to UTF-8 strings.
+    
+    Args:
+        tokenizer: A Hugging Face tokenizer instance
+        byte_vocab (list[bytes]): List of byte representations of tokens
+        byte2str_fallback (str): Strategy for converting invalid UTF-8 bytes to strings:
+            - 'tokenizer': Use tokenizer's convert_ids_to_tokens (default)
+            - 'latin1': Decode using latin1 encoding 
+            - 'replace': Use Unicode replacement character '�'
+            
+    Returns:
+        (list[str]): List of string representations of tokens
+        
+    Note:
+        May produce duplicate strings for different token IDs. A warning is issued if duplicates are found.
+    """
     str_vocab = []
     seen_tokens = {}
     for token_id, raw_token in enumerate(byte_vocab):
