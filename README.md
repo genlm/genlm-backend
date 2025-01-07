@@ -1,4 +1,7 @@
-# GenLM Backend Documentation
+[![Docs](https://github.com/probcomp/genlm-backend/actions/workflows/docs.yml/badge.svg)](https://github.com/probcomp/genlm-backend/actions/workflows/docs.yml)
+[![Tests](https://github.com/probcomp/genlm-backend/actions/workflows/pytests.yml/badge.svg)](https://github.com/probcomp/genlm-backend/actions/workflows/pytest.yml)
+
+# GenLM Backend
 
 GenLM Backend is a high-performance backend for language model probabilistic programs in the GenLM ecosystem. It provides essential tools and functions that serve as building blocks for more complex applications.
 
@@ -64,7 +67,7 @@ See the [LLM Code Reference](reference/genlm_backend/llm/__init__/) for detailed
 
 ### Token-Character Tries
 
-The [`genlm_backend.trie`](reference/genlm_backend/trie/__init__/) module provides an efficient trie data structure for mapping probability distributions over tokens to distributions over bytes. This module enables applications which operate at the byte-level rather than the token level. 
+The [`genlm_backend.trie`](reference/genlm_backend/trie/__init__/) module provides an efficient trie data structure for mapping probability distributions over tokens to distributions over bytes. This module enables applications which operate at the byte level rather than the token level. 
 
 ```python
 from genlm_backend.trie import TokenCharacterTrie
