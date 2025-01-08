@@ -1,6 +1,8 @@
 # Performance Benchmarking
 
-This directory contains various benchmarking scripts to evaluate the system's performance.
+This directory contains various benchmarking scripts to evaluate the system's performance. 
+
+Note that the library's test dependencies must be installed, which can be done by running `pip install -e .[test]` in the root directory.
 
 ## Backend Comparison
 * `benchmark_backend.py`: Evaluates performance differences between `AsyncVirtualLM` (vLLM-based) and `AsyncTransformer` (HuggingFace-based) implementations. Run with:
