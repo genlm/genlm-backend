@@ -5,8 +5,8 @@ GenLM Backend is a high-performance backend for language model probabilistic pro
 **Key Features**:
 
 * **Asynchronous LLM Interfaces**: Asynchronous computation of next-token probabilities with `vllm` and `transformer` language models.
-* **Tokenizer Vocabulary Decoding**: Decode Hugging Face tokenizer vocabularies into their byte and string representations.
-* **Token-Character Tries**: Efficient conversion from token distributions to byte level distributions using a trie datastructure.
+* **Tokenizer Vocabulary Decoding**: Decoding Hugging Face tokenizer vocabularies into their byte and string representations.
+* **Token-Character Tries**: Efficient conversion from token distributions to byte-level distributions using a trie datastructure.
 
 ## Quick Start
 
@@ -58,13 +58,13 @@ This submodule includes three key classes:
 
 - **AsyncVirtualLM** (GPU): vLLM-based backend optimized for next-token probability computations. Fastest and most memory-efficient; requires a GPU. Uses vLLM's prefix caching feature for KV caching.
 - **AsyncTransformer** (CPU): HuggingFace-based backend for next-token probability computations. Slower and less memory efficient; for CPU usage. Uses custom KV caching.
-- **MockAsyncLM** (Testing): Test implementation for development and testing with async language models.
+- **MockAsyncLM** (Testing): Mock implementation for development and testing.
 
 See the [LLM Code Reference](reference/genlm_backend/llm/__init__/) for detailed API documentation.
 
 ### Token-Character Tries
 
-The [`genlm_backend.trie`](reference/genlm_backend/trie/__init__/) module provides an efficient trie data structure for mapping probability distributions over tokens to distributions over bytes. This module enables applications which operate at the byte-level rather than the token level. 
+The [`genlm_backend.trie`](reference/genlm_backend/trie/__init__/) module provides an efficient trie data structure for mapping probability distributions over tokens to distributions over bytes. This module enables applications which operate at the byte level rather than the token level. 
 
 ```python
 from genlm_backend.trie import TokenCharacterTrie
@@ -108,7 +108,8 @@ byte_vocab, str_vocab = decode_vocab(tokenizer)
 byte_vocab[10] # Byte representation of token with ID 10
 ```
 
-> ⚠️ **Important**: The byte representation (`byte_vocab`) is the canonical form and should be preferred for reliable token handling. The string representation (`str_vocab`) is provided for convenience and debugging but may not correctly represent all tokens, especially those containing invalid UTF-8 sequences.
+!!! warning
+    The byte representation (`byte_vocab`) is the canonical form and should be preferred for reliable token handling. The string representation (`str_vocab`) is provided for convenience and debugging but may not correctly represent all tokens, especially those containing invalid UTF-8 sequences.
 
 ## Requirements
 

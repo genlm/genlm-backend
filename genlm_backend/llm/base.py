@@ -90,10 +90,10 @@ class MockAsyncLM(AsyncLM):
         """Get next token log probabilities asynchronously.
         
         Args:
-            token_ids (list[int]): Input token IDs
+            token_ids (list[int]): Input token IDs.
             
         Returns:
-            (torch.Tensor): Softmax probabilities over vocabulary
+            (torch.Tensor): Normalized log probability tensor.
         """
         return self._get_logprobs(token_ids)
 
@@ -101,10 +101,10 @@ class MockAsyncLM(AsyncLM):
         """Get next token log probabilities synchronously.
         
         Args:
-            token_ids (list[int]): Input token IDs
+            token_ids (list[int]): Input token IDs.
             
         Returns:
-            (torch.Tensor): Softmax probabilities over vocabulary
+            (torch.Tensor): Normalized log probability tensor.
         """
         return self._get_logprobs(token_ids)
 
@@ -114,10 +114,10 @@ class MockAsyncLM(AsyncLM):
         Uses token_ids to seed the random generator, ensuring same inputs produce same outputs.
         
         Args:
-            token_ids (list[int]): Input token IDs
+            token_ids (list[int]): Input token IDs.
             
         Returns:
-            (torch.Tensor): Softmax probabilities over vocabulary
+            (torch.Tensor): Normalized log probability tensor. 
         """
         seed = sum([(i + 1) * t for i, t in enumerate(token_ids)])
         self._rng.seed(seed)
