@@ -24,10 +24,11 @@ and install with pip:
 ```bash
 pip install .
 ```
-or install with development dependencies:
+This installs the package without development dependencies. For development, install in editable mode with:
 ```bash
-pip install -e ".[test,docs]"
+pip install -e .[test,docs]
 ```
+which also installs the dependencies needed for testing (test) and documentation (docs).
 
 ## Requirements
 
