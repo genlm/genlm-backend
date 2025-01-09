@@ -59,6 +59,10 @@ class AsyncLM(ABC):
 
         return torch.stack(logprobs)
 
+    def clear_cache(self):
+        """Clear any caches used by the language model. No-op in base class."""
+        pass
+
 
 class MockAsyncLM(AsyncLM):
     """Mock implementation of AsyncLM used for testing."""
