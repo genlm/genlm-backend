@@ -57,7 +57,7 @@ as well as automatic output and KV caching, and CPU/GPU parallelization in certa
 This submodule includes three key classes:
 
 - **AsyncVirtualLM** (GPU): vLLM-based backend optimized for next-token probability computations. Fastest and most memory-efficient; requires a GPU. Uses vLLM's prefix caching feature for KV caching.
-- **AsyncTransformer** (CPU): HuggingFace-based backend for next-token probability computations. Slower and less memory efficient; for CPU usage. Uses custom KV caching.
+- **AsyncTransformer** (CPU): HuggingFace-based backend for next-token probability computations. Slower and less memory-efficient; for CPU usage. Uses custom KV caching.
 - **MockAsyncLM** (Testing): Mock implementation for development and testing.
 
 See the [LLM Code Reference](reference/genlm_backend/llm/__init__/) for detailed API documentation.
@@ -75,7 +75,7 @@ trie.visualize()
 
 ![Example trie visualization](images/trie_example.svg)
 
-Each node in the trie corresponds to a prefix of one or multiple tokens in the byte vocabulary. Internal nodes correspond to the incomplete prefixes and leaf nodes to complete tokens. The `mass_sum` function provides the marginal probability associated with each prefix (i.e., node) given a distribution over the underlying vocabulary:
+Each node in the trie corresponds to a prefix of one or multiple tokens in the byte vocabulary. Internal nodes correspond to the incomplete prefixes and leaf nodes to complete tokens. The `mass_sum` function provides the marginal probability of each prefix (i.e., node) given a distribution on the underlying vocabulary:
 
 ```python
 # Get mass at each node given a distribution over the vocab
@@ -90,7 +90,7 @@ This submodule includes three key classes:
 
 - **TokenCharacterTrie** (CPU): Base implementation for CPU usage.
 - **ParallelTokenCharacterTrie** (GPU): GPU-accelerated version which uses sparse matrix operations for mass summing. Extends **TokenCharacterTrie** with a `batch_mass_sum` function.
-- **AsyncTokenCharacterTrie** (Async): Asynchronous wrapper with automatic request batching. For use in asynchronous contexts; enables automatic batching of concurrent requests. This class can wrap either the sequential or parallel trie implementations.
+- **AsyncTokenCharacterTrie** (Async): Asynchronous wrapper for use in asynchronous contexts; enables automatic batching of concurrent requests. This class can wrap either the sequential or parallel trie implementations.
 
 See the [Trie Code Reference](reference/genlm_backend/trie/__init__/) for detailed API documentation.
 
