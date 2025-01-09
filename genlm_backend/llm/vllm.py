@@ -192,7 +192,8 @@ class AsyncVirtualLM(AsyncLM):
 
     def clear_cache(self):
         """Clear output cache."""
-        self.cache.clear()
+        if self.cache:
+            self.cache.clear()
 
     def __del__(self):
         """Clean up resources on deletion."""
