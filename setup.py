@@ -1,7 +1,8 @@
 from setuptools import setup, find_packages
+import sys
+import warnings
 
 requirements = [
-    'vllm',
     'torch',
     'transformers',
     # for hf backend
@@ -11,12 +12,17 @@ requirements = [
     'numba'
 ]
 
+if sys.platform == 'darwin':
+    warnings.warn('vllm is not supported on macOS/Darwin platforms. Some features may not be available.')
+else:
+    requirements.append('vllm')
+
 test_requirements = [
     'pytest',
+    'pytest-benchmark',
     'arsenal @ git+https://github.com/timvieira/arsenal',
     'datasets', # for wikitext corpus
     'viztracer', # for profiling
-    'pytest-benchmark',
     'IPython' # missing dep in arsenal
 ]
 
@@ -37,7 +43,7 @@ setup(
     extras_require={'test' : test_requirements, 'docs' : docs_requirements},
     python_requires='>=3.10',
     authors=['Ben LeBrun'],
-    readme='',
+    readme='README.md',
     scripts=[],
     packages=find_packages(),
 )
