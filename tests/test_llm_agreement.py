@@ -45,8 +45,8 @@ def test_next_token_logprobs(transformer_llm, vllm_llm, token_ids_list):
         have = transformer_llm.next_token_logprobs_uncached(token_ids).cpu().numpy()
         want = asyncio.run(vllm_llm.next_token_logprobs(token_ids)).cpu().numpy()
         comparison = compare(have, want)
-        assert comparison.max_rel_err < 0.3, ['max_rel_err', comparison.max_rel_err, token_ids]
-        assert comparison.pearson > 0.98, ['corr', comparison.pearson, token_ids]
+        assert comparison.max_rel_err < 0.03, ['max_rel_err', comparison.max_rel_err, token_ids]
+        assert comparison.pearson > 0.99, ['corr', comparison.pearson, token_ids]
 
 @cuda_only
 def test_batch_next_token_logprobs(transformer_llm, vllm_llm, token_ids_list):
@@ -57,6 +57,7 @@ def test_batch_next_token_logprobs(transformer_llm, vllm_llm, token_ids_list):
         vllm_llm.batch_next_token_logprobs(token_ids_list)
     ).cpu().numpy()
     for i, (have, want) in enumerate(zip(haves, wants)): 
-        comparison = compare(have, want)         
-        assert comparison.max_rel_err < 0.3, ['max_rel_err', comparison.max_rel_err, token_ids_list[i]]
-        assert comparison.pearson > 0.98, ['corr', comparison.pearson, token_ids_list[i]]
+        comparison = compare(have, want)
+        print(comparison.max_rel_err)         
+        assert comparison.max_rel_err < 0.03, ['max_rel_err', comparison.max_rel_err, token_ids_list[i]]
+        assert comparison.pearson > 0.99, ['corr', comparison.pearson, token_ids_list[i]]
