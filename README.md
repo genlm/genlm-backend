@@ -26,7 +26,7 @@ pip install .
 ```
 This installs the package without development dependencies. For development, install in editable mode with:
 ```bash
-pip install -e .[test,docs]
+pip install -e ".[test,docs]"
 ```
 which also installs the dependencies needed for testing (test) and documentation (docs).
 
@@ -36,7 +36,7 @@ which also installs the dependencies needed for testing (test) and documentation
 - The core dependencies listed in the `setup.py` file of the repository.
 
 > **Note**  
-> vLLM is not supported on macOS and thus will not be installed. On macOS systems, only CPU-based functionality (`AsyncTransformer`) will be available. GPU-accelerated features requiring vLLM (`AsyncVirtualLM`) will not work.
+> vLLM is not supported on macOS. On macOS systems, only CPU-based functionality (`AsyncTransformer`) will be available. GPU-accelerated features requiring vLLM (`AsyncVirtualLM`) will not work.
 
 ## Testing
 
