@@ -90,14 +90,19 @@ class AsyncTransformer(AsyncLM):
         Returns:
             (AsyncTransformer): An initialized `AsyncTransformer` instance.
         """
-        bnb_config = BitsAndBytesConfig(load_in_8bit=load_in_8bit, **(bitsandbytes_opts or {}))
         tok = AutoTokenizer.from_pretrained(model_id)
-        mod = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            device_map="auto", 
-            quantization_config=bnb_config,
-            **(hf_opts or {})
-        )
+        if load_in_8bit:
+            bnb_config = BitsAndBytesConfig(load_in_8bit=load_in_8bit, **(bitsandbytes_opts or {}))
+            mod = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                device_map="auto", 
+                quantization_config=bnb_config,
+                **(hf_opts or {})
+            )
+        else:
+            mod = AutoModelForCausalLM.from_pretrained(
+                model_id, device_map="auto", **(hf_opts or {})
+            )
         return cls(mod, tok, **kwargs)
 
     @torch.no_grad()

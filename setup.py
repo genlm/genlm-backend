@@ -5,6 +5,8 @@ import warnings
 requirements = [
     'torch',
     'transformers',
+    'sentencepiece',
+    'protobuf',
     # for hf backend
     'accelerate', 
     'bitsandbytes',
