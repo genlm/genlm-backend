@@ -116,6 +116,9 @@ byte_vocab[10] # Byte representation of token with ID 10
 - Python >= 3.10
 - The core dependencies listed in the `setup.py` file of the repository.
 
+!!! note
+    vLLM is not supported on macOS. On macOS systems, only CPU-based functionality (`AsyncTransformer`) will be available. GPU-accelerated features requiring vLLM (`AsyncVirtualLM`) will not work.
+
 ## Testing
 
 When test dependencies are installed, the test suite can be run via:
@@ -126,3 +129,18 @@ pytest tests
 ## Performance Benchmarking
 
 Performance benchmarks comparing different configurations can be found in our [benchmarks directory](https://github.com/probcomp/genlm-backend/tree/main/benchmark).
+
+## Troubleshooting
+
+* If you are getting:
+    ```bash
+    A module that was compiled using NumPy 1.x cannot be run in
+    NumPy 2.0.2 as it may crash. To support both 1.x and 2.x
+    versions of NumPy, modules must be compiled with NumPy 2.0.
+    Some module may need to rebuild instead e.g. with 'pybind11>=2.12'.
+
+    If you are a user of the module, the easiest solution will be to
+    downgrade to 'numpy<2' or try to upgrade the affected module.
+    We expect that some modules will need time to support NumPy 2.
+    ```
+    then you should downgrade your version of `numpy` with `pip install "numpy<2"`.
