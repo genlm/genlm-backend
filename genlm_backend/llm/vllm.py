@@ -35,12 +35,11 @@ if HAS_VLLM:
             max_tokens=1, n=1, logprobs=1, detokenize=False, stop=None, ignore_eos=True
         )
 
-        def __init__(self, async_llm_engine, eos_token=None, cache_size=0, cache_opts={}):
+        def __init__(self, async_llm_engine, cache_size=0, cache_opts={}):
             """Initialize an `AsyncVirtualLM` instance.
 
             Args:
                 async_llm_engine (AsyncLLMEngine): The async vLLM engine instance.
-                eos_token (str, optional): End of sequence token. If not provided, uses tokenizer's eos_token.
                 cache_size (int, optional): Maximum size of the output cache. If 0, caching is disabled. Defaults to 0.
                 cache_opts (dict, optional): Additional options to pass to the [`OutputCache`][genlm_backend.cache.OutputCache] constructor. Defaults to {}.
 
@@ -55,7 +54,7 @@ if HAS_VLLM:
             
             async_llm_engine.engine.log_stats = False
 
-            super().__init__(tokenizer=self.tokenizer, eos_token=eos_token)
+            super().__init__(tokenizer=self.tokenizer)
 
         @classmethod
         def from_name(cls, model_name, engine_opts=None, **kwargs):

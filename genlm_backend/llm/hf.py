@@ -106,7 +106,7 @@ class AsyncTransformer(AsyncLM):
         return cls(mod, tok, **kwargs)
 
     @torch.no_grad()
-    def __init__(self, hf_model, hf_tokenizer, eos_token=None, batch_size=20, timeout=0.02):
+    def __init__(self, hf_model, hf_tokenizer, batch_size=20, timeout=0.02):
         """Initialize an AsyncTransformer instance.
 
         Args:
@@ -114,8 +114,6 @@ class AsyncTransformer(AsyncLM):
             hf_tokenizer: A HuggingFace Tokenizer.
             batch_size (int, optional): Maximum queries to process in one batch during auto-batching.
                 Defaults to 20.
-            eos_token (str, optional): End of sequence token. If not provided, uses tokenizer's eos_token.
-                Defaults to None.
             timeout (float, optional): Seconds to wait since last query before processing current batch.
                 Defaults to 0.02.
         """
@@ -133,7 +131,7 @@ class AsyncTransformer(AsyncLM):
 
         self.model.eval()
 
-        super().__init__(tokenizer=self.tokenizer, eos_token=eos_token)
+        super().__init__(tokenizer=self.tokenizer)
 
     def clear_cache(self):
         """Clear the cache of log probabilities and key/value pairs."""

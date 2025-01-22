@@ -13,12 +13,10 @@ class AsyncLM(ABC):
 
     Args:
         tokenizer: A Hugging Face tokenizer instance compatible with the language model
-        eos_token (str, optional): End of sequence token. If None, uses tokenizer's eos_token
     """
-    def __init__(self, tokenizer, eos_token=None):
+    def __init__(self, tokenizer):
         self.tokenizer = tokenizer
         self.byte_vocab, self.str_vocab = decode_vocab(self.tokenizer)
-        self.eos_token = eos_token if eos_token else tokenizer.eos_token
 
     @abstractmethod
     async def next_token_logprobs(self, token_ids):
@@ -126,4 +124,4 @@ class MockAsyncLM(AsyncLM):
         seed = sum([(i + 1) * t for i, t in enumerate(token_ids)])
         self._rng.seed(seed)
         logits = torch.from_numpy(self._rng.rand(len(self.tokenizer)).astype(np.float32))
-        return torch.softmax(logits, dim=-1)
+        return torch.log_softmax(logits, dim=-1)
