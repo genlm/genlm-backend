@@ -64,14 +64,13 @@ class AsyncLM(ABC):
 
 class MockAsyncLM(AsyncLM):
     """Mock implementation of AsyncLM used for testing."""
-    def __init__(self, tokenizer, eos_token=None):
+    def __init__(self, tokenizer):
         """Initialize a `MockAsyncLM` instance.
 
         Args:
             tokenizer: Hugging Face tokenizer instance
-            eos_token (str, optional): End of sequence token. If None, uses tokenizer's eos_token
         """
-        super().__init__(tokenizer, eos_token)
+        super().__init__(tokenizer)
         self._rng = np.random.RandomState(42)
 
     @classmethod
