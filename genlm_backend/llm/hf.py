@@ -101,6 +101,8 @@ class AsyncTransformer(AsyncLM):
             )
         elif bitsandbytes_opts:
             bnb_config = BitsAndBytesConfig(**bitsandbytes_opts)
+        else:
+            bnb_config = None
 
         _hf_opts = {
             "device_map": "auto",
