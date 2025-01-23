@@ -9,7 +9,7 @@ requirements = [
     'accelerate', 
     'bitsandbytes',
     # trie
-    'numba'
+    'numba',
     'vllm'
 ]
 
