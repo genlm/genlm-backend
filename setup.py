@@ -1,6 +1,4 @@
 from setuptools import setup, find_packages
-import sys
-import warnings
 
 requirements = [
     'torch',
@@ -12,12 +10,8 @@ requirements = [
     'bitsandbytes',
     # trie
     'numba'
+    'vllm'
 ]
-
-if sys.platform == 'darwin':
-    warnings.warn('vllm is not supported on macOS/Darwin platforms. Some features may not be available.')
-else:
-    requirements.append('vllm')
 
 test_requirements = [
     'pytest',
