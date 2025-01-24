@@ -92,9 +92,6 @@ class AsyncTransformer(AsyncLM):
         if bitsandbytes_opts:
             bnb_config = BitsAndBytesConfig(**bitsandbytes_opts)
         else:
-            warnings.warn(
-                f"Quantization is no longer enabled by default in `hfppl 0.2.0`. To enable quantization, provide `bitsandbytes_opts`."
-            )
             bnb_config = None
 
         _hf_opts = {
