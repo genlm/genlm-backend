@@ -5,12 +5,12 @@ from arsenal.maths import compare
 from genlm_backend.llm import AsyncTransformer
 
 @pytest.fixture(scope="module")
-def model_name(): 
+def model_name():
     return 'gpt2'
 
 @pytest.fixture(scope="module")
 def async_llm(model_name):
-    return AsyncTransformer.from_name(model_name, load_in_8bit=False)
+    return AsyncTransformer.from_name(model_name)
 
 def test_async_batching(async_llm):
     test_prompts = [
@@ -23,7 +23,7 @@ def test_async_batching(async_llm):
 
     haves = asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list)).cpu().numpy()
     wants = [
-        async_llm.next_token_logprobs_sync(token_ids).cpu().numpy() 
+        async_llm.next_token_logprobs_sync(token_ids).cpu().numpy()
         for token_ids in token_ids_list
     ]
 
@@ -36,7 +36,7 @@ def test_caching(async_llm):
 
     preprompt = async_llm.tokenizer.encode('There might be something wrong')
     prompt = preprompt + async_llm.tokenizer.encode(' with the caching logic', add_special_tokens=False)
-    
+
     # Cache preprompt
     have = asyncio.run(async_llm.next_token_logprobs(preprompt)).cpu().numpy()
     want = async_llm.next_token_logprobs_uncached(preprompt).cpu().numpy()

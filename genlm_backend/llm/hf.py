@@ -1,5 +1,6 @@
 import asyncio
 import string
+import warnings
 from collections import defaultdict
 
 import torch
@@ -73,14 +74,12 @@ class AsyncTransformer(AsyncLM):
     and caching (output and KV) for improved efficiency.
     """
 
-    @classmethod 
-    def from_name(cls, model_id, load_in_8bit=True, bitsandbytes_opts=None, hf_opts=None, **kwargs):
+    @classmethod
+    def from_name(cls, model_id, bitsandbytes_opts=None, hf_opts=None, **kwargs):
         """Create an AsyncTransformer instance from a pretrained HuggingFace model.
 
         Args:
             model_id (str): Model identifier in HuggingFace's model hub.
-            load_in_8bit (bool): Whether to load model in 8-bit quantized form using bitsandbytes.
-                Defaults to True.
             bitsandbytes_opts (dict, optional): Additional configuration options for bitsandbytes quantization.
                 Defaults to None.
             hf_opts (dict, optional): Additional configuration options for loading the HuggingFace model.
@@ -90,19 +89,23 @@ class AsyncTransformer(AsyncLM):
         Returns:
             (AsyncTransformer): An initialized `AsyncTransformer` instance.
         """
-        tok = AutoTokenizer.from_pretrained(model_id)
-        if load_in_8bit:
-            bnb_config = BitsAndBytesConfig(load_in_8bit=load_in_8bit, **(bitsandbytes_opts or {}))
-            mod = AutoModelForCausalLM.from_pretrained(
-                model_id,
-                device_map="auto", 
-                quantization_config=bnb_config,
-                **(hf_opts or {})
-            )
+        if bitsandbytes_opts:
+            bnb_config = BitsAndBytesConfig(**bitsandbytes_opts)
         else:
-            mod = AutoModelForCausalLM.from_pretrained(
-                model_id, device_map="auto", **(hf_opts or {})
-            )
+            bnb_config = None
+
+        _hf_opts = {
+            "device_map": "auto",
+            "torch_dtype": "auto",
+        }
+        if hf_opts:
+            _hf_opts.update(hf_opts)
+
+        tok = AutoTokenizer.from_pretrained(model_id)
+        mod = AutoModelForCausalLM.from_pretrained(
+            model_id, quantization_config=bnb_config, **_hf_opts
+        )
+
         return cls(mod, tok, **kwargs)
 
     @torch.no_grad()
@@ -160,8 +163,8 @@ class AsyncTransformer(AsyncLM):
     @torch.no_grad()
     def batch_evaluate_queries(self):
         """
-        Process a batch of queued language model queries. 
-        
+        Process a batch of queued language model queries.
+
         This method is called internally when the `batch_size` has been met or the `timeout` has expired.
         """
 

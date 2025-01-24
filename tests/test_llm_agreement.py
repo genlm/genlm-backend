@@ -7,13 +7,13 @@ from genlm_backend.llm import AsyncVirtualLM
 from genlm_backend.llm import AsyncTransformer
 
 @pytest.fixture(scope="module")
-def model_name(): 
+def model_name():
     return 'gpt2'
 
 @pytest.fixture(scope="module")
 def vllm_llm(model_name):
     return AsyncVirtualLM.from_name(
-        model_name, 
+        model_name,
         engine_opts={
             'gpu_memory_utilization': 0.45,
             'dtype': 'float16',
@@ -24,8 +24,7 @@ def vllm_llm(model_name):
 def transformer_llm(model_name):
     return AsyncTransformer.from_name(
         model_name,
-        load_in_8bit=False,
-        hf_opts={'torch_dtype': torch.float16} 
+        hf_opts={'torch_dtype': torch.float16}
     )
 
 @pytest.fixture(scope="module")
@@ -56,8 +55,8 @@ def test_batch_next_token_logprobs(transformer_llm, vllm_llm, token_ids_list):
     wants = asyncio.run(
         vllm_llm.batch_next_token_logprobs(token_ids_list)
     ).cpu().numpy()
-    for i, (have, want) in enumerate(zip(haves, wants)): 
+    for i, (have, want) in enumerate(zip(haves, wants)):
         comparison = compare(have, want)
-        print(comparison.max_rel_err)         
+        print(comparison.max_rel_err)
         assert comparison.max_rel_err < 0.03, ['max_rel_err', comparison.max_rel_err, token_ids_list[i]]
         assert comparison.pearson > 0.99, ['corr', comparison.pearson, token_ids_list[i]]
