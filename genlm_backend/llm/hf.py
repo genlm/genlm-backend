@@ -75,13 +75,11 @@ class AsyncTransformer(AsyncLM):
     """
 
     @classmethod
-    def from_name(cls, model_id, load_in_8bit=True, bitsandbytes_opts=None, hf_opts=None, **kwargs):
+    def from_name(cls, model_id, bitsandbytes_opts=None, hf_opts=None, **kwargs):
         """Create an AsyncTransformer instance from a pretrained HuggingFace model.
 
         Args:
             model_id (str): Model identifier in HuggingFace's model hub.
-            load_in_8bit (bool): Whether to load model in 8-bit quantized form using bitsandbytes.
-                Defaults to True. Deprecated; use `bitsandbytes_opts` instead.
             bitsandbytes_opts (dict, optional): Additional configuration options for bitsandbytes quantization.
                 Defaults to None.
             hf_opts (dict, optional): Additional configuration options for loading the HuggingFace model.
@@ -91,17 +89,12 @@ class AsyncTransformer(AsyncLM):
         Returns:
             (AsyncTransformer): An initialized `AsyncTransformer` instance.
         """
-        if load_in_8bit:
-            warnings.warn(
-                "The `load_in_8bit` argument is deprecated; use `bitsandbytes_opts` instead.",
-                DeprecationWarning,
-            )
-            bnb_config = BitsAndBytesConfig(
-                load_in_8bit=load_in_8bit, **(bitsandbytes_opts or {})
-            )
-        elif bitsandbytes_opts:
+        if bitsandbytes_opts:
             bnb_config = BitsAndBytesConfig(**bitsandbytes_opts)
         else:
+            warnings.warn(
+                f"Quantization is no longer enabled by default in `hfppl 0.2.0`. To enable quantization, provide `bitsandbytes_opts`."
+            )
             bnb_config = None
 
         _hf_opts = {
