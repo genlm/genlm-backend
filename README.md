@@ -1,9 +1,9 @@
-[![Docs](https://github.com/probcomp/genlm-backend/actions/workflows/docs.yml/badge.svg)](https://probcomp.github.io/genlm-backend/)
-[![Tests](https://github.com/probcomp/genlm-backend/actions/workflows/pytest.yml/badge.svg)](https://github.com/probcomp/genlm-backend/actions/workflows/pytest.yml)
+[![Docs](https://github.com/chi-collective/genlm-backend/actions/workflows/docs.yml/badge.svg)](https://probcomp.github.io/genlm-backend/)
+[![Tests](https://github.com/chi-collective/genlm-backend/actions/workflows/pytest.yml/badge.svg)](https://github.com/probcomp/genlm-backend/actions/workflows/pytest.yml)
 
 # GenLM Backend
 
-GenLM Backend is a high-performance backend for language model probabilistic programs in the GenLM ecosystem. It provides essential tools and functions that serve as building blocks for more complex applications. See our [documentation](https://probcomp.github.io/genlm-backend/).
+GenLM Backend is a high-performance backend for language model probabilistic programs in the GenLM ecosystem. It provides essential tools and functions that serve as building blocks for more complex applications. See our [documentation](https://chi-collective.github.io/genlm-backend/).
 
 **Key Features**:
 
