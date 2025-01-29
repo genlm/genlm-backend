@@ -15,7 +15,7 @@ jobs:
       matrix:
         runner: [ubuntu-22.04, ParallelHoss]
     runs-on: ${{ matrix.runner }}
-    
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -24,6 +24,14 @@ jobs:
       - uses: actions/setup-python@v4
         with:
           python-version: 3.11.5
+
+      - name: Cache pip packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-{{ matrix.runner }}-pip-${{ hashFiles('**/setup.py', '**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-{{ matrix.runner }}-pip-
 
       - name: Run Tests
         run: |
