@@ -9,7 +9,7 @@ requirements = [
     'accelerate', 
     'bitsandbytes',
     # trie
-    'numba'
+    'numba',
     'vllm>=0.6.6,<1.0.0' # premptively guard against breaking changes which look to be coming in v1
 ]
 
