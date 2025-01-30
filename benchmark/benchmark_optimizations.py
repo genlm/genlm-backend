@@ -7,29 +7,32 @@ pytest benchmark/benchmark_optimizations.py --benchmark-only --benchmark-group-b
 
 import pytest
 from .util import (
-    get_wikitext, 
+    get_wikitext,
     token_prefixes,
     token_prefix_batches,
     run_await_next_token_logprobs,
-    run_await_batch_next_token_logprobs, 
+    run_await_batch_next_token_logprobs,
 )
 from genlm_backend.llm import AsyncVirtualLM
 from genlm_backend.llm.vllm_reference import ReferenceVirtualLM
 
 text = get_wikitext()
 
+
 def load_model(model):
-    model_name = 'gpt2'
-    if model == 'optimized':
+    model_name = "gpt2"
+    if model == "optimized":
         return AsyncVirtualLM.from_name(model_name)
     else:
         return ReferenceVirtualLM.from_name(model_name)
+
 
 @pytest.mark.parametrize("model", ["optimized", "reference"])
 def test_await_next_token_logprobs(benchmark, model):
     llm = load_model(model)
     sequences = token_prefixes(text, tokenizer=llm.tokenizer)
     run_await_next_token_logprobs(benchmark=benchmark, llm=llm, sequences=sequences)
+
 
 @pytest.mark.parametrize("model", ["optimized", "reference"])
 def test_await_batch_next_token_logprobs(benchmark, model, batch_size=20):

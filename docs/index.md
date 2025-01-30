@@ -47,7 +47,7 @@ import asyncio
 async def my_model(i):
     time.sleep(0.01) # Simulate CPU work.
     # Get log probabilities of next tokens given token_ids.
-    return await llm.next_token_logprobs(token_ids=[i] * 10) 
+    return await llm.next_token_logprobs(token_ids=[i] * 10)
 
 # Both requests will be batched together by the underlying LM.
 outs = asyncio.run(asyncio.gather(*[my_model(0), my_model(1)]))
@@ -64,7 +64,7 @@ See the [LLM Code Reference](reference/genlm_backend/llm/__init__/) for detailed
 
 ### Token-Character Tries
 
-The [`genlm_backend.trie`](reference/genlm_backend/trie/__init__/) module provides an efficient trie data structure for mapping probability distributions over tokens to distributions over bytes. This module enables applications which operate at the byte level rather than the token level. 
+The [`genlm_backend.trie`](reference/genlm_backend/trie/__init__/) module provides an efficient trie data structure for mapping probability distributions over tokens to distributions over bytes. This module enables applications which operate at the byte level rather than the token level.
 
 ```python
 from genlm_backend.trie import TokenCharacterTrie

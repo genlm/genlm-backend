@@ -1,4 +1,3 @@
-
 from pathlib import Path
 
 import mkdocs_gen_files
@@ -30,4 +29,4 @@ for path in sorted(Path("genlm_backend").rglob("*.py")):
     mkdocs_gen_files.set_edit_path(full_doc_path, path)
 
 with mkdocs_gen_files.open("reference/SUMMARY.md", "w") as nav_file:
-    nav_file.writelines(nav.build_literate_nav()) 
+    nav_file.writelines(nav.build_literate_nav())

@@ -11,6 +11,7 @@ from transformers import BitsAndBytesConfig
 from genlm_backend.cache import TokenTrie
 from genlm_backend.llm.base import AsyncLM
 
+
 class Query:
     """A query to a language model, waiting to be batched."""
 
@@ -20,7 +21,11 @@ class Query:
         self.past = past
 
         if self.past is not None:
-            self.past_len = past[0][0].shape[
+            self.past_len = past[
+                0
+            ][
+                0
+            ].shape[
                 2
             ]  # layers, key or value, batch size, num heads, num tokens, head repr length
         else:
@@ -28,7 +33,6 @@ class Query:
 
     @torch.no_grad()
     def past_padded(self, layer, j, to_length, dtype, device, past_shape):
-
         if self.past is not None:
             return torch.cat(
                 (
@@ -175,7 +179,7 @@ class AsyncTransformer(AsyncLM):
         # Group duplicate queries to avoid redundant computation
         query_groups = defaultdict(list)
         for query in queries:
-            key = tuple(query.prompt) # XXX: cache based on past_len too?
+            key = tuple(query.prompt)  # XXX: cache based on past_len too?
             query_groups[key].append(query)
 
         # Use one representative query from each group
@@ -306,7 +310,7 @@ class AsyncTransformer(AsyncLM):
             logprobs (torch.Tensor): a tensor of with the language model's log (normalized) probabilities for the next token following the prompt.
         """
         if not token_ids:
-            raise ValueError('Token ids must not be empty')
+            raise ValueError("Token ids must not be empty")
 
         node, next_token_index, past, base = self.walk_cache(token_ids)
 
@@ -335,7 +339,7 @@ class AsyncTransformer(AsyncLM):
             logprobs (torch.Tensor): a tensor with the language model's log (normalized) probabilities for the next token following the prompt.
         """
         if not token_ids:
-            raise ValueError('Token ids must not be empty')
+            raise ValueError("Token ids must not be empty")
 
         # Walk while tokens can be found
         node, next_token_index, past, base = self.walk_cache(token_ids)
@@ -363,7 +367,7 @@ class AsyncTransformer(AsyncLM):
             logprobs (torch.Tensor): a tensor with the language model's log (normalized) probabilities for the next token following the prompt.
         """
         if not token_ids:
-            raise ValueError('Token ids must not be empty')
+            raise ValueError("Token ids must not be empty")
 
         with torch.no_grad():
             logits = self.model(
