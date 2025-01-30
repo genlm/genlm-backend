@@ -45,6 +45,20 @@ When test dependencies are installed, the test suite can be run via:
 pytest tests
 ```
 
+## Documentation
+
+Documentation is generated using [mkdocs](https://www.mkdocs.org/) and hosted on GitHub Pages. To build the documentation, run:
+
+```bash
+mkdocs build
+```
+
+To serve the documentation locally, run:
+
+```bash
+mkdocs serve
+```
+
 ## Performance Benchmarking
 
 Performance benchmarks comparing different configurations can be found in our [benchmarks directory](https://github.com/probcomp/genlm-backend/tree/main/benchmark).
