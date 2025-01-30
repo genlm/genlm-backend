@@ -2,9 +2,7 @@ import torch
 import logging
 import asyncio
 import warnings
-import numpy as np
 import concurrent.futures
-from collections import OrderedDict
 from contextlib import contextmanager
 
 from genlm_backend.llm.base import AsyncLM
@@ -14,7 +12,7 @@ try:
     from vllm import AsyncLLMEngine, SamplingParams, AsyncEngineArgs
     from vllm.utils import Counter
     from vllm.inputs import TokensPrompt
-    from vllm.model_executor.layers.sampler import SamplerOutput, Sampler
+    from vllm.model_executor.layers.sampler import SamplerOutput
     from vllm.sequence import SequenceOutput, CompletionSequenceGroupOutput, Logprob
 
     HAS_VLLM = True
@@ -155,7 +153,7 @@ if HAS_VLLM:
                 (torch.Tensor): Normalized log probability tensor.
             """
             try:
-                loop = asyncio.get_running_loop()
+                _loop = asyncio.get_running_loop()
             except RuntimeError:
                 # No running loop.
                 return asyncio.run(self.next_token_logprobs(token_ids))

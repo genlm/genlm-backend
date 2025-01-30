@@ -1,5 +1,4 @@
 import torch
-import pytest
 from conftest import cuda_only
 from genlm_backend.cache import OutputCache
 

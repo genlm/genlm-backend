@@ -1,8 +1,6 @@
 import torch
 import asyncio
 import logging
-import numpy as np
-from dataclasses import dataclass
 
 from genlm_backend.trie.base import TokenCharacterTrie
 from genlm_backend.trie.parallel import ParallelTokenCharacterTrie

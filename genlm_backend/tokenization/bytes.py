@@ -38,7 +38,7 @@ def get_byte_vocab(tokenizer):
             byte_decoder = tokenizer.byte_decoder
             check_byte_decoder(tokenizer, byte_decoder)
             return get_byte_tokens_from_byte_decoder(tokenizer, byte_decoder)
-        except ByteDecoderError as e:
+        except ByteDecoderError:
             pass
             # warnings.warn(f"Could not decode vocabulary using byte_decoder: {e!r}")
 
@@ -49,7 +49,7 @@ def get_byte_vocab(tokenizer):
     # Try through token encoding.
     try:
         return get_byte_tokens_by_encoding_token_strings(tokenizer)
-    except Exception as e:
+    except Exception:
         # warnings.warn(f"Could not decode vocabulary through string encoding: {e!r}")
         pass
 
