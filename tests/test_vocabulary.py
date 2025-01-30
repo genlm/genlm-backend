@@ -1,5 +1,4 @@
 import pytest
-import warnings
 from functools import wraps
 from datasets import load_dataset
 from transformers import AutoTokenizer

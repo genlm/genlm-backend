@@ -1,3 +1,6 @@
+ci:
+    skip: [ruff]
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
@@ -10,5 +13,9 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.8.4
     hooks:
+      - id: ruff
+        types_or: [ python, pyi, jupyter ]
+        args: [ --fix ]
+
       - id: ruff-format
         types_or: [ python, pyi, jupyter ]

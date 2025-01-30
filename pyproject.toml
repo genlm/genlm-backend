@@ -1,0 +1,41 @@
+[project]
+name = "genlm-backend"
+version = "0.0.1"
+description = ""
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Ben LeBrun" },
+]
+dependencies = [
+    "torch",
+    "transformers",
+    "sentencepiece",
+    "protobuf",
+    "accelerate",
+    "bitsandbytes",
+    "numba",
+    "vllm>=0.6.6,<1.0.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-benchmark",
+    "arsenal @ git+https://github.com/timvieira/arsenal",
+    "datasets",
+    "viztracer",
+    "IPython",
+]
+docs = [
+    "mkdocs",
+    "mkdocstrings[python]",
+    "mkdocs-material",
+    "mkdocs-gen-files",
+    "mkdocs-literate-nav",
+    "mkdocs-section-index",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

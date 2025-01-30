@@ -77,7 +77,7 @@ def load_model(enable_caching):
 def test_prefix_caching(benchmark, caching_enabled):
     llm = load_model(caching_enabled)
     sequences = token_prefixes(text, tokenizer=llm.tokenizer, prepend=LONG_PROMPT)
-    num_tokens = len(llm.tokenizer.encode(text))
+    _num_tokens = len(llm.tokenizer.encode(text))
     run_await_next_token_logprobs(
         benchmark=benchmark, llm=llm, sequences=sequences, warmup_rounds=10, rounds=200
     )

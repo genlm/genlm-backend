@@ -1,6 +1,5 @@
 import pytest
 import asyncio
-from conftest import cuda_only
 from arsenal.maths import compare
 from genlm_backend.llm import AsyncTransformer
 
