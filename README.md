@@ -35,7 +35,7 @@ which also installs the dependencies needed for testing (test) and documentation
 - Python >= 3.10
 - The core dependencies listed in the `setup.py` file of the repository.
 
-> **Note**  
+> **Note**
 > vLLM is not supported on macOS. On macOS systems, only CPU-based functionality (`AsyncTransformer`) will be available. GPU-accelerated features requiring vLLM (`AsyncVirtualLM`) will not work.
 
 ## Testing

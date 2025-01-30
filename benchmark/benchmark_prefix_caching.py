@@ -11,7 +11,9 @@ from .util import token_prefixes, run_await_next_token_logprobs
 from genlm_backend.llm import AsyncVirtualLM
 
 # From https://docs.vllm.ai/en/latest/automatic_prefix_caching/apc.html
-LONG_PROMPT = "You are a helpful assistant in recognizes the content of tables in markdown format. Here is a table as follows.\n# Table\n" + """
+LONG_PROMPT = (
+    "You are a helpful assistant in recognizes the content of tables in markdown format. Here is a table as follows.\n# Table\n"
+    + """
 | ID  | Name          | Age | Occupation    | Country       | Email                  | Phone Number   | Address                       |
 |-----|---------------|-----|---------------|---------------|------------------------|----------------|------------------------------|
 | 1   | John Doe      | 29  | Engineer      | USA           | john.doe@example.com   | 555-1234       | 123 Elm St, Springfield, IL  |
@@ -45,28 +47,31 @@ LONG_PROMPT = "You are a helpful assistant in recognizes the content of tables i
 | 29  | Amy White     | 33  | Musician      | New Zealand   | amy.w@example.com      | 555-5658       | 159 Maple St, Wellington, NZ |
 | 30  | Ben Black     | 38  | Chef          | Ireland       | ben.b@example.com      | 555-7870       | 246 Fir St, Waterford, IE    |
 """
+)
 
 text = (
-        "Question: what is the age of John Doe? Your answer: The age of John Doe is 39. "
-        "Question: what is the age of Zach Blue? Your answer: The age of Zach Blue is 30."
-        "Question: what is the occupation of Jane Smith? Your answer: Jane Smith is a Doctor. "
-        "Question: what is the country of Alice Johnson? Your answer: Alice Johnson is from the UK. "
-        "Question: what is the email of Bob Brown? Your answer: Bob Brown's email is bob.b@example.com. "
-        "Question: what is the phone number of Carol White? Your answer: Carol White's phone number is 555-6789. "
-        "Question: what is the address of Dave Green? Your answer: Dave Green's address is 987 Cedar St, Dublin, IE. "
-        "Question: what is the age of Emma Black? Your answer: Emma Black is 40 years old. "
-        "Question: what is the occupation of Frank Blue? Your answer: Frank Blue is a Chef. "
-        "Question: what is the country of Grace Yellow? Your answer: Grace Yellow is from the UK."
-    )
+    "Question: what is the age of John Doe? Your answer: The age of John Doe is 39. "
+    "Question: what is the age of Zach Blue? Your answer: The age of Zach Blue is 30."
+    "Question: what is the occupation of Jane Smith? Your answer: Jane Smith is a Doctor. "
+    "Question: what is the country of Alice Johnson? Your answer: Alice Johnson is from the UK. "
+    "Question: what is the email of Bob Brown? Your answer: Bob Brown's email is bob.b@example.com. "
+    "Question: what is the phone number of Carol White? Your answer: Carol White's phone number is 555-6789. "
+    "Question: what is the address of Dave Green? Your answer: Dave Green's address is 987 Cedar St, Dublin, IE. "
+    "Question: what is the age of Emma Black? Your answer: Emma Black is 40 years old. "
+    "Question: what is the occupation of Frank Blue? Your answer: Frank Blue is a Chef. "
+    "Question: what is the country of Grace Yellow? Your answer: Grace Yellow is from the UK."
+)
+
 
 def load_model(enable_caching):
     return AsyncVirtualLM.from_name(
-        'lmsys/longchat-13b-16k',
+        "lmsys/longchat-13b-16k",
         engine_opts={
-            'gpu_memory_utilization': 0.9,
-            'enable_prefix_caching': enable_caching
-        }
+            "gpu_memory_utilization": 0.9,
+            "enable_prefix_caching": enable_caching,
+        },
     )
+
 
 @pytest.mark.parametrize("caching_enabled", [False, True])
 def test_prefix_caching(benchmark, caching_enabled):

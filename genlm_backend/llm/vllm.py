@@ -16,18 +16,21 @@ try:
     from vllm.inputs import TokensPrompt
     from vllm.model_executor.layers.sampler import SamplerOutput, Sampler
     from vllm.sequence import SequenceOutput, CompletionSequenceGroupOutput, Logprob
+
     HAS_VLLM = True
 except ImportError:
     HAS_VLLM = False
-    warnings.warn("vLLM not installed. Run 'pip install vllm' to use the vLLM-based AsyncLM model.")
+    warnings.warn(
+        "vLLM not installed. Run 'pip install vllm' to use the vLLM-based AsyncLM model."
+    )
 
 if HAS_VLLM:
-    logging.getLogger('vllm.engine.async_llm_engine').setLevel(logging.WARNING)
+    logging.getLogger("vllm.engine.async_llm_engine").setLevel(logging.WARNING)
 
-    class AsyncVirtualLM(AsyncLM): 
+    class AsyncVirtualLM(AsyncLM):
         """A wrapper around vLLM's `AsyncLLMEngine` for asynchronous next token log probability computations.
 
-        This class provides an asynchronous interface for computing log probabilities using vLLM's engine. 
+        This class provides an asynchronous interface for computing log probabilities using vLLM's engine.
         It is optimized for next token log probability computations and supports caching of results (outputs and KV).
         """
 
@@ -44,14 +47,18 @@ if HAS_VLLM:
                 cache_opts (dict, optional): Additional options to pass to the [`OutputCache`][genlm_backend.cache.OutputCache] constructor. Defaults to {}.
 
             Note:
-                The cache stores the log probabilities for previously seen token sequences to avoid redundant requests. KV caching is handled internally by the vLLM engine. 
+                The cache stores the log probabilities for previously seen token sequences to avoid redundant requests. KV caching is handled internally by the vLLM engine.
             """
             self.async_llm_engine = async_llm_engine
             self.tokenizer = async_llm_engine.engine.get_tokenizer()
             self.request_counter = Counter()
             self.custom_sampler = DeferredSampler()
-            self.cache = OutputCache(maxsize=cache_size, **cache_opts) if cache_size > 0 else None
-            
+            self.cache = (
+                OutputCache(maxsize=cache_size, **cache_opts)
+                if cache_size > 0
+                else None
+            )
+
             async_llm_engine.engine.log_stats = False
 
             super().__init__(tokenizer=self.tokenizer)
@@ -59,71 +66,73 @@ if HAS_VLLM:
         @classmethod
         def from_name(cls, model_name, engine_opts=None, **kwargs):
             """Create a `AsyncVirtualLM` instance from a model name.
-            
+
             Args:
                 model_name (str): Name of the model to load.
-                engine_opts (dict): Additional options to pass to the `AsyncLLMEngine`. The engine will be 
+                engine_opts (dict): Additional options to pass to the `AsyncLLMEngine`. The engine will be
                     configured with prefix caching enabled and async output processing disabled by default.
                 **kwargs: Additional arguments passed to `AsyncVirtualLM` constructor.
-                
+
             Returns:
                 (AsyncVirtualLM): An `AsyncVirtualLM` instance.
             """
             if not HAS_VLLM:
-                raise ImportError("vLLM not available. Install vLLM or use AsyncTransformer instead.")
-            
-            engine_opts = {
-                'enable_prefix_caching': True,
-                'disable_log_requests': True,
-                'disable_async_output_proc': True,
-                **(engine_opts or {})
-            }
-            
-            engine = AsyncLLMEngine.from_engine_args(
-                AsyncEngineArgs(
-                    model=model_name, tokenizer=model_name, **engine_opts
+                raise ImportError(
+                    "vLLM not available. Install vLLM or use AsyncTransformer instead."
                 )
+
+            engine_opts = {
+                "enable_prefix_caching": True,
+                "disable_log_requests": True,
+                "disable_async_output_proc": True,
+                **(engine_opts or {}),
+            }
+
+            engine = AsyncLLMEngine.from_engine_args(
+                AsyncEngineArgs(model=model_name, tokenizer=model_name, **engine_opts)
             )
-            
+
             return cls(engine, **kwargs)
 
         async def next_token_logprobs(self, token_ids):
             """Request log probabilities of next token asynchronously with output caching.
-            
+
             Args:
                 token_ids_list (list[int]): A list of token IDs, representing a prompt to the language model.
-                    
+
             Returns:
                 result (torch.Tensor): Normalized log probability tensor.
             """
-            key = tuple(token_ids) 
-            
+            key = tuple(token_ids)
+
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
-            
+
             result = await self._next_token_logprobs(key)
-            
+
             if self.cache is not None:
                 self.cache[key] = result
-            
+
             return result
 
         async def _next_token_logprobs(self, token_ids):
-            """Request log probabilities of next token asynchronously. 
-            
+            """Request log probabilities of next token asynchronously.
+
             Args:
                 token_ids_list (list[int]): A list of token IDs, representing a prompt to the language model.
-                    
+
             Returns:
                 (torch.Tensor): Normalized log probability tensor.
             """
             req_id = str(next(self.request_counter))
             prompt = TokensPrompt(prompt_token_ids=token_ids)
-            
+
             outputs = []
             with self._optimized_sampling_context():
                 async for output in self.async_llm_engine.generate(
-                    prompt=prompt, sampling_params=self.default_params, request_id=req_id
+                    prompt=prompt,
+                    sampling_params=self.default_params,
+                    request_id=req_id,
                 ):
                     if output.finished:
                         outputs.append(output)
@@ -134,14 +143,14 @@ if HAS_VLLM:
             """Request log probabilities of next token synchronously.
 
             Note:
-                This method is not recommended for use in async contexts. If you're already in an 
-                async context, use `await next_token_logprobs(token_ids)` instead. Calling this 
-                method from an async context will create a new thread with its own event loop to 
+                This method is not recommended for use in async contexts. If you're already in an
+                async context, use `await next_token_logprobs(token_ids)` instead. Calling this
+                method from an async context will create a new thread with its own event loop to
                 handle the async operation.
 
             Args:
                 token_ids_list (list[int]): A list of token IDs, representing a prompt to the language model.
-                    
+
             Returns:
                 (torch.Tensor): Normalized log probability tensor.
             """
@@ -153,8 +162,10 @@ if HAS_VLLM:
 
             # We are in a running loop.
             with concurrent.futures.ThreadPoolExecutor() as pool:
-                return pool.submit(asyncio.run, self.next_token_logprobs(token_ids)).result()
-        
+                return pool.submit(
+                    asyncio.run, self.next_token_logprobs(token_ids)
+                ).result()
+
         @contextmanager
         def _optimized_sampling_context(self):
             """Context manager for optimized sampling configuration."""
@@ -168,25 +179,27 @@ if HAS_VLLM:
 
         def _validate_outputs(self, outputs):
             """Validate and extract logprobs from a vLLM output.
-            
+
             Args:
                 outputs: List of sequence group outputs from vLLM generation
-                
+
             Returns:
                 Tensor of log probabilities for the next token
-                
+
             Raises:
                 AssertionError: If output structure doesn't match expected format
             """
-            assert len(outputs) == 1, 'Expected exactly one sequence group'
+            assert len(outputs) == 1, "Expected exactly one sequence group"
             seq_group = outputs[0]
-            
-            assert len(seq_group.outputs) == 1, 'Expected exactly one sequence in output'
+
+            assert (
+                len(seq_group.outputs) == 1
+            ), "Expected exactly one sequence in output"
             sequence = seq_group.outputs[0]
-            
-            assert len(sequence.logprobs) == 1, 'Expected exactly one set of logprobs'
+
+            assert len(sequence.logprobs) == 1, "Expected exactly one set of logprobs"
             token_logprobs = sequence.logprobs[0].logprobs
-            
+
             return token_logprobs
 
         def clear_cache(self):
@@ -200,18 +213,20 @@ if HAS_VLLM:
 
         def _cleanup_engine(self):
             """Clean up the vLLM engine and associated resources."""
-            if async_engine := getattr(self, 'async_llm_engine', None):
+            if async_engine := getattr(self, "async_llm_engine", None):
                 async_engine.shutdown_background_loop()
 else:
+
     class AsyncVirtualLM:
         """Placeholder class when vLLM is not installed."""
+
         def __init__(self, *args, **kwargs):
             raise ImportError(
                 "vLLM is not installed. Please install it with 'pip install vllm' "
                 "to use the vLLM-based AsyncLM model."
             )
 
-        @classmethod 
+        @classmethod
         def from_name(cls, *args, **kwargs):
             raise ImportError(
                 "vLLM is not installed. Please install it with 'pip install vllm' "
@@ -230,7 +245,8 @@ class DeferredSampler(torch.nn.Module):
         avoids actual token sampling to optimize for probability calculation use cases.
         It should not be used in scenarios where actual token generation is needed.
     """
-    def __init__(self): 
+
+    def __init__(self):
         super().__init__()
 
     def forward(self, logits, sampling_metadata):
@@ -264,9 +280,9 @@ class DeferredSampler(torch.nn.Module):
             logprobs_by_seq = logprobs[sample_idx : sample_idx + num_parent_seqs]
 
             assert len(logprobs_by_seq) == len(seq_ids)
-            
+
             seq_outputs = []
-            for (seq_id, seq_logprobs) in zip(seq_ids, logprobs_by_seq):
+            for seq_id, seq_logprobs in zip(seq_ids, logprobs_by_seq):
                 seq_outputs.append(
                     SequenceOutput(seq_id, 0, LazyLogprobDict(seq_logprobs))
                 )
@@ -274,7 +290,7 @@ class DeferredSampler(torch.nn.Module):
             sampler_output.append(
                 CompletionSequenceGroupOutput(samples=seq_outputs, prompt_logprobs=[])
             )
-            
+
             sample_idx += 1
 
         sampler_outputs = SamplerOutput(
@@ -282,7 +298,7 @@ class DeferredSampler(torch.nn.Module):
             sampled_token_probs=None,
             sampled_token_ids=None,
             logprobs=None,
-            deferred_sample_results_args=None
+            deferred_sample_results_args=None,
         )
 
         return sampler_outputs
@@ -290,7 +306,7 @@ class DeferredSampler(torch.nn.Module):
 
 class LazyLogprobDict:
     """An efficient dictionary-like interface required by vLLM's output processing.
-    
+
     vLLM's output processor expects token probabilities to be provided as a dictionary
     mapping token IDs to Logprob objects. However, creating this full dictionary is
     computationally expensive, especially when dealing with large vocabulary sizes
@@ -299,6 +315,7 @@ class LazyLogprobDict:
     This class provides a compatible interface that satisfies vLLM's requirements while
     avoiding the overhead.
     """
+
     def __init__(self, logprobs):
         self.logprobs = logprobs
 
