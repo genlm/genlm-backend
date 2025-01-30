@@ -1,12 +1,12 @@
 name: Docs
 
 on:
+  workflow_dispatch:
   push:
     branches:
-      - main  # or your default branch name
-  pull_request:
-    branches:
       - main
+
+
 
 permissions:
   contents: write
