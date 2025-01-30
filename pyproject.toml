@@ -22,7 +22,7 @@ dependencies = [
 test = [
     "pytest",
     "pytest-benchmark",
-    "arsenal git+ssh://github.com/timvieira/arsenal.git",
+    "arsenal @ git+ssh://github.com/timvieira/arsenal.git",
     "datasets",
     "viztracer",
     "IPython",
