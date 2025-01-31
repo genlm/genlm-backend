@@ -37,7 +37,7 @@ docs = [
 ]
 
 [tool.setuptools]
-packages = find
+packages = "find:"
 
 [build-system]
 requires = ["setuptools>=61.0"]
