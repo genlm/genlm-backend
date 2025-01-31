@@ -98,6 +98,10 @@ if HAS_VLLM:
 
             Returns:
                 result (torch.Tensor): Normalized log probability tensor.
+
+            Warning:
+                Do not use `asyncio.run(next_token_logprobs())` as it may interfere with vLLM's background loop.
+                For synchronous usage, use the `next_token_logprobs_sync()` method instead.
             """
             key = tuple(token_ids)
 
