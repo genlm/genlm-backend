@@ -1,8 +1,6 @@
 import torch
 import logging
-import asyncio
 import warnings
-import concurrent.futures
 from contextlib import contextmanager
 
 from genlm_backend.llm.base import AsyncLM
@@ -140,29 +138,53 @@ if HAS_VLLM:
         def next_token_logprobs_sync(self, token_ids):
             """Request log probabilities of next token synchronously.
 
-            Note:
-                This method is not recommended for use in async contexts. If you're already in an
-                async context, use `await next_token_logprobs(token_ids)` instead. Calling this
-                method from an async context will create a new thread with its own event loop to
-                handle the async operation.
-
             Args:
                 token_ids_list (list[int]): A list of token IDs, representing a prompt to the language model.
 
             Returns:
                 (torch.Tensor): Normalized log probability tensor.
             """
-            try:
-                _loop = asyncio.get_running_loop()
-            except RuntimeError:
-                # No running loop.
-                return asyncio.run(self.next_token_logprobs(token_ids))
+            return self.batch_next_token_logprobs_sync([token_ids])[0]
 
-            # We are in a running loop.
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                return pool.submit(
-                    asyncio.run, self.next_token_logprobs(token_ids)
-                ).result()
+        def batch_next_token_logprobs_sync(self, token_ids_list):
+            """
+            Request log probabilities of next tokens in a batch synchronously.
+
+            Args:
+                token_ids_list (list[list[int]]): A list of token ID lists, each representing a prompt to the language model.
+
+            Returns:
+                (torch.Tensor): A tensor of normalized log probability tensors, one for each prompt in the input list.
+            """
+            req_ids = []
+            for token_ids in token_ids_list:
+                req_id = str(next(self.request_counter))
+                req_ids.append(req_id)
+                self.async_llm_engine.engine.add_request(
+                    prompt=TokensPrompt(prompt_token_ids=token_ids),
+                    params=self.default_params,
+                    request_id=req_id,
+                )
+
+            req_id2outputs = {}
+            with self._optimized_sampling_context():
+                while self.async_llm_engine.engine.has_unfinished_requests():
+                    output = self.async_llm_engine.engine.step()
+                    for out in output:
+                        if out.finished:
+                            assert (
+                                out.request_id not in req_id2outputs
+                            ), f"Duplicate outputs for request {out.request_id}"
+                            assert (
+                                out.request_id in req_ids
+                            ), f"{out.request_id} not in requested IDs"
+                            req_id2outputs[out.request_id] = out
+
+            logprobs = [
+                self._validate_outputs([req_id2outputs[req_id]]) for req_id in req_ids
+            ]
+
+            return torch.stack(logprobs)
 
         @contextmanager
         def _optimized_sampling_context(self):

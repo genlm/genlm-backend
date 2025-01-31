@@ -18,8 +18,8 @@ def test_async_batching(async_llm):
     test_prompts = [
         "There might be something wrong",
         "with the language model code",
-        "with the language model code",  # Check duplicate query logic
         "It's probably this or that",
+        "with the language model code",  # Check duplicate query logic
     ]
     token_ids_list = [async_llm.tokenizer.encode(p) for p in test_prompts]
 

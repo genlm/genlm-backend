@@ -174,7 +174,6 @@ class AsyncTransformer(AsyncLM):
         if len(queries) == 0:
             return
 
-        # Group duplicate queries to avoid redundant computation
         query_groups = defaultdict(list)
         for query in queries:
             key = tuple(query.prompt)  # XXX: cache based on past_len too?
@@ -194,13 +193,19 @@ class AsyncTransformer(AsyncLM):
         )
 
         input_ids = torch.tensor(
-            [q.prompt_padded(padding_token_id, max_query_length) for q in queries]
+            [
+                q.prompt_padded(padding_token_id, max_query_length)
+                for q in unique_queries
+            ]
         ).to(self.device)
         attn_masks = torch.tensor(
-            [q.attention_mask(max_past_length, max_query_length) for q in queries]
+            [
+                q.attention_mask(max_past_length, max_query_length)
+                for q in unique_queries
+            ]
         ).to(self.device)
         posn_ids = torch.tensor(
-            [q.position_ids(max_past_length, max_query_length) for q in queries]
+            [q.position_ids(max_past_length, max_query_length) for q in unique_queries]
         ).to(self.device)
         if past_example:
             pasts = [
@@ -216,7 +221,7 @@ class AsyncTransformer(AsyncLM):
                                     self.device,
                                     past_example[0][0].shape,
                                 )
-                                for q in queries
+                                for q in unique_queries
                             ),
                         ),
                         dim=0,
@@ -235,6 +240,8 @@ class AsyncTransformer(AsyncLM):
             past_key_values=pasts,
             use_cache=pasts is not None,
         )
+
+        assert len(results.logits) == len(unique_queries)
 
         for i, q in enumerate(unique_queries):
             result = results.logits[i]
