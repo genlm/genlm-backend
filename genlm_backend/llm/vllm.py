@@ -20,7 +20,25 @@ except ImportError:
         "vLLM not installed. Run 'pip install vllm' to use the vLLM-based AsyncLM model."
     )
 
-if HAS_VLLM:
+if not HAS_VLLM:
+
+    class AsyncVirtualLM:
+        """Placeholder class when vLLM is not installed."""
+
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "vLLM is not installed. Please install it with 'pip install vllm' "
+                "to use the vLLM-based AsyncLM model."
+            )
+
+        @classmethod
+        def from_name(cls, *args, **kwargs):
+            raise ImportError(
+                "vLLM is not installed. Please install it with 'pip install vllm' "
+                "to use the vLLM-based AsyncLM model."
+            )
+
+else:
     logging.getLogger("vllm.engine.async_llm_engine").setLevel(logging.WARNING)
 
     class AsyncVirtualLM(AsyncLM):
@@ -239,23 +257,6 @@ if HAS_VLLM:
             """Clean up the vLLM engine and associated resources."""
             if async_engine := getattr(self, "async_llm_engine", None):
                 async_engine.shutdown_background_loop()
-else:
-
-    class AsyncVirtualLM:
-        """Placeholder class when vLLM is not installed."""
-
-        def __init__(self, *args, **kwargs):
-            raise ImportError(
-                "vLLM is not installed. Please install it with 'pip install vllm' "
-                "to use the vLLM-based AsyncLM model."
-            )
-
-        @classmethod
-        def from_name(cls, *args, **kwargs):
-            raise ImportError(
-                "vLLM is not installed. Please install it with 'pip install vllm' "
-                "to use the vLLM-based AsyncLM model."
-            )
 
 
 class DeferredSampler(torch.nn.Module):
