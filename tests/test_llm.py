@@ -76,12 +76,13 @@ def test_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list):
     have_in_async = asyncio.run(async_context())
     assert compare(have_in_async, want).max_rel_err < 1e-5, "Sync in async context"
 
+
 @cuda_only
 def test_batch_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list):
     # Test 1: Regular sync context
     haves = async_llm.batch_next_token_logprobs_sync(token_ids_list).cpu().numpy()
     wants = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
-    
+
     for have, want in zip(haves, wants):
         assert compare(have, want).max_rel_err < 1e-5, "Sync context"
 

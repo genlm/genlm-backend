@@ -1,8 +1,6 @@
 import torch
 import logging
-import asyncio
 import warnings
-import concurrent.futures
 from contextlib import contextmanager
 
 from genlm_backend.llm.base import AsyncLM
@@ -172,14 +170,20 @@ if HAS_VLLM:
             with self._optimized_sampling_context():
                 while self.async_llm_engine.engine.has_unfinished_requests():
                     output = self.async_llm_engine.engine.step()
-                    for out in output:  
+                    for out in output:
                         if out.finished:
-                            assert out.request_id not in req_id2outputs, f"Duplicate outputs for request {out.request_id}"
-                            assert out.request_id in req_ids, f"{out.request_id} not in requested IDs"
+                            assert (
+                                out.request_id not in req_id2outputs
+                            ), f"Duplicate outputs for request {out.request_id}"
+                            assert (
+                                out.request_id in req_ids
+                            ), f"{out.request_id} not in requested IDs"
                             req_id2outputs[out.request_id] = out
 
-            logprobs = [self._validate_outputs([req_id2outputs[req_id]]) for req_id in req_ids]
-            
+            logprobs = [
+                self._validate_outputs([req_id2outputs[req_id]]) for req_id in req_ids
+            ]
+
             return torch.stack(logprobs)
 
         @contextmanager
