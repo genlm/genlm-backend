@@ -36,8 +36,8 @@ docs = [
     "mkdocs-section-index",
 ]
 
-[tool.setuptools]
-packages = "find:"
+[tool.setuptools.packages.find]
+include = ["*"]
 
 [build-system]
 requires = ["setuptools>=61.0"]
