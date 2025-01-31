@@ -59,6 +59,18 @@ class AsyncLM(ABC):
 
         return torch.stack(logprobs)
 
+    @abstractmethod
+    def batch_next_token_logprobs_sync(self, token_ids_list):
+        """Batch request log probabilities for multiple token sequences synchronously.
+
+        Args:
+            token_ids_list (list[list[int]]): A list of token ID lists.
+
+        Returns:
+            (torch.Tensor): A tensor of log probability tensors.
+        """
+        pass
+
     def clear_cache(self):
         """Clear any caches used by the language model. No-op in base class."""
         pass
