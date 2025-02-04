@@ -103,7 +103,7 @@ class ParallelTokenCharacterTrie(TokenCharacterTrie):
         Returns:
             (numpy.ndarray): Summed masses for each node in the trie.
         """
-        return self.batch_mass_sum(p_llm.unsqueeze(0))
+        return self.batch_mass_sum(p_llm.unsqueeze(0))[0]
 
     def batch_mass_sum(self, p_llms):
         """Computes mass sums for a batch of probability distributions.
