@@ -15,11 +15,8 @@ from genlm_backend.trie import (
 
 
 @pytest.fixture()
-def vocab():
-    decode = [b"a", b"b", b"ab", b"<eos>"]
-    old_eos = b"<eos>"
-    new_eos = b"."
-    return decode, old_eos, new_eos
+def decode():
+    return [b"a", b"b", b"ab", b"<eos>"]
 
 
 @pytest.fixture(scope="module")
@@ -27,34 +24,41 @@ def mock_llm():
     return MockAsyncLM(AutoTokenizer.from_pretrained("gpt2"))
 
 
-def test_sequential_mass_sum(vocab):
-    decode, old_eos, new_eos = vocab
-
-    trie = TokenCharacterTrie(decode=decode, old_eos=old_eos, new_eos=new_eos)
+def test_sequential_mass_sum(decode):
+    trie = TokenCharacterTrie(decode=decode)
     haves = trie.mass_sum(torch.tensor([0.1, 0.2, 0.2, 0.5]))
 
-    leaf_wants = {b"a": 0.1, b"b": 0.2, b"ab": 0.2, b".": 0.5}
-    internal_wants = {b"": 1, b"a": 0.3, b"b": 0.2, b"ab": 0.2, b".": 0.5}
+    leaf_wants = {
+        b"a": 0.1,
+        b"b": 0.2,
+        b"ab": 0.2,
+        b"<eos>": 0.5,
+    }
+    internal_wants = {
+        b"": 1,
+        b"a": 0.3,
+        b"b": 0.2,
+        b"ab": 0.2,
+        b"<": 0.5,
+        b"<e": 0.5,
+        b"<eo": 0.5,
+        b"<eos": 0.5,
+        b"<eos>": 0.5,
+    }
 
     for node, prefix in trie.node2prefix.items():
         have = haves[node]
         if node in trie.leaf2word:
-            want = leaf_wants[prefix]
+            want = leaf_wants[bytes(prefix)]
         else:
-            want = internal_wants[prefix]
+            want = internal_wants[bytes(prefix)]
         assert np.isclose(have, want, rtol=1e-5, atol=1e-8), [have, want, prefix]
 
 
-def _test_mass_sum_agreement(vocab, device):
-    decode, old_eos, new_eos = vocab
+def _test_mass_sum_agreement(decode, device):
+    sequential_trie = TokenCharacterTrie(decode=decode)
 
-    sequential_trie = TokenCharacterTrie(
-        decode=decode, old_eos=old_eos, new_eos=new_eos
-    )
-
-    parallel_trie = ParallelTokenCharacterTrie(
-        decode=decode, old_eos=old_eos, new_eos=new_eos, device=device
-    )
+    parallel_trie = ParallelTokenCharacterTrie(decode=decode, device=device)
 
     p_llms = torch.stack(
         [
@@ -73,13 +77,13 @@ def _test_mass_sum_agreement(vocab, device):
         assert compare(have, want).max_rel_err <= 0.001
 
 
-def test_mass_sum_agreement_cpu(vocab):
-    _test_mass_sum_agreement(vocab, "cpu")
+def test_mass_sum_agreement_cpu(decode):
+    _test_mass_sum_agreement(decode, "cpu")
 
 
 @cuda_only
-def test_mass_sum_agreement_gpu(vocab):
-    _test_mass_sum_agreement(vocab, "cuda")
+def test_mass_sum_agreement_gpu(decode):
+    _test_mass_sum_agreement(decode, "cuda")
 
 
 def _test_async_trie(mock_llm, backend):
