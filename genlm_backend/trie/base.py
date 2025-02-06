@@ -11,68 +11,19 @@ class TokenCharacterTrie:
     probability of each prefix under a given distribution over the token vocabulary.
     """
 
-    def __init__(self, decode, old_eos=None, new_eos=None):
+    def __init__(self, decode):
         """Initialize a `TokenCharacterTrie`.
 
         Args:
-            decode (list[bytes]): List of byte strings representing the token vocabulary.
-            old_eos (str|bytes|None): The current end-of-sequence token to be replaced. If provided as str,
-                                    will be encoded to bytes.
-            new_eos (str|bytes|None): The new end-of-sequence token to use. If provided as str, will be
-                                    encoded to bytes.
+            decode (list): List representing the token vocabulary.
         """
-        if not all(isinstance(x, bytes) for x in decode):
-            raise ValueError("All elements in decode must be byte strings")
-
         self.decode = decode
-        self._convert_eos(old_eos, new_eos)
-        self._build_trie()
-
-    def _convert_eos(self, old_eos, new_eos):
-        """Configure EOS token conversion settings.
-
-        Args:
-            old_eos (str|bytes|None): Original EOS token to be converted
-            new_eos (str|bytes|None): New EOS token to convert to
-
-        Raises:
-            ValueError: If only one of old_eos or new_eos is provided
-        """
-        if (old_eos is None) != (new_eos is None):
-            raise ValueError(
-                "Both old_eos and new_eos must be provided together, or neither should be provided"
-            )
-
-        old_eos = (
-            old_eos.encode("utf-8")
-            if old_eos and not isinstance(old_eos, bytes)
-            else old_eos
-        )
-        new_eos = (
-            new_eos.encode("utf-8")
-            if new_eos and not isinstance(new_eos, bytes)
-            else new_eos
-        )
-
-        if (new_eos is not None) and (new_eos in self.decode):
-            raise ValueError(f"new_eos token {new_eos!r} already exists in vocabulary")
-
-        self.old_eos = old_eos
-        self.new_eos = new_eos
-        self.convert_eos = (old_eos is not None) and (new_eos is not None)
-        self.old_eos_id = self.decode.index(self.old_eos) if self.convert_eos else None
-
-    def _build_trie(self):
-        """Construct the trie structure from the vocabulary."""
         self.word2leaf = {}
         self.children = [{}]  # First node is root
         self.root = 0
         self.token_id_to_leaf = []
 
         for token_id, word in enumerate(self.decode):
-            if self.convert_eos and word == self.old_eos:
-                word = self.new_eos  # coerce old eos to new eos
-
             curr = self.root
             for letter in word:
                 if letter not in self.children[curr]:
@@ -104,15 +55,13 @@ class TokenCharacterTrie:
             ordering[x] = i
         self._rename(f=lambda x: ordering[x])
 
-        node2prefix = {self.root: b""}
+        node2prefix = {self.root: []}
         for x in reversed(range(len(self.children))):
             for letter, y in self.children[x].items():
-                if isinstance(letter, int):
-                    letter = bytes([letter])
                 if letter is None:
                     node2prefix[y] = node2prefix[x]
                 else:
-                    node2prefix[y] = node2prefix[x] + letter
+                    node2prefix[y] = node2prefix[x] + [letter]
         self.node2prefix = node2prefix
 
     def _rename(self, f):
@@ -167,8 +116,6 @@ class TokenCharacterTrie:
                 p_llm = p_llm.cpu()
             p_llm = p_llm.numpy()
         mass = self._alloc_mass()
-        if self.convert_eos:
-            mass[self.word2leaf[self.new_eos]] = p_llm[self.old_eos_id]
         _update_trie_numba(
             mass=mass,
             _p=p_llm,
@@ -259,7 +206,7 @@ class TokenCharacterTrie:
             legend.edge(
                 "legend_internal",
                 "legend_leaf",
-                label="Character (Byte value)",
+                label="Token item",
                 fontsize="10",
             )
 
@@ -269,7 +216,7 @@ class TokenCharacterTrie:
 
         # Add the main trie nodes and edges
         for node_id in range(len(self.children)):
-            prefix = self.node2prefix[node_id].decode("utf-8", errors="replace")
+            prefix = self.node2prefix[node_id]
 
             if mass is not None:
                 label = f"{node_id}\n'{prefix}'\n{mass[node_id]:.4f}"
@@ -303,11 +250,7 @@ class TokenCharacterTrie:
         for node_id, children in enumerate(self.children):
             for char, child_id in children.items():
                 if char is not None:
-                    if isinstance(char, int):
-                        s_char = bytes([char]).decode("utf-8", errors="replace")
-                        edge_label = str(s_char) + f" ({char})"
-                    else:
-                        edge_label = str(char)
+                    edge_label = str(char)
                 else:
                     edge_label = "End-of-Token"
 

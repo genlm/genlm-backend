@@ -116,7 +116,9 @@ class ParallelTokenCharacterTrie(TokenCharacterTrie):
             (numpy.ndarray): Summed masses for each node in the trie,
                 shape (batch_size × num_nodes).
         """
-        if p_llms.device != self.device:
-            p_llms = p_llms.to(self.device)
+        if not isinstance(p_llms, torch.Tensor):
+            p_llms = torch.tensor(p_llms, device=self.device, dtype=torch.float32)
+        elif p_llms.device != self.device or p_llms.dtype != torch.float32:
+            p_llms = p_llms.to(device=self.device, dtype=torch.float32)
         masses = torch.sparse.mm(p_llms[:, self.token_ids], self.M)
         return masses.cpu().numpy()
