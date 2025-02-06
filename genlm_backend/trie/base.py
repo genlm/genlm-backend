@@ -15,7 +15,8 @@ class TokenCharacterTrie:
         """Initialize a `TokenCharacterTrie`.
 
         Args:
-            decode (list): List representing the token vocabulary. Each element of the list must be iterable. 
+            decode (list): List representing the token vocabulary. 
+                Each element of the list must be iterable. 
         """
         self.decode = decode
         self.word2leaf = {}
