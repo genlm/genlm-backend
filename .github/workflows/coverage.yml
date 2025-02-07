@@ -9,7 +9,7 @@ on:
 
 
 jobs:
-  test:
+  test_coverage:
     runs-on: ParallelHoss
 
     steps:
@@ -27,7 +27,7 @@ jobs:
           python -m venv venv
           source venv/bin/activate
           pip install -e .[test]
-          coverage run -m pytest --benchmark-disable --ignore scratch
+          coverage run -m pytest --source=genlm_backend --benchmark-disable --ignore scratch
           coverage json --omit "*/test*"
           coverage report --omit "*/test*"
 
