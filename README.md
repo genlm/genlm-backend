@@ -1,5 +1,6 @@
 [![Docs](https://github.com/chi-collective/genlm-backend/actions/workflows/docs.yml/badge.svg)](https://probcomp.github.io/genlm-backend/)
 [![Tests](https://github.com/chi-collective/genlm-backend/actions/workflows/pytest.yml/badge.svg)](https://github.com/probcomp/genlm-backend/actions/workflows/pytest.yml)
+[![codecov](https://codecov.io/github/chi-collective/genlm-backend/graph/badge.svg?token=AS70lcuXra)](https://codecov.io/github/chi-collective/genlm-backend)
 
 # GenLM Backend
 
