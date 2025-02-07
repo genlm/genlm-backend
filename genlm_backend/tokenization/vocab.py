@@ -171,8 +171,8 @@ def assert_roundtrip(test_case, tokenizer, vocab, vocab_type):
             error_msg = (
                 f"\nRoundtrip assertion failed for {vocab_type} vocabulary:"
                 f"\nMismatch at position {pos}"
-                f"\nHave: ...{repr(have[max(0, pos-context):pos + context])}..."
-                f"\nWant: ...{repr(want[max(0, pos-context):pos + context])}..."
+                f"\nHave: ...{repr(have[max(0, pos - context) : pos + context])}..."
+                f"\nWant: ...{repr(want[max(0, pos - context) : pos + context])}..."
             )
 
             raise AssertionError(error_msg)

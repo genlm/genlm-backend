@@ -194,12 +194,12 @@ else:
                     output = self.async_llm_engine.engine.step()
                     for out in output:
                         if out.finished:
-                            assert (
-                                out.request_id not in req_id2outputs
-                            ), f"Duplicate outputs for request {out.request_id}"
-                            assert (
-                                out.request_id in req_ids
-                            ), f"{out.request_id} not in requested IDs"
+                            assert out.request_id not in req_id2outputs, (
+                                f"Duplicate outputs for request {out.request_id}"
+                            )
+                            assert out.request_id in req_ids, (
+                                f"{out.request_id} not in requested IDs"
+                            )
                             req_id2outputs[out.request_id] = out
 
             logprobs = [
@@ -234,9 +234,9 @@ else:
             assert len(outputs) == 1, "Expected exactly one sequence group"
             seq_group = outputs[0]
 
-            assert (
-                len(seq_group.outputs) == 1
-            ), "Expected exactly one sequence in output"
+            assert len(seq_group.outputs) == 1, (
+                "Expected exactly one sequence in output"
+            )
             sequence = seq_group.outputs[0]
 
             assert len(sequence.logprobs) == 1, "Expected exactly one set of logprobs"

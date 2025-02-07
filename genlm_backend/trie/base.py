@@ -34,9 +34,9 @@ class TokenCharacterTrie:
 
             self.children[curr][None] = last = len(self.children)
             self.children.append({})
-            assert (
-                word not in self.word2leaf
-            ), "Can't have duplicate words in vocabulary"
+            assert word not in self.word2leaf, (
+                "Can't have duplicate words in vocabulary"
+            )
             self.word2leaf[word] = last
 
             self.token_id_to_leaf.append((token_id, last))
