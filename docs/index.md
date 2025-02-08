@@ -14,7 +14,7 @@ GenLM Backend is a high-performance backend for language model probabilistic pro
 
 Clone the repository:
 ```bash
-git clone https://github.com/probcomp/genlm-backend.git
+git clone https://github.com/chisym/genlm-backend.git
 cd genlm_backend
 ```
 and install with pip:
@@ -128,7 +128,7 @@ pytest tests
 
 ## Performance Benchmarking
 
-Performance benchmarks comparing different configurations can be found in our [benchmarks directory](https://github.com/probcomp/genlm-backend/tree/main/benchmark).
+Performance benchmarks comparing different configurations can be found in our [benchmarks directory](https://github.com/chisym/genlm-backend/tree/main/benchmark).
 
 ## Troubleshooting
 
