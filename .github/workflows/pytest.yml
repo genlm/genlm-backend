@@ -11,10 +11,7 @@ on:
 
 jobs:
   test:
-    strategy:
-      matrix:
-        runner: [ubuntu-22.04, ParallelHoss]
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v4
@@ -24,18 +21,11 @@ jobs:
       - uses: actions/setup-python@v4
         with:
           python-version: 3.11.5
-
-      - name: Cache pip packages
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-${{ matrix.runner }}-pip-${{ hashFiles('**/setup.py', '**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.runner }}-pip-
+          cache: 'pip'
 
       - name: Run Tests
         run: |
           python -m venv venv
           source venv/bin/activate
           pip install -e .[test]
-          pytest tests/
+          pytest tests
