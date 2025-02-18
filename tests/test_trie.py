@@ -227,7 +227,7 @@ def test_parallel_preprocessing(decode, device):
             [[0.5, 0.5, 0.5, 0.5], [0.1, 0.5, 0.5, 0.5]], device=wrong_device
         )
         processed = parallel_trie._preprocess_ws(tensor_weights)
-        assert processed.device == parallel_trie.device
+        assert processed.device.type == parallel_trie.device
         assert processed.dtype == torch.float32
 
 
