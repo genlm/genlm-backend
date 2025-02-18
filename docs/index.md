@@ -64,7 +64,7 @@ See the [LLM Code Reference](reference/genlm_backend/llm/__init__/) for detailed
 
 ### Token-Character Tries
 
-The [`genlm_backend.trie`](reference/genlm_backend/trie/__init__/) module provides an efficient trie data structure for mapping probability distributions over tokens to distributions over bytes. This module enables applications which operate at the byte level rather than the token level.
+The [`genlm_backend.trie`](reference/genlm_backend/trie/__init__/) module provides an efficient trie data structure for mapping weight distributions over tokens to weight distributions over token prefixes.
 
 ```python
 from genlm_backend.trie import TokenCharacterTrie
@@ -75,21 +75,21 @@ trie.visualize()
 
 ![Example trie visualization](images/trie_example.svg)
 
-Each node in the trie corresponds to a prefix of one or multiple tokens in the byte vocabulary. Internal nodes correspond to the incomplete prefixes and leaf nodes to complete tokens. The `mass_sum` function provides the marginal probability of each prefix (i.e., node) given a distribution on the underlying vocabulary:
+Each node in the trie corresponds to a prefix of one or multiple tokens in the vocabulary. Internal nodes correspond to the incomplete prefixes and leaf nodes to complete tokens. The `weight_sum` function provides the marginal weight of each prefix (i.e., node) given a distribution on the underlying vocabulary:
 
 ```python
 # Get mass at each node given a distribution over the vocab
-mass = trie.mass_sum(p_llm=[0.4, 0.1, 0.3, 0.2])
-trie.visualize(mass)
+ws = trie.weight_sum([0.4, 0.1, 0.3, 0.2])
+trie.visualize(ws)
 ```
 
-![Example trie visualization with mass at each node](images/trie_example_mass.svg)
+![Example trie visualization with weights at each node](images/trie_example_mass.svg)
 
 
 This submodule includes three key classes:
 
 - **TokenCharacterTrie** (CPU): Base implementation for CPU usage.
-- **ParallelTokenCharacterTrie** (GPU): GPU-accelerated version which uses sparse matrix operations for mass summing. Extends **TokenCharacterTrie** with a `batch_mass_sum` function.
+- **ParallelTokenCharacterTrie** (GPU): GPU-accelerated version which uses sparse matrix operations for mass summing.
 - **AsyncTokenCharacterTrie** (Async): Asynchronous wrapper for use in asynchronous contexts; enables automatic batching of concurrent requests. This class can wrap either the sequential or parallel trie implementations.
 
 See the [Trie Code Reference](reference/genlm_backend/trie/__init__/) for detailed API documentation.

@@ -85,8 +85,6 @@ class ParallelTokenCharacterTrie(TokenCharacterTrie):
 
         Returns:
             (numpy.ndarray): Summed weights for each node in the trie, shape (`len(self.decode)`,).
-                For each internal node in the trie, the value represents the sum of weights of all leaf nodes (tokens)
-                that are descendants of that node. For leaf nodes, the value represents the corresponding token's weight.
         """
         return self.batch_weight_sum(self._preprocess_ws([ws]))[0]
 
@@ -115,8 +113,6 @@ class ParallelTokenCharacterTrie(TokenCharacterTrie):
 
         Returns:
             (numpy.ndarray): Maximum weights for each node in the trie, shape (`len(self.decode)`,).
-                For each internal node, the value represents the maximum weight among all leaf nodes
-                that are descendants of the node. For leaf nodes, the value represents the corresponding token's weight.
         """
         return self.batch_weight_max(self._preprocess_ws([ws]))[0]
 
