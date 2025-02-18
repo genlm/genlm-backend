@@ -12,7 +12,7 @@ Note that the library's test dependencies must be installed, which can be done b
     ```
 
 ## Mass Sum Performance
-* `benchmark_mass_sum.py`: Compares different implementations of TokenCharacterTrie mass_sum calculations:
+* `benchmark_weight_sum.py`: Compares different implementations of TokenCharacterTrie weight_sum calculations:
   - Sequential vs parallel implementations
   - CPU vs GPU parallel implementations
   - Sync vs async implementations
@@ -20,7 +20,7 @@ Note that the library's test dependencies must be installed, which can be done b
   Run with:
 
     ```bash
-    pytest benchmark/benchmark_mass_sum.py --benchmark-only
+    pytest benchmark/benchmark_weight_sum.py --benchmark-only
     ```
 
 ## Internal Optimizations

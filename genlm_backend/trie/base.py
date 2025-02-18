@@ -5,11 +5,7 @@ from numba.typed import List
 
 
 class TokenCharacterTrie:
-    """A trie data structure for efficient token-to-character mapping and probability mass computation.
-
-    Each node in the trie corresponds to a token prefix. The probability mass computation provides the marginal
-    probability of each prefix under a given distribution over the token vocabulary.
-    """
+    """A trie data structure for efficient token-to-character mapping."""
 
     def __init__(self, decode):
         """Initialize a `TokenCharacterTrie`.
@@ -94,48 +90,96 @@ class TokenCharacterTrie:
             [np.array(sorted(x.values()), dtype=np.int32) for x in new_children]
         )
 
-    def _alloc_mass(self):
-        """Allocate an array to store probability mass values for all nodes.
+    def _alloc_weights(self):
+        """Allocate an array to store weight values for all nodes.
 
         Returns:
-            np.ndarray: Zero-initialized array for storing probability mass values
+            np.ndarray: Zero-initialized array for storing weight values
         """
         return np.zeros(len(self.children), dtype=np.float64)
 
-    def mass_sum(self, p_llm):
-        """Compute probability mass for each node in the trie.
+    def _preprocess_ws(self, ws):
+        """Preprocess the weight vector to ensure it is a numpy array and on the correct device.
 
         Args:
-            p_llm (torch.Tensor|np.ndarray): Token probabilities from language model
+            ws (torch.Tensor|np.ndarray): Token weights over the vocabulary of shape `(len(self.decode),)`
 
         Returns:
-            (np.ndarray): Probability mass values for each node in the trie.
-                The mass corresponds to the marginal probability under `p_llm` of the prefix represented by the node.
+            (np.ndarray): Weight vector
         """
-        if isinstance(p_llm, torch.Tensor):
-            if p_llm.device.type != "cpu":
-                p_llm = p_llm.cpu()
-            p_llm = p_llm.numpy()
-        mass = self._alloc_mass()
-        _update_trie_numba(
-            mass=mass,
-            _p=p_llm,
+        if isinstance(ws, torch.Tensor):
+            if ws.device.type != "cpu":
+                ws = ws.cpu()
+            ws = ws.numpy()
+        return ws
+
+    def weight_sum(self, ws):
+        """Compute weight sum for each node in the trie.
+
+        For each node in the trie, this computes the sum of weights of all leaf nodes (tokens)
+        that are descendants of that node.
+
+        Args:
+            ws (torch.Tensor|np.ndarray): Token weights over the vocabulary of shape `(len(self.decode),)`
+
+        Returns:
+            (np.ndarray): Summed weights for each node in the trie.
+        """
+        ws = self._preprocess_ws(ws)
+        node_ws = self._alloc_weights()
+        _update_trie_numba_sum(
+            node_ws=node_ws,
+            ws=ws,
             token_id_to_leaf=self.token_id_to_leaf,
             jump=self.jump,
             ordering=self.ordering,
         )
-        return mass
+        return node_ws
 
-    def batch_mass_sum(self, p_llms):
-        """Compute probability mass for multiple distributions over tokens.
+    def weight_max(self, ws):
+        """Compute weight max for each node in the trie.
+
+        For each node in the trie, this computes the maximum weight among all leaf nodes (tokens)
+        that are descendants of that node.
 
         Args:
-            p_llms (list[torch.Tensor|np.ndarray]): Batch of token probability distributions
+            ws (torch.Tensor|np.ndarray): Token weights over the vocabulary of shape `(len(self.decode),)`
 
         Returns:
-            (np.ndarray): Batch of probability mass values of `len(p_llms)` for each node in the trie
+            (np.ndarray): Weight max values for each node in the trie.
         """
-        return np.array([self.mass_sum(p_llm) for p_llm in p_llms])
+        ws = self._preprocess_ws(ws)
+        node_ws = self._alloc_weights()
+        _update_trie_numba_max(
+            node_ws=node_ws,
+            ws=ws,
+            token_id_to_leaf=self.token_id_to_leaf,
+            jump=self.jump,
+            ordering=self.ordering,
+        )
+        return node_ws
+
+    def batch_weight_sum(self, ws):
+        """Batched equivalent of `weight_sum`.
+
+        Args:
+            ws (list[torch.Tensor|np.ndarray]): Batch of token weights, each of shape `(len(self.decode),)`
+
+        Returns:
+            (np.ndarray): Batch of weight values of `len(ws)` for each node in the trie
+        """
+        return np.array([self.weight_sum(ws) for ws in ws])
+
+    def batch_weight_max(self, ws):
+        """Batched equivalent of `weight_max`.
+
+        Args:
+            ws (list[torch.Tensor|np.ndarray]): Batch of token weights, each of shape `(len(self.decode),)`
+
+        Returns:
+            (np.ndarray): Batch of weight max values of `len(ws)` for each node in the trie
+        """
+        return np.array([self.weight_max(ws) for ws in ws])
 
     def _order(self, node):
         """Generate a topological ordering of nodes beneath the given node.
@@ -166,11 +210,11 @@ class TokenCharacterTrie:
             yield from self._order_full(self.children[node][a])
         yield node
 
-    def visualize(self, mass=None):
+    def visualize(self, ws=None):
         """Visualize the trie structure using Graphviz.
 
         Args:
-            mass (np.ndarray|None): Optional mass vector to display at each node.
+            ws (np.ndarray|None): Optional weight vector to display at each node.
                                 Should be of length `len(self.children)`.
 
         Returns:
@@ -181,9 +225,9 @@ class TokenCharacterTrie:
         except ImportError:
             raise ImportError("Please install graphviz: pip install graphviz")
 
-        if mass is not None and len(mass) != len(self.children):
+        if ws is not None and len(ws) != len(self.children):
             raise ValueError(
-                f"Mass vector length ({len(mass)}) must match number of nodes ({len(self.children)})"
+                f"Weight vector length ({len(ws)}) must match number of nodes ({len(self.children)})"
             )
 
         dot = graphviz.Digraph(comment="Token Character Trie")
@@ -197,7 +241,7 @@ class TokenCharacterTrie:
             # Example internal node
             legend.node(
                 "legend_internal",
-                "Internal Node ID\n'Prefix'\nMass (if provided)",
+                "Internal Node ID\n'Prefix'\nWeight (if provided)",
                 shape="circle",
             )
 
@@ -219,16 +263,16 @@ class TokenCharacterTrie:
         for node_id in range(len(self.children)):
             prefix = self.node2prefix[node_id]
 
-            if mass is not None:
-                label = f"{node_id}\n'{prefix}'\n{mass[node_id]:.4f}"
+            if ws is not None:
+                label = f"{node_id}\n'{prefix}'\n{ws[node_id]:.4f}"
             else:
                 label = f"{node_id}\n'{prefix}'"
 
             # Color nodes based on mass if provided
-            if mass is not None:
-                max_mass = mass.max()
-                if max_mass > 0:
-                    intensity = int(255 * (1 - mass[node_id] / max_mass))
+            if ws is not None:
+                max_ws = ws.max()
+                if max_ws > 0:
+                    intensity = int(255 * (1 - ws[node_id] / max_ws))
                     color = f"#{intensity:02x}{255:02x}{intensity:02x}"
                 else:
                     color = "#ffffff"  # white for zero mass
@@ -261,9 +305,9 @@ class TokenCharacterTrie:
 
 
 @numba.jit(nopython=True)
-def _update_trie_numba(
-    mass: numba.float64[:],
-    _p: numba.float64[:],
+def _update_trie_numba_sum(
+    node_ws: numba.float64[:],
+    ws: numba.float64[:],
     jump: List[numba.int32[:]],
     token_id_to_leaf: numba.int32[:, :],
     ordering: numba.int32[:],
@@ -273,13 +317,38 @@ def _update_trie_numba(
     for k in range(M):
         i = token_id_to_leaf[k, 0]
         x = token_id_to_leaf[k, 1]
-        mass[x] = _p[i]
+        node_ws[x] = ws[i]
 
     # update internal nodes
     N = ordering.shape[0]
     for i in range(N):
         node = ordering[i]
-        total_mass = 0
+        total_ws = 0
         for child in jump[node]:
-            total_mass += mass[child]
-        mass[node] = total_mass
+            total_ws += node_ws[child]
+        node_ws[node] = total_ws
+
+
+@numba.jit(nopython=True)
+def _update_trie_numba_max(
+    node_ws: numba.float64[:],
+    ws: numba.float64[:],
+    jump: List[numba.int32[:]],
+    token_id_to_leaf: numba.int32[:, :],
+    ordering: numba.int32[:],
+):  # pragma: no cover
+    # update leaves
+    M = token_id_to_leaf.shape[0]
+    for k in range(M):
+        i = token_id_to_leaf[k, 0]
+        x = token_id_to_leaf[k, 1]
+        node_ws[x] = ws[i]
+
+    # update internal nodes
+    N = ordering.shape[0]
+    for i in range(N):
+        node = ordering[i]
+        total_w = 0
+        for child in jump[node]:
+            total_w = max(total_w, node_ws[child])
+        node_ws[node] = total_w
