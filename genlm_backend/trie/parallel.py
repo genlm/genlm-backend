@@ -3,36 +3,7 @@ from genlm_backend.trie.base import TokenCharacterTrie
 
 
 class ParallelTokenCharacterTrie(TokenCharacterTrie):
-    """A GPU-optimized version of `TokenCharacterTrie` that performs `mass_sum` in parallel.
-
-    Inherits from `TokenCharacterTrie`.
-
-    The mass at leaf nodes is propagated to their ancestors through sparse matrix
-    multiplication with a reachability matrix. The reachability matrix is constructed at initialization.
-
-    Implementation details:\n
-        The reachability matrix M is a num_leafs × num_nodes matrix
-        where M[i,j] = 1 if:\n
-            - leaf_indices[i] == j (self connection) or
-            - j is an ancestor of leaf_indices[i] in the trie
-
-        Example:\n
-            Trie:          M:
-                 0           [[1, 1, 0, 1],
-                / \\           [1, 0, 1, 0]]
-               1   2 (leaf index = 1)
-               |
-               3 (leaf index = 0)
-
-        The matrix is stored as a sparse tensor in CSR (Compressed Sparse Row) format,
-        built from COO (Coordinate) format. For example,\n
-            rows = [1, 0, 1, 0, 0] (index of leaf node)
-            cols = [2, 3, 0, 1, 0] (connections)
-            vals = [1, 1, 1, 1, 1] (connection weights)
-
-        When computing masses (batch_size × num_leafs) @ M, each leaf node's mass
-        flows up to all its ancestors.
-    """
+    """A GPU-optimized version of `TokenCharacterTrie` that performs weight sum and max operations in parallel."""
 
     def __init__(self, decode, device=None, **kwargs):
         super().__init__(decode, **kwargs)
@@ -41,7 +12,7 @@ class ParallelTokenCharacterTrie(TokenCharacterTrie):
         if self.device not in ["cpu", "cuda"]:
             raise ValueError(f"Invalid device: {device}. Must be 'cpu', 'cuda' or None")
 
-        self.M = self._build_reachability_matrix()
+        self._build_reachability_matrix()
         self.token_ids = torch.tensor(
             self.token_id_to_leaf[:, 0], dtype=torch.long, device=self.device
         )
@@ -59,26 +30,21 @@ class ParallelTokenCharacterTrie(TokenCharacterTrie):
         return parent
 
     def _build_reachability_matrix(self):
-        """Constructs a sparse reachability matrix for efficient mass propagation.
+        """Constructs a sparse reachability matrix for efficient weight propagation.
 
         The matrix M is constructed such that M[i,j] = 1 if node j is either:
         - The leaf node i itself (self-connection)
         - An ancestor of leaf node i in the trie
-
-        Returns:
-            (torch.Tensor): A sparse CSR matrix of shape (num_leafs × num_nodes)
         """
-        rows, cols = [], []
         leaf_indices = self.token_id_to_leaf[:, 1]
+        parent = self._build_parent_map()
 
-        # add self connections
+        rows, cols = [], []
         for i, node in enumerate(leaf_indices):
+            # self connections
             rows.append(i)
             cols.append(node)
 
-        # add all ancestor connections
-        parent = self._build_parent_map()
-        for i, node in enumerate(leaf_indices):
             current = node
             while current in parent:  # Walk up to root
                 ancestor = parent[current]
@@ -86,39 +52,97 @@ class ParallelTokenCharacterTrie(TokenCharacterTrie):
                 cols.append(ancestor)
                 current = ancestor
 
+        self.src_indices = torch.tensor(rows, dtype=torch.long, device=self.device)
+        self.dst_indices = torch.tensor(cols, dtype=torch.long, device=self.device)
+
         indices = torch.tensor([rows, cols], dtype=torch.long, device=self.device)
         values = torch.ones(len(rows), device=self.device)
-        M = torch.sparse_coo_tensor(
+
+        self.M = torch.sparse_coo_tensor(
             indices, values, (len(leaf_indices), len(self.children))
         ).to_sparse_csr()
 
-        return M
+    def _preprocess_ws(self, batch_ws):
+        processed_batch_ws = []
+        for ws in batch_ws:
+            if not isinstance(ws, torch.Tensor):
+                ws = torch.tensor(ws, device=self.device, dtype=torch.float32)
+            elif ws.device != self.device or ws.dtype != torch.float32:
+                ws = ws.to(device=self.device, dtype=torch.float32)
+            assert ws.shape[0] == len(self.decode), [ws.shape[0], len(self.decode)]
+            processed_batch_ws.append(ws)
+        return torch.stack(processed_batch_ws)
 
-    def mass_sum(self, p_llm):
-        """Computes the sum of masses for a single probability distribution.
+    def weight_sum(self, ws):
+        """Computes weight sums for a single distribution.
+
+        For each node in the trie, this computes the sum of weights of all leaf nodes (tokens)
+        that are descendants of that node.
+
+        This is efficiently implemented using sparse matrix multiplication with a pre-computed reachability matrix.
 
         Args:
-            p_llm (torch.Tensor): Probability distribution over tokens from the LLM.
+            ws (torch.Tensor): Distribution over tokens from the LLM.
 
         Returns:
-            (numpy.ndarray): Summed masses for each node in the trie.
+            (numpy.ndarray): Summed masses for each node in the trie. For each node in the trie, this computes
+                the sum of weights of all leaf nodes (tokens) that are descendants of that node.
         """
-        return self.batch_mass_sum(p_llm.unsqueeze(0))[0]
+        return self.batch_weight_sum(self._preprocess_ws([ws]))[0]
 
-    def batch_mass_sum(self, p_llms):
-        """Computes mass sums for a batch of probability distributions.
+    def batch_weight_sum(self, ws):
+        """Batch version of `weight_sum`.
 
         Args:
-            p_llms (torch.Tensor): Batch of probability distributions over tokens,
-                shape (batch_size × vocab_size).
+            ws (torch.Tensor): Batch of weights over tokens, shape (batch_size × vocab_size).
 
         Returns:
-            (numpy.ndarray): Summed masses for each node in the trie,
-                shape (batch_size × num_nodes).
+            numpy.ndarray: Summed weights for each node in the trie, shape (batch_size × num_nodes).
         """
-        if not isinstance(p_llms, torch.Tensor):
-            p_llms = torch.tensor(p_llms, device=self.device, dtype=torch.float32)
-        elif p_llms.device != self.device or p_llms.dtype != torch.float32:
-            p_llms = p_llms.to(device=self.device, dtype=torch.float32)
-        masses = torch.sparse.mm(p_llms[:, self.token_ids], self.M)
+        ws = self._preprocess_ws(ws)
+        masses = torch.sparse.mm(ws[:, self.token_ids], self.M)
         return masses.cpu().numpy()
+
+    def weight_max(self, ws):
+        """Computes the max weights for a single distribution.
+
+        For each node in the trie, this computes the maximum weight among all leaf nodes (tokens)
+        that are descendants of that node. This is efficiently implemented using parallel scatter_reduce
+        operations on GPU.
+
+        Args:
+            ws (torch.Tensor): Probability distribution over tokens from the LLM.
+
+        Returns:
+            (numpy.ndarray): Maximum weights for each node in the trie, shape (batch_size × num_nodes).
+                For each non-leaf node, the value represents the maximum weight among all leaf nodes
+                that are descendants of the node. For leaf nodes, the value represents the corresponding token's weight.
+        """
+        return self.batch_weight_max(self._preprocess_ws([ws]))[0]
+
+    def batch_weight_max(self, ws):
+        """Batch version of `weight_max`.
+
+        Args:
+            ws (torch.Tensor): Batch of weights over tokens, shape (batch_size × vocab_size).
+
+        Returns:
+            (numpy.ndarray): Maximum weights for each node in the trie, shape (batch_size × num_nodes).
+        """
+        ws = self._preprocess_ws(ws)
+
+        # Get leaf weights
+        leaf_weights = ws[:, self.token_ids]  # shape: (batch_size × num_leafs)
+        batch_size = leaf_weights.shape[0]
+
+        # Use scatter_reduce to propagate maximum values in parallel
+        result = torch.zeros((batch_size, len(self.children)), device=self.device)
+        result.scatter_reduce_(
+            dim=1,
+            index=self.dst_indices.expand(batch_size, -1),
+            src=leaf_weights[:, self.src_indices],
+            reduce="amax",
+            include_self=False,
+        )
+
+        return result.cpu().numpy()
