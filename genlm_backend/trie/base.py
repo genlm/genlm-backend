@@ -102,7 +102,7 @@ class TokenCharacterTrie:
         """Preprocess the weight vector to ensure it is a numpy array and on the correct device.
 
         Args:
-            ws (torch.Tensor|np.ndarray): Token weights over the vocabulary of shape `(vocab_size,)`
+            ws (torch.Tensor|np.ndarray): Token weights over the vocabulary of shape `(len(self.decode),)`
 
         Returns:
             (np.ndarray): Weight vector
@@ -120,7 +120,7 @@ class TokenCharacterTrie:
         that are descendants of that node.
 
         Args:
-            ws (torch.Tensor|np.ndarray): Token weights over the vocabulary of shape `(vocab_size,)`
+            ws (torch.Tensor|np.ndarray): Token weights over the vocabulary of shape `(len(self.decode),)`
 
         Returns:
             (np.ndarray): Summed weights for each node in the trie.
@@ -143,7 +143,7 @@ class TokenCharacterTrie:
         that are descendants of that node.
 
         Args:
-            ws (torch.Tensor|np.ndarray): Token weights over the vocabulary of shape `(vocab_size,)`
+            ws (torch.Tensor|np.ndarray): Token weights over the vocabulary of shape `(len(self.decode),)`
 
         Returns:
             (np.ndarray): Weight max values for each node in the trie.
@@ -163,7 +163,7 @@ class TokenCharacterTrie:
         """Batched equivalent of `weight_sum`.
 
         Args:
-            ws (list[torch.Tensor|np.ndarray]): Batch of token weights, each of shape `(vocab_size,)`
+            ws (list[torch.Tensor|np.ndarray]): Batch of token weights, each of shape `(len(self.decode),)`
 
         Returns:
             (np.ndarray): Batch of weight values of `len(ws)` for each node in the trie
@@ -174,7 +174,7 @@ class TokenCharacterTrie:
         """Batched equivalent of `weight_max`.
 
         Args:
-            ws (list[torch.Tensor|np.ndarray]): Batch of token weights, each of shape `(vocab_size,)`
+            ws (list[torch.Tensor|np.ndarray]): Batch of token weights, each of shape `(len(self.decode),)`
 
         Returns:
             (np.ndarray): Batch of weight max values of `len(ws)` for each node in the trie

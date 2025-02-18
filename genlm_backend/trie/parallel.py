@@ -74,19 +74,19 @@ class ParallelTokenCharacterTrie(TokenCharacterTrie):
         return torch.stack(processed_batch_ws)
 
     def weight_sum(self, ws):
-        """Computes weight sums for a single distribution.
+        """Computes weight sums given token weights.
 
         For each node in the trie, this computes the sum of weights of all leaf nodes (tokens)
-        that are descendants of that node.
-
-        This is efficiently implemented using sparse matrix multiplication with a pre-computed reachability matrix.
+        that are descendants of that node. This is efficiently implemented using sparse matrix multiplication
+        with a pre-computed reachability matrix.
 
         Args:
-            ws (torch.Tensor): Distribution over tokens from the LLM.
+            ws (torch.Tensor): Token weights, shape (`len(self.decode)`,).
 
         Returns:
-            (numpy.ndarray): Summed masses for each node in the trie. For each node in the trie, this computes
-                the sum of weights of all leaf nodes (tokens) that are descendants of that node.
+            (numpy.ndarray): Summed weights for each node in the trie, shape (`len(self.decode)`,).
+                For each internal node in the trie, the value represents the sum of weights of all leaf nodes (tokens)
+                that are descendants of that node. For leaf nodes, the value represents the corresponding token's weight.
         """
         return self.batch_weight_sum(self._preprocess_ws([ws]))[0]
 
@@ -94,7 +94,7 @@ class ParallelTokenCharacterTrie(TokenCharacterTrie):
         """Batch version of `weight_sum`.
 
         Args:
-            ws (torch.Tensor): Batch of weights over tokens, shape (batch_size × vocab_size).
+            ws (torch.Tensor): Batch of token weights, shape (batch_size × `len(self.decode)`).
 
         Returns:
             numpy.ndarray: Summed weights for each node in the trie, shape (batch_size × num_nodes).
@@ -104,18 +104,18 @@ class ParallelTokenCharacterTrie(TokenCharacterTrie):
         return masses.cpu().numpy()
 
     def weight_max(self, ws):
-        """Computes the max weights for a single distribution.
+        """Computes the max weights given the token weights.
 
         For each node in the trie, this computes the maximum weight among all leaf nodes (tokens)
         that are descendants of that node. This is efficiently implemented using parallel scatter_reduce
         operations on GPU.
 
         Args:
-            ws (torch.Tensor): Probability distribution over tokens from the LLM.
+            ws (torch.Tensor): Token weights, shape (`len(self.decode)`,).
 
         Returns:
-            (numpy.ndarray): Maximum weights for each node in the trie, shape (batch_size × num_nodes).
-                For each non-leaf node, the value represents the maximum weight among all leaf nodes
+            (numpy.ndarray): Maximum weights for each node in the trie, shape (`len(self.decode)`,).
+                For each internal node, the value represents the maximum weight among all leaf nodes
                 that are descendants of the node. For leaf nodes, the value represents the corresponding token's weight.
         """
         return self.batch_weight_max(self._preprocess_ws([ws]))[0]
@@ -124,7 +124,7 @@ class ParallelTokenCharacterTrie(TokenCharacterTrie):
         """Batch version of `weight_max`.
 
         Args:
-            ws (torch.Tensor): Batch of weights over tokens, shape (batch_size × vocab_size).
+            ws (torch.Tensor): Batch of token weights, shape (batch_size × `len(self.decode)`).
 
         Returns:
             (numpy.ndarray): Maximum weights for each node in the trie, shape (batch_size × num_nodes).

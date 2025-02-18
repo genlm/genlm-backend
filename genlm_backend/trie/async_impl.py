@@ -56,7 +56,7 @@ class AsyncTokenCharacterTrie:
         together.
 
         Args:
-            ws (torch.Tensor): Distribution over the trie's vocabulary of length `len(trie.decode)`.
+            ws (torch.Tensor): Token weights, shape (`len(self.trie.decode)`,).
 
         Returns:
             (np.ndarray): The calculated mass sums for the given distribution.
@@ -70,7 +70,7 @@ class AsyncTokenCharacterTrie:
         together.
 
         Args:
-            ws (torch.Tensor): Distribution over the trie's vocabulary of length `len(trie.decode)`.
+            ws (torch.Tensor): Token weights, shape (`len(self.trie.decode)`,).
 
         Returns:
             (np.ndarray): The calculated max weights for the given distribution.
@@ -127,8 +127,6 @@ class AsyncTokenCharacterTrie:
                         future.set_result(result)
 
             except Exception as e:
-                print(f"Error in background loop: {e}")
-                print(f"Op groups: {op_groups}")
                 for group in op_groups.values():
                     for _, future in group:
                         if not future.done():
