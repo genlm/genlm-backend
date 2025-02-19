@@ -22,14 +22,18 @@ class TokenCharacterTrie:
         self.children = [{}]  # First node is root
         self.root = 0
         self.token_id_to_leaf = []
+        self.prefix2node = {(): self.root}
 
         for token_id, word in enumerate(self.decode):
             curr = self.root
+            prefix = []
             for letter in word:
+                prefix.append(letter)
                 if letter not in self.children[curr]:
                     self.children[curr][letter] = len(self.children)
                     self.children.append({})
                 curr = self.children[curr][letter]
+                self.prefix2node[tuple(prefix)] = curr
 
             self.children[curr][None] = last = len(self.children)
             self.children.append({})
@@ -83,6 +87,10 @@ class TokenCharacterTrie:
         self.children = new_children
         self.word2leaf = {w: f(x) for w, x in self.word2leaf.items()}
         self.leaf2word = dict(zip(self.word2leaf.values(), self.word2leaf.keys()))
+
+        self.prefix2node = {
+            prefix: f(node) for prefix, node in self.prefix2node.items()
+        }
 
         self.token_id_to_leaf = np.array(
             [(i, f(x)) for i, x in self.token_id_to_leaf], dtype=np.int32

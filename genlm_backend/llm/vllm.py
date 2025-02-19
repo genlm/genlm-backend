@@ -1,4 +1,5 @@
 import torch
+import asyncio
 import logging
 import warnings
 from contextlib import contextmanager
@@ -50,6 +51,16 @@ else:
 
         default_params = SamplingParams(
             max_tokens=1, n=1, logprobs=1, detokenize=False, stop=None, ignore_eos=True
+        )
+
+        default_scoring_params = SamplingParams(
+            max_tokens=1,
+            n=1,
+            logprobs=1,
+            detokenize=False,
+            stop=None,
+            ignore_eos=True,
+            prompt_logprobs=1,
         )
 
         def __init__(self, async_llm_engine, cache_size=0, cache_opts={}):
@@ -108,6 +119,33 @@ else:
 
             return cls(engine, **kwargs)
 
+        #################
+        # Async methods #
+        #################
+
+        async def _execute_request(self, token_ids, sampling_params):
+            """Execute an AsyncLLMEngine request.
+
+            Args:
+                token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
+                sampling_params (SamplingParams): The sampling parameters for the request.
+
+            Returns:
+                (list[SequenceOutput]): A list of sequence outputs from the request.
+            """
+            req_id = str(next(self.request_counter))
+            outputs = []
+            with self._optimized_sampling_context():
+                async for output in self.async_llm_engine.generate(
+                    prompt=TokensPrompt(prompt_token_ids=token_ids),
+                    sampling_params=sampling_params,
+                    request_id=req_id,
+                ):
+                    if output.finished:
+                        outputs.append(output)
+
+            return outputs
+
         async def next_token_logprobs(self, token_ids):
             """Request log probabilities of next token asynchronously with output caching.
 
@@ -126,36 +164,87 @@ else:
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
 
-            result = await self._next_token_logprobs(key)
+            result = self._validate_outputs(
+                await self._execute_request(key, self.default_params)
+            )
 
             if self.cache is not None:
                 self.cache[key] = result
 
             return result
 
-        async def _next_token_logprobs(self, token_ids):
-            """Request log probabilities of next token asynchronously.
+        async def token_logprobs(self, token_ids):
+            """Request the log probabilies of a sequence of tokens asynchronously.
 
             Args:
-                token_ids_list (list[int]): A list of token IDs, representing a prompt to the language model.
+                token_ids (list[int]): A list of token IDs, representing a sequence of tokens.
 
             Returns:
-                (torch.Tensor): Normalized log probability tensor.
+                (float): The log probability of the sequence.
             """
-            req_id = str(next(self.request_counter))
-            prompt = TokensPrompt(prompt_token_ids=token_ids)
+            return await self.batch_token_logprobs([token_ids])[0]
 
-            outputs = []
-            with self._optimized_sampling_context():
-                async for output in self.async_llm_engine.generate(
-                    prompt=prompt,
-                    sampling_params=self.default_params,
+        async def batch_token_logprobs(self, token_ids_list):
+            """Request the log probabilies of a batch of sequences of tokens asynchronously.
+
+            Args:
+                token_ids_list (list[list[int]]): A list of token ID lists, each representing a sequence of tokens.
+
+            Returns:
+                (list[float]): A list of log probabilities for each sequence in the input list.
+            """
+            outputs = await asyncio.gather(
+                *[
+                    self._execute_request(token_ids, self.default_scoring_params)
+                    for token_ids in token_ids_list
+                ]
+            )
+            logprobs = []
+            for output in outputs:
+                assert len(output) == 1, "Expected exactly one sequence group"
+                logprobs.append(output[0].prompt_logprobs[1:])
+            return torch.stack(logprobs)
+
+        #################
+        # Sync methods #
+        #################
+
+        def _execute_requests_sync(self, token_ids_list, sampling_params):
+            """Execute LLMEngine requests synchronously.
+
+            Args:
+                token_ids_list (list[list[int]]): A list of token ID lists, each representing a prompt to the language model.
+                sampling_params (SamplingParams): The sampling parameters for the request.
+
+            Returns:
+                (list[SequenceOutput]): A list of sequence outputs from the request.
+            """
+            # TODO: cache these outputs
+            req_ids = []
+            for token_ids in token_ids_list:
+                req_id = str(next(self.request_counter))
+                req_ids.append(req_id)
+                self.async_llm_engine.engine.add_request(
+                    prompt=TokensPrompt(prompt_token_ids=token_ids),
+                    params=sampling_params,
                     request_id=req_id,
-                ):
-                    if output.finished:
-                        outputs.append(output)
+                )
 
-            return self._validate_outputs(outputs)
+            req_id2outputs = {}
+            with self._optimized_sampling_context():
+                while self.async_llm_engine.engine.has_unfinished_requests():
+                    output = self.async_llm_engine.engine.step()
+                    for out in output:
+                        if out.finished:
+                            assert (
+                                out.request_id not in req_id2outputs
+                            ), f"Duplicate outputs for request {out.request_id}"
+                            assert (
+                                out.request_id in req_ids
+                            ), f"{out.request_id} not in requested IDs"
+                            req_id2outputs[out.request_id] = out
+
+            return [req_id2outputs[req_id] for req_id in req_ids]
 
         def next_token_logprobs_sync(self, token_ids):
             """Request log probabilities of next token synchronously.
@@ -178,35 +267,12 @@ else:
             Returns:
                 (torch.Tensor): A tensor of normalized log probability tensors, one for each prompt in the input list.
             """
-            req_ids = []
-            for token_ids in token_ids_list:
-                req_id = str(next(self.request_counter))
-                req_ids.append(req_id)
-                self.async_llm_engine.engine.add_request(
-                    prompt=TokensPrompt(prompt_token_ids=token_ids),
-                    params=self.default_params,
-                    request_id=req_id,
-                )
+            outputs = self._execute_requests_sync(token_ids_list, self.default_params)
+            return torch.stack([self._validate_outputs([output]) for output in outputs])
 
-            req_id2outputs = {}
-            with self._optimized_sampling_context():
-                while self.async_llm_engine.engine.has_unfinished_requests():
-                    output = self.async_llm_engine.engine.step()
-                    for out in output:
-                        if out.finished:
-                            assert (
-                                out.request_id not in req_id2outputs
-                            ), f"Duplicate outputs for request {out.request_id}"
-                            assert (
-                                out.request_id in req_ids
-                            ), f"{out.request_id} not in requested IDs"
-                            req_id2outputs[out.request_id] = out
-
-            logprobs = [
-                self._validate_outputs([req_id2outputs[req_id]]) for req_id in req_ids
-            ]
-
-            return torch.stack(logprobs)
+        ##################
+        # Helper methods #
+        ##################
 
         @contextmanager
         def _optimized_sampling_context(self):
@@ -302,6 +368,17 @@ class DeferredSampler(torch.nn.Module):
         for seq_group in sampling_metadata.seq_groups:
             seq_ids = seq_group.seq_ids
             num_parent_seqs = len(seq_ids)
+
+            prompt_logprobs = []
+            if seq_group.sampling_params.prompt_logprobs:
+                assert len(seq_ids) == 1, "Expected exactly one sequence"
+                seq_data = seq_group.seq_data[seq_ids[0]]
+                next_token_ids = seq_data.prompt_token_ids[1:]
+                for i, next_token_id in enumerate(next_token_ids):
+                    logprob = logprobs[sample_idx + i][next_token_id]
+                    prompt_logprobs.append(logprob.item())
+                sample_idx += len(next_token_ids)
+
             logprobs_by_seq = logprobs[sample_idx : sample_idx + num_parent_seqs]
 
             assert len(logprobs_by_seq) == len(seq_ids)
@@ -313,7 +390,9 @@ class DeferredSampler(torch.nn.Module):
                 )
 
             sampler_output.append(
-                CompletionSequenceGroupOutput(samples=seq_outputs, prompt_logprobs=[])
+                CompletionSequenceGroupOutput(
+                    samples=seq_outputs, prompt_logprobs=prompt_logprobs
+                )
             )
 
             sample_idx += 1

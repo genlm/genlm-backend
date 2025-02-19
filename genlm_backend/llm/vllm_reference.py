@@ -24,13 +24,24 @@ class ReferenceVirtualLM:
         self.byte_vocab, self.str_vocab = decode_vocab(self.tokenizer)
         self.vocab_length = len(self.byte_vocab)
         self.llm.llm_engine.get_model_config().max_logprobs = self.vocab_length
-        self.DEFAULT_SAMPLING_PARAMS = SamplingParams(
+
+        self.default_sampling_params = SamplingParams(
             max_tokens=1,
             n=1,
             logprobs=self.vocab_length,
             detokenize=False,
             stop=None,
             ignore_eos=True,
+        )
+
+        self.default_sampling_params_scoring = SamplingParams(
+            max_tokens=1,
+            n=1,
+            logprobs=self.vocab_length,
+            detokenize=False,
+            stop=None,
+            ignore_eos=True,
+            prompt_logprobs=True,
         )
 
         self.llm.llm_engine.log_stats = False
@@ -85,6 +96,12 @@ class ReferenceVirtualLM:
             ]
         )
         return logprobs
+
+    def sequence_logprob_sync(self, token_ids, prompt_ids=None):
+        if prompt_ids is None:
+            prompt_ids = []
+        logprobs = self.next_token_logprobs_sync(prompt_ids + token_ids)
+        return logprobs[-len(token_ids) :].sum()
 
     def __del__(self):
         if llm_engine := getattr(self.llm, "llm_engine"):
