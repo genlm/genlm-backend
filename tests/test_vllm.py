@@ -29,12 +29,18 @@ def async_llm(model_name):
 def token_ids_list(async_llm):
     test_prompts = [
         "There might be something wrong",
-        "with the language model code",
-        "It's probably this or that",
+        "There's definitely something right",
+        "I'm not sure what to think",
     ]
     tokenizer = async_llm.tokenizer
     token_ids_list = [tokenizer.encode(p) for p in test_prompts]
     return token_ids_list
+
+
+@pytest.fixture(scope="module")
+def prompt_ids(async_llm):
+    tokenizer = async_llm.tokenizer
+    return tokenizer.encode("Say something about this code:")
 
 
 @cuda_only
@@ -94,3 +100,71 @@ def test_batch_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list
     haves_in_async = asyncio.run(async_context())
     for have, want in zip(haves_in_async, wants):
         assert compare(have, want).max_rel_err < 1e-5, "Sync in async context"
+
+
+@cuda_only
+def test_sequence_logprob_sync(async_llm, reference_llm, token_ids_list, prompt_ids):
+    # No prompt
+    for token_ids in token_ids_list:
+        have = async_llm.sequence_logprob_sync(token_ids).cpu().numpy()
+        want = asyncio.run(reference_llm.sequence_logprob(token_ids))
+        assert compare(have, want).max_rel_err < 1e-5, token_ids
+
+    # With prompt
+    for token_ids in token_ids_list:
+        have = async_llm.sequence_logprob_sync(token_ids, prompt_ids).cpu().numpy()
+        want = asyncio.run(reference_llm.sequence_logprob(token_ids, prompt_ids))
+        assert compare(have, want).max_rel_err < 1e-5, token_ids
+
+
+@cuda_only
+def test_batch_sequence_logprob_sync(
+    async_llm, reference_llm, token_ids_list, prompt_ids
+):
+    # No prompt
+    haves = async_llm.batch_sequence_logprob_sync(token_ids_list).cpu().numpy()
+    wants = asyncio.run(reference_llm.batch_sequence_logprob(token_ids_list))
+    for i, (have, want) in enumerate(zip(haves, wants)):
+        assert compare(have, want).max_rel_err < 1e-5, token_ids_list[i]
+
+    # With prompt
+    haves = (
+        async_llm.batch_sequence_logprob_sync(token_ids_list, prompt_ids).cpu().numpy()
+    )
+    wants = asyncio.run(
+        reference_llm.batch_sequence_logprob(token_ids_list, prompt_ids)
+    )
+    for i, (have, want) in enumerate(zip(haves, wants)):
+        assert compare(have, want).max_rel_err < 1e-5, token_ids_list[i]
+
+
+@cuda_only
+def test_sequence_logprob(async_llm, reference_llm, token_ids_list, prompt_ids):
+    # No prompt
+    for token_ids in token_ids_list:
+        have = async_llm.sequence_logprob(token_ids).cpu().numpy()
+        want = asyncio.run(reference_llm.sequence_logprob(token_ids))
+        assert compare(have, want).max_rel_err < 1e-5, token_ids
+
+    # With prompt
+    for token_ids in token_ids_list:
+        have = async_llm.sequence_logprob(token_ids, prompt_ids).cpu().numpy()
+        want = asyncio.run(reference_llm.sequence_logprob(token_ids, prompt_ids))
+        assert compare(have, want).max_rel_err < 1e-5, token_ids
+
+
+@cuda_only
+def test_batch_sequence_logprob(async_llm, reference_llm, token_ids_list, prompt_ids):
+    # No prompt
+    haves = async_llm.batch_sequence_logprob(token_ids_list).cpu().numpy()
+    wants = asyncio.run(reference_llm.batch_sequence_logprob(token_ids_list))
+    for i, (have, want) in enumerate(zip(haves, wants)):
+        assert compare(have, want).max_rel_err < 1e-5, token_ids_list[i]
+
+    # With prompt
+    haves = async_llm.batch_sequence_logprob(token_ids_list, prompt_ids).cpu().numpy()
+    wants = asyncio.run(
+        reference_llm.batch_sequence_logprob(token_ids_list, prompt_ids)
+    )
+    for i, (have, want) in enumerate(zip(haves, wants)):
+        assert compare(have, want).max_rel_err < 1e-5, token_ids_list[i]
