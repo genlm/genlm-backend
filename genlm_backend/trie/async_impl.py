@@ -133,10 +133,24 @@ class AsyncTokenCharacterTrie:
                             future.set_exception(e)
                 raise
 
+    async def cleanup(self):
+        """Async cleanup - preferred method"""
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+
     def shutdown(self):
         """Stop the background processing task and cleanup resources."""
-        if self._task:
-            self._task.cancel()
+        if self._task is not None:
+            try:
+                self._task.cancel()
+            except RuntimeError:
+                # Ignore runtime errors that might occur if event loop is closed
+                pass
             self._task = None
 
     def __del__(self):
