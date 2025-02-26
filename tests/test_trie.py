@@ -173,6 +173,9 @@ async def test_async_trie(mock_llm, backend):
     for have, want in zip(haves, wants):
         np.testing.assert_allclose(have, want, rtol=1e-5, atol=1e-8)
 
+    # test cleanup
+    await async_trie.cleanup()
+
 
 def test_sequential_preprocessing(decode):
     trie = TokenCharacterTrie(decode=decode)
