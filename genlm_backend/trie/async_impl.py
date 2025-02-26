@@ -146,7 +146,11 @@ class AsyncTokenCharacterTrie:
     def shutdown(self):
         """Stop the background processing task and cleanup resources."""
         if self._task is not None:
-            self._task.cancel()
+            try:
+                self._task.cancel()
+            except RuntimeError:
+                # Ignore runtime errors that might occur if event loop is closed
+                pass
             self._task = None
 
     def __del__(self):

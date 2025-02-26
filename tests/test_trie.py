@@ -173,8 +173,15 @@ async def test_async_trie(mock_llm, backend):
     for have, want in zip(haves, wants):
         np.testing.assert_allclose(have, want, rtol=1e-5, atol=1e-8)
 
-    # test cleanup
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["sequential", "parallel"])
+async def test_async_trie_cleanup(mock_llm, backend):
+    async_trie = AsyncTokenCharacterTrie.from_vocab(
+        mock_llm.byte_vocab, backend=backend
+    )
     await async_trie.cleanup()
+    assert async_trie._task is None
 
 
 def test_sequential_preprocessing(decode):
