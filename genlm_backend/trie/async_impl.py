@@ -17,7 +17,7 @@ class AsyncTokenCharacterTrie:
             trie (TokenCharacterTrie|ParallelTokenCharacterTrie): The underlying `TokenCharacterTrie` or `ParallelTokenCharacterTrie` instance
         """
         self.trie = trie
-        self._queue = asyncio.Queue()
+        self._queue = None
         self._task = None
 
     @classmethod
@@ -44,7 +44,7 @@ class AsyncTokenCharacterTrie:
         return cls(trie)
 
     async def _queue_request(self, request, op):
-        if not self._task:
+        if not self._task or self._task.done():
             self.start()
 
         future = asyncio.Future()
@@ -81,7 +81,10 @@ class AsyncTokenCharacterTrie:
 
     def start(self):
         """Start the background processing task if not already running."""
-        if not self._task:
+        if not self._task or self._task.done():
+            self._queue = (
+                asyncio.Queue()
+            )  # Create a new queue so that it is bound to the current event loop
             self._task = asyncio.create_task(self._background_loop())
 
     def _do_weight_sums(self, batch_weights):
