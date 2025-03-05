@@ -22,13 +22,18 @@ git clone git@github.com:probcomp/genlm-backend.git
 cd genlm_backend
 ```
 and install with pip:
+
 ```bash
 pip install .
 ```
+
 This installs the package without development dependencies. For development, install in editable mode with:
+
 ```bash
-pip install -e ".[test,docs]"
+pip install -e ".[docs]"
+pip install -r requirements-dev.txt
 ```
+
 which also installs the dependencies needed for testing (test) and documentation (docs).
 
 ## Requirements
@@ -42,6 +47,7 @@ which also installs the dependencies needed for testing (test) and documentation
 ## Testing
 
 When test dependencies are installed, the test suite can be run via:
+
 ```bash
 pytest tests
 ```

@@ -1,0 +1,8 @@
+coverage
+pytest
+pytest-asyncio
+pytest-benchmark
+arsenal @ git+https://github.com/timvieira/arsenal
+datasets
+viztracer
+IPython
