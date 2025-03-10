@@ -1,10 +1,10 @@
 import pytest
 from functools import wraps
-from datasets import load_dataset
 from transformers import AutoTokenizer
 
 from genlm_backend.tokenization import decode_vocab
 from genlm_backend.tokenization.vocab import assert_roundtrip_bytes
+from hypothesis import given, strategies as st, settings
 
 
 def skip_if_gated(f):
@@ -18,91 +18,73 @@ def skip_if_gated(f):
     return wrapper
 
 
-@pytest.fixture
-def test_text():
-    text = "\n".join(load_dataset("wikitext", "wikitext-2-raw-v1")["test"]["text"])
-    return text[:5000]
+tokenizer_cache = {}
+def load_tokenizer(name, use_fast):
+    if (name, use_fast) in tokenizer_cache:
+        return tokenizer_cache[(name, use_fast)]
+    tokenizer = AutoTokenizer.from_pretrained(name, use_fast=use_fast)
+    tokenizer_cache[(name, use_fast)] = tokenizer
+    return tokenizer
 
 
 @skip_if_gated
-def test_gpt2(test_text):
-    # Uses byte decoder
-    tokenizer = AutoTokenizer.from_pretrained("gpt2", use_fast=True)
-    (byte_vocab, str_vocab) = decode_vocab(tokenizer)
-    assert_roundtrip_bytes(test_text, tokenizer, byte_vocab)
-
-    tokenizer = AutoTokenizer.from_pretrained("gpt2", use_fast=False)
-    (byte_vocab, str_vocab) = decode_vocab(tokenizer)
-    assert_roundtrip_bytes(test_text, tokenizer, byte_vocab)
+@settings(deadline=None)
+@given(text=st.text(min_size=1, max_size=500), is_fast=st.booleans())
+def test_gpt2(text, is_fast):
+    tokenizer = load_tokenizer("gpt2", is_fast)
+    byte_vocab, _ = decode_vocab(tokenizer)
+    assert_roundtrip_bytes(text, tokenizer, byte_vocab)
 
 
 @skip_if_gated
-def test_llama3(test_text):
-    # Uses GPT2 byte decoder
-    tokenizer = AutoTokenizer.from_pretrained(
-        "meta-llama/Meta-Llama-3-8B", use_fast=True
-    )
-    (byte_vocab, str_vocab) = decode_vocab(tokenizer)
-    assert_roundtrip_bytes(test_text, tokenizer, byte_vocab)
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        "meta-llama/Meta-Llama-3-8B", use_fast=False
-    )
-    (byte_vocab, str_vocab) = decode_vocab(tokenizer)
-    assert_roundtrip_bytes(test_text, tokenizer, byte_vocab)
+@settings(deadline=None)
+@given(text=st.text(min_size=1, max_size=500), is_fast=st.booleans())
+def test_llama3(text, is_fast):
+    tokenizer = load_tokenizer("meta-llama/Meta-Llama-3-8B", is_fast)
+    byte_vocab, _ = decode_vocab(tokenizer)
+    assert_roundtrip_bytes(text, tokenizer, byte_vocab)
 
 
 @skip_if_gated
-def test_codellama(test_text):
-    # Uses SentencePiece method
-    tokenizer = AutoTokenizer.from_pretrained(
-        "codellama/CodeLlama-7b-Instruct-hf", use_fast=True
-    )
-    (byte_vocab, str_vocab) = decode_vocab(tokenizer)
-    assert_roundtrip_bytes(test_text, tokenizer, byte_vocab)
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        "codellama/CodeLlama-7b-Instruct-hf", use_fast=False
-    )
-    (byte_vocab, str_vocab) = decode_vocab(tokenizer)
-    assert_roundtrip_bytes(test_text, tokenizer, byte_vocab)
+@settings(deadline=None)
+@given(text=st.text(min_size=1, max_size=500), is_fast=st.booleans())
+def test_codellama(text, is_fast):
+    tokenizer = load_tokenizer("codellama/CodeLlama-7b-Instruct-hf", is_fast)
+    byte_vocab, _ = decode_vocab(tokenizer)
+    assert_roundtrip_bytes(text, tokenizer, byte_vocab)
 
 
 @skip_if_gated
-def test_gemma(test_text):
-    # Uses SentencePiece method
-    tokenizer = AutoTokenizer.from_pretrained("google/gemma-7b", use_fast=True)
-    (byte_vocab, str_vocab) = decode_vocab(tokenizer)
-    assert_roundtrip_bytes(test_text, tokenizer, byte_vocab)
-
-    tokenizer = AutoTokenizer.from_pretrained("google/gemma-7b", use_fast=False)
-    (byte_vocab, str_vocab) = decode_vocab(tokenizer)
-    assert_roundtrip_bytes(test_text, tokenizer, byte_vocab)
+@settings(deadline=None)
+@given(text=st.text(min_size=1, max_size=500), is_fast=st.booleans())
+def test_gemma(text, is_fast):
+    tokenizer = load_tokenizer("google/gemma-7b", is_fast)
+    byte_vocab, _ = decode_vocab(tokenizer)
+    assert_roundtrip_bytes(text, tokenizer, byte_vocab)
 
 
 @skip_if_gated
-def _test_phi(test_text):  # Currently fails.
-    # Has a byte decoder, but it is missing bytes. Uses GPT2 byte decoder.
-    tokenizer = AutoTokenizer.from_pretrained("microsoft/phi-2", use_fast=True)
-    (byte_vocab, str_vocab) = decode_vocab(tokenizer)
-    assert_roundtrip_bytes(test_text, tokenizer, byte_vocab)
-
-    tokenizer = AutoTokenizer.from_pretrained("microsoft/phi-2", use_fast=False)
-    (byte_vocab, str_vocab) = decode_vocab(tokenizer)
-    assert_roundtrip_bytes(test_text, tokenizer, byte_vocab)
+@settings(deadline=None)
+@given(text=st.text(min_size=1, max_size=500), is_fast=st.booleans())
+def test_phi(text, is_fast):
+    tokenizer = load_tokenizer("microsoft/phi-2", is_fast)
+    byte_vocab, _ = decode_vocab(tokenizer)
+    assert_roundtrip_bytes(text, tokenizer, byte_vocab)
 
 
 @skip_if_gated
-def test_mistral(test_text):
-    # Uses SentencePiece method
-    tokenizer = AutoTokenizer.from_pretrained(
-        "mistralai/Mistral-7B-Instruct-v0.3", use_fast=True
-    )
-    (byte_vocab, str_vocab) = decode_vocab(tokenizer)
-    assert_roundtrip_bytes(test_text, tokenizer, byte_vocab)
+@settings(deadline=None)
+@given(text=st.text(min_size=1, max_size=500), is_fast=st.booleans())
+def test_mistral(text, is_fast):
+    tokenizer = load_tokenizer("mistralai/Mistral-7B-Instruct-v0.3", is_fast)
+    byte_vocab, _ = decode_vocab(tokenizer)
+    assert_roundtrip_bytes(text, tokenizer, byte_vocab)
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        "mistralai/Mistral-7B-Instruct-v0.3", use_fast=False
-    )
-    (byte_vocab, str_vocab) = decode_vocab(tokenizer)
-    assert_roundtrip_bytes(test_text, tokenizer, byte_vocab)
+
+@skip_if_gated
+@settings(deadline=None)
+@given(text=st.text(min_size=1, max_size=500), is_fast=st.booleans())
+def test_deepseek_r1_unsloth(text, is_fast):
+    tokenizer = load_tokenizer("unsloth/DeepSeek-R1-Distill-Llama-8B", is_fast)
+    byte_vocab, _ = decode_vocab(tokenizer)
+    assert_roundtrip_bytes(text, tokenizer, byte_vocab)
