@@ -58,7 +58,7 @@ def get_byte_vocab(tokenizer):
 
 
 def get_byte_tokens_from_byte_decoder(tokenizer, byte_decoder):
-    """Convert tokens to bytes using a byte decoder mapping. 
+    """Convert tokens to bytes using a byte decoder mapping.
 
     Special tokens are handled by directly encoding their string representation.
 
@@ -69,10 +69,11 @@ def get_byte_tokens_from_byte_decoder(tokenizer, byte_decoder):
     Returns:
         byte_tokens (list[byte]): List of byte representations for each token
     """
-    special_tokens_map = {v : k for k,v in tokenizer.get_added_vocab().items()}
+    special_tokens_map = {v: k for k, v in tokenizer.get_added_vocab().items()}
     byte_tokens = [
         bytes([byte_decoder[b] for b in tokenizer.convert_ids_to_tokens(i)])
-        if i not in special_tokens_map else special_tokens_map[i].encode()
+        if i not in special_tokens_map
+        else special_tokens_map[i].encode()
         for i in range(len(tokenizer))
     ]
     return byte_tokens
@@ -190,7 +191,7 @@ def _check_complex_roundtrip(tokenizer, byte_decoder):
         )
 
 
-#def _bytes_to_unicode():
+# def _bytes_to_unicode():
 #    """Create a mapping from bytes to Unicode characters.
 #
 #    Returns:
