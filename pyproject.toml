@@ -29,7 +29,8 @@ docs = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["*"]
+include = ["genlm_backend*"]
+exclude = ["benchmark*", "tests*"]
 
 [build-system]
 requires = ["setuptools>=64.0", "setuptools-scm>=8"]
