@@ -95,10 +95,20 @@ else:
                     "vLLM not available. Install vLLM or use AsyncTransformer instead."
                 )
 
+            if engine_opts is not None and "enable_chunked_prefill" in engine_opts:
+                if engine_opts["enable_chunked_prefill"]:
+                    warnings.warn(
+                        "Setting enable_chunked_prefill to True may interfere with AsyncVirtualLM's "
+                        "custom sampling functionality."
+                    )
+
             engine_opts = {
                 "enable_prefix_caching": True,
                 "disable_log_requests": True,
                 "disable_async_output_proc": True,
+                # Need to disable chunked prefill to avoid issues
+                # with our custom sampler.
+                "enable_chunked_prefill": False,
                 **(engine_opts or {}),
             }
 
@@ -304,17 +314,23 @@ class DeferredSampler(torch.nn.Module):
             num_parent_seqs = len(seq_ids)
             logprobs_by_seq = logprobs[sample_idx : sample_idx + num_parent_seqs]
 
-            assert len(logprobs_by_seq) == len(seq_ids)
-
-            seq_outputs = []
-            for seq_id, seq_logprobs in zip(seq_ids, logprobs_by_seq):
-                seq_outputs.append(
-                    SequenceOutput(seq_id, 0, LazyLogprobDict(seq_logprobs))
+            if not seq_group.do_sample:
+                sampler_output.append(
+                    CompletionSequenceGroupOutput(samples=[], prompt_logprobs=[])
                 )
+            else:
+                assert len(logprobs_by_seq) == len(seq_ids)
+                seq_outputs = []
+                for seq_id, seq_logprobs in zip(seq_ids, logprobs_by_seq):
+                    seq_outputs.append(
+                        SequenceOutput(seq_id, 0, LazyLogprobDict(seq_logprobs))
+                    )
 
-            sampler_output.append(
-                CompletionSequenceGroupOutput(samples=seq_outputs, prompt_logprobs=[])
-            )
+                sampler_output.append(
+                    CompletionSequenceGroupOutput(
+                        samples=seq_outputs, prompt_logprobs=[]
+                    )
+                )
 
             sample_idx += 1
 
