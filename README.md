@@ -6,12 +6,6 @@
 
 GenLM Backend is a high-performance backend for language model probabilistic programs in the GenLM ecosystem. It provides essential tools and functions that serve as building blocks for more complex applications. See our [documentation](https://genlm.github.io/backend/).
 
-**Key Features**:
-
-* **LM Interfaces**: Asynchronous and synchronous interfaces to `vllm` and `transformer` language models.
-* **Tokenizer Vocabulary Decoding**: Decode Hugging Face tokenizer vocabularies into their byte and string representations.
-* **Token-Byte Tries**: Efficient conversion from token distributions to byte-level distributions using a trie datastructure.
-
 ## Quick Start
 
 This library supports installation via pip:
