@@ -1,6 +1,6 @@
 import torch
 from conftest import cuda_only
-from genlm_backend.cache import OutputCache
+from genlm.backend.cache import OutputCache
 
 
 @cuda_only

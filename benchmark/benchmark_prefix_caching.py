@@ -8,7 +8,7 @@ pytest benchmark/benchmark_prefix_caching.py --benchmark-only
 import pytest
 from .util import token_prefixes, run_await_next_token_logprobs
 
-from genlm_backend.llm import AsyncVirtualLM
+from genlm.backend.llm import AsyncVirtualLM
 
 # From https://docs.vllm.ai/en/latest/automatic_prefix_caching/apc.html
 LONG_PROMPT = (

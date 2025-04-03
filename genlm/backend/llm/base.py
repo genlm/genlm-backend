@@ -3,7 +3,7 @@ import asyncio
 import numpy as np
 from abc import ABC, abstractmethod
 
-from genlm_backend.tokenization import decode_vocab
+from genlm.backend.tokenization import decode_vocab
 
 
 class AsyncLM(ABC):

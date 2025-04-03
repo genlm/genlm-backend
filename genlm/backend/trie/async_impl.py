@@ -1,8 +1,8 @@
 import asyncio
 import logging
 from collections import defaultdict
-from genlm_backend.trie.base import TokenCharacterTrie
-from genlm_backend.trie.parallel import ParallelTokenCharacterTrie
+from genlm.backend.trie.base import TokenCharacterTrie
+from genlm.backend.trie.parallel import ParallelTokenCharacterTrie
 
 logger = logging.getLogger(__name__)
 

@@ -10,30 +10,21 @@ GenLM Backend is a high-performance backend for language model probabilistic pro
 
 ## Quick Start
 
-### Installation
+This library can be installed via pip:
 
-Clone the repository:
 ```bash
-git clone https://github.com/chisym/genlm-backend.git
-cd genlm_backend
+pip install genlm.backend
 ```
-and install with pip:
-```bash
-pip install .
-```
-or install with development dependencies:
-```bash
-pip install -e ".[test,docs]"
-```
+
 
 ## Main Components
 
 ### Asynchronous Language Model Backends
 
-The [`genlm_backend.llm`](reference/genlm_backend/llm/__init__/) module provides asynchronous interfaces for computing next-token probabilities with `vllm` and `transformer` language models.
+The [`backend.llm`](reference/backend/llm/__init__/) module provides asynchronous interfaces for computing next-token probabilities with `vllm` and `transformer` language models.
 
 ```python
-from genlm_backend.llm import AsyncVirtualLM
+from genlm.backend.llm import AsyncVirtualLM
 # Initialize model with vLLM backend from a HuggingFace model name
 llm = AsyncVirtualLM.from_name("gpt2")
 ```
@@ -54,20 +45,19 @@ outs = asyncio.run(asyncio.gather(*[my_model(0), my_model(1)]))
 ```
 as well as automatic output and KV caching, and CPU/GPU parallelization in certain scenarios.
 
-This submodule includes three key classes:
+This submodule includes two key classes:
 
 - **AsyncVirtualLM** (GPU): vLLM-based backend optimized for next-token probability computations. Fastest and most memory-efficient; requires a GPU. Uses vLLM's prefix caching feature for KV caching.
 - **AsyncTransformer** (CPU): HuggingFace-based backend for next-token probability computations. Slower and less memory-efficient; for CPU usage. Uses custom KV caching.
-- **MockAsyncLM** (Testing): Mock implementation for development and testing.
 
-See the [LLM Code Reference](reference/genlm_backend/llm/__init__/) for detailed API documentation.
+See the [LLM Code Reference](reference/backend/llm/__init__/) for detailed API documentation.
 
 ### Token-Character Tries
 
-The [`genlm_backend.trie`](reference/genlm_backend/trie/__init__/) module provides an efficient trie data structure for mapping weight distributions over tokens to weight distributions over token prefixes.
+The [`backend.trie`](reference/backend/trie/__init__/) module provides an efficient trie data structure for mapping weight distributions over tokens to weight distributions over token prefixes.
 
 ```python
-from genlm_backend.trie import TokenCharacterTrie
+from genlm.backend.trie import TokenCharacterTrie
 # Initialize TokenCharacterTrie from a byte vocabulary
 trie = TokenCharacterTrie(decode=[b'cat', b'cats', b'dog', b'dogs'])
 trie.visualize()
@@ -92,15 +82,15 @@ This submodule includes three key classes:
 - **ParallelTokenCharacterTrie** (GPU): GPU-accelerated version which uses sparse matrix operations for mass summing.
 - **AsyncTokenCharacterTrie** (Async): Asynchronous wrapper for use in asynchronous contexts; enables automatic batching of concurrent requests. This class can wrap either the sequential or parallel trie implementations.
 
-See the [Trie Code Reference](reference/genlm_backend/trie/__init__/) for detailed API documentation.
+See the [Trie Code Reference](reference/backend/trie/__init__/) for detailed API documentation.
 
 ### Vocabulary Decoding
 
-The [`genlm_backend.tokenization`](reference/genlm_backend/tokenization/__init__/) module converts Hugging Face tokenizer vocabularies into byte and string representations, with each token's representation stored at its corresponding token ID in the output lists.
+The [`backend.tokenization`](reference/backend/tokenization/__init__/) module converts Hugging Face tokenizer vocabularies into byte and string representations, with each token's representation stored at its corresponding token ID in the output lists.
 
 ```python
 from transformers import AutoTokenizer
-from genlm_backend.tokenization import decode_vocab
+from genlm.backend.tokenization import decode_vocab
 
 # Load a tokenizer and decode its vocabulary
 tokenizer = AutoTokenizer.from_pretrained("gpt2")
@@ -110,25 +100,6 @@ byte_vocab[10] # Byte representation of token with ID 10
 
 !!! warning
     The byte representation (`byte_vocab`) is the canonical form and should be preferred for reliable token handling. The string representation (`str_vocab`) is provided for convenience and debugging but may not correctly represent all tokens, especially those containing invalid UTF-8 sequences.
-
-## Requirements
-
-- Python >= 3.10
-- The core dependencies listed in the `setup.py` file of the repository.
-
-!!! note
-    vLLM is not supported on macOS. On macOS systems, only CPU-based functionality (`AsyncTransformer`) will be available. GPU-accelerated features requiring vLLM (`AsyncVirtualLM`) will not work.
-
-## Testing
-
-When test dependencies are installed, the test suite can be run via:
-```bash
-pytest tests
-```
-
-## Performance Benchmarking
-
-Performance benchmarks comparing different configurations can be found in our [benchmarks directory](https://github.com/chisym/genlm-backend/tree/main/benchmark).
 
 ## Troubleshooting
 

@@ -2,8 +2,8 @@ import pytest
 import asyncio
 from conftest import cuda_only
 from arsenal.maths import compare
-from genlm_backend.llm import AsyncVirtualLM
-from genlm_backend.llm.vllm_reference import ReferenceVirtualLM
+from genlm.backend.llm import AsyncVirtualLM
+from genlm.backend.llm.vllm_reference import ReferenceVirtualLM
 
 # from hypothesis import given, strategies as st, settings
 

@@ -13,8 +13,8 @@ from .util import (
     run_await_next_token_logprobs,
     run_await_batch_next_token_logprobs,
 )
-from genlm_backend.llm import AsyncVirtualLM
-from genlm_backend.llm.vllm_reference import ReferenceVirtualLM
+from genlm.backend.llm import AsyncVirtualLM
+from genlm.backend.llm.vllm_reference import ReferenceVirtualLM
 
 text = get_wikitext()
 

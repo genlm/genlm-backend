@@ -3,8 +3,8 @@ import pytest
 import asyncio
 from conftest import cuda_only
 from arsenal.maths import compare
-from genlm_backend.llm import AsyncVirtualLM
-from genlm_backend.llm import AsyncTransformer
+from genlm.backend.llm import AsyncVirtualLM
+from genlm.backend.llm import AsyncTransformer
 
 
 @pytest.fixture(scope="module")

@@ -12,7 +12,7 @@ except ImportError:
 
 import numpy as np
 
-from genlm_backend.tokenization import decode_vocab
+from genlm.backend.tokenization import decode_vocab
 
 
 class ReferenceVirtualLM:

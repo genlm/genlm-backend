@@ -6,8 +6,8 @@ from transformers import AutoModelForCausalLM
 from transformers import AutoTokenizer
 from transformers import BitsAndBytesConfig
 
-from genlm_backend.cache import TokenTrie
-from genlm_backend.llm.base import AsyncLM
+from genlm.backend.cache import TokenTrie
+from genlm.backend.llm.base import AsyncLM
 
 
 class Query:

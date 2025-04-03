@@ -14,7 +14,7 @@ from .util import (
     run_await_batch_next_token_logprobs,
 )
 
-from genlm_backend.llm import AsyncVirtualLM, AsyncTransformer
+from genlm.backend.llm import AsyncVirtualLM, AsyncTransformer
 
 text = get_wikitext()
 

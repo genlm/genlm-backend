@@ -4,7 +4,7 @@ import warnings
 from contextlib import contextmanager
 from transformers import AutoTokenizer
 
-from genlm_backend.tokenization.bytes import ByteVocabError, get_byte_vocab
+from genlm.backend.tokenization.bytes import ByteVocabError, get_byte_vocab
 
 
 def decode_vocab(tokenizer, byte2str_fallback="tokenizer"):

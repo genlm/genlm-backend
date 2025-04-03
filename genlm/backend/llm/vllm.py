@@ -3,8 +3,8 @@ import logging
 import warnings
 from contextlib import contextmanager
 
-from genlm_backend.llm.base import AsyncLM
-from genlm_backend.cache import OutputCache
+from genlm.backend.llm.base import AsyncLM
+from genlm.backend.cache import OutputCache
 
 try:
     from vllm import AsyncLLMEngine, SamplingParams, AsyncEngineArgs
@@ -58,7 +58,7 @@ else:
             Args:
                 async_llm_engine (AsyncLLMEngine): The async vLLM engine instance.
                 cache_size (int, optional): Maximum size of the output cache. If 0, caching is disabled. Defaults to 0.
-                cache_opts (dict, optional): Additional options to pass to the [`OutputCache`][genlm_backend.cache.OutputCache] constructor. Defaults to {}.
+                cache_opts (dict, optional): Additional options to pass to the [`OutputCache`][backend.cache.OutputCache] constructor. Defaults to {}.
 
             Note:
                 The cache stores the log probabilities for previously seen token sequences to avoid redundant requests. KV caching is handled internally by the vLLM engine.

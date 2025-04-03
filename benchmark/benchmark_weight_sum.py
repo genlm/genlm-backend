@@ -9,8 +9,8 @@ import torch
 import pytest
 import asyncio
 from .util import load_trie
-from genlm_backend.llm.base import MockAsyncLM
-from genlm_backend.trie import AsyncTokenCharacterTrie
+from genlm.backend.llm.base import MockAsyncLM
+from genlm.backend.trie import AsyncTokenCharacterTrie
 
 mock_llm = MockAsyncLM.from_name("gpt2")
 

@@ -4,7 +4,7 @@ import mkdocs_gen_files
 
 nav = mkdocs_gen_files.Nav()
 
-for path in sorted(Path("genlm_backend").rglob("*.py")):
+for path in sorted(Path("backend").rglob("*.py")):
     if any(part.startswith(".") for part in path.parts):
         continue
 

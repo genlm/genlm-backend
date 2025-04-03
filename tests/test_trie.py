@@ -4,8 +4,8 @@ import asyncio
 import numpy as np
 from transformers import AutoTokenizer
 
-from genlm_backend.llm import MockAsyncLM
-from genlm_backend.trie import (
+from genlm.backend.llm import MockAsyncLM
+from genlm.backend.trie import (
     TokenCharacterTrie,
     ParallelTokenCharacterTrie,
     AsyncTokenCharacterTrie,

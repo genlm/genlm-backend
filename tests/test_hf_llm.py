@@ -1,7 +1,7 @@
 import pytest
 import asyncio
 from arsenal.maths import compare
-from genlm_backend.llm import AsyncTransformer
+from genlm.backend.llm import AsyncTransformer
 
 
 @pytest.fixture(scope="module")

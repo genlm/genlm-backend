@@ -2,8 +2,8 @@ import pytest
 from functools import wraps
 from transformers import AutoTokenizer
 
-from genlm_backend.tokenization import decode_vocab
-from genlm_backend.tokenization.vocab import assert_roundtrip_bytes
+from genlm.backend.tokenization import decode_vocab
+from genlm.backend.tokenization.vocab import assert_roundtrip_bytes
 from hypothesis import given, strategies as st, settings
 
 
