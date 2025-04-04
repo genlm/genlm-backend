@@ -29,4 +29,4 @@ jobs:
           source venv/bin/activate
           pip install -e .[test]
           pip install -r requirements-dev.txt
-          pytest tests
+          python -m pytest tests
