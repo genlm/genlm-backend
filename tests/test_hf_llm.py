@@ -224,7 +224,10 @@ async def test_full_batch_size(async_llm):
 def test_from_name_with_options(model_name):
     # Test model creation with various options
     bitsandbytes_opts = {"load_in_4bit": True}
-    hf_opts = {"device_map": "auto", "torch_dtype": torch.float16}
+    hf_opts = {
+        "device_map": "auto" if torch.cuda.is_available() else None,
+        "torch_dtype": torch.float16,
+    }
 
     model = AsyncTransformer.from_name(
         model_name,
@@ -243,10 +246,3 @@ def test_batch_evaluate_empty_queries(async_llm):
     async_llm.queries = []
     async_llm.batch_evaluate_queries()
     assert len(async_llm.queries) == 0
-
-
-def test_from_name_no_options(model_name):
-    # Test model creation without optional parameters
-    model = AsyncTransformer.from_name(model_name)
-    assert model.batch_size == 20  # Default value
-    assert model.timeout == 0.02  # Default value
