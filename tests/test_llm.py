@@ -122,7 +122,9 @@ def test_next_token_logprobs_agreement(transformer_llm, async_llm, token_ids_lis
 
 
 @cuda_only
-def test_batch_next_token_logprobs_agreement(transformer_llm, async_llm, token_ids_list):
+def test_batch_next_token_logprobs_agreement(
+    transformer_llm, async_llm, token_ids_list
+):
     haves = (
         asyncio.run(transformer_llm.batch_next_token_logprobs(token_ids_list))
         .cpu()
@@ -142,22 +144,22 @@ def test_batch_next_token_logprobs_agreement(transformer_llm, async_llm, token_i
             "corr",
             comparison.pearson,
             token_ids_list[i],
-        ]    
+        ]
+
 
 @cuda_only
 @pytest.mark.asyncio
 async def test_other():
-
     # Check that we warn when we set enable_chunked_prefill to True
     with pytest.warns(UserWarning):
         async_llm = AsyncVirtualLM.from_name(
-            "gpt2", 
+            "gpt2",
             engine_opts={
-                "enable_chunked_prefill": True, 
-                "gpu_memory_utilization": 0.2, 
-                "dtype": "float16"
+                "enable_chunked_prefill": True,
+                "gpu_memory_utilization": 0.2,
+                "dtype": "float16",
             },
-            cache_size=2
+            cache_size=2,
         )
 
     logprobs1 = await async_llm.next_token_logprobs([0])
@@ -174,7 +176,7 @@ async def test_other():
     assert len(async_llm.cache) == 0
 
     del async_llm
-    
+
 
 def test_lazy_logprob_dict():
     try:
@@ -182,7 +184,11 @@ def test_lazy_logprob_dict():
     except ImportError:
         pytest.skip("vLLM is not installed")
 
-    logprobs = torch.tensor([0.1, 0.2, 0.3], dtype=torch.float16, device="cuda" if torch.cuda.is_available() else "cpu")
+    logprobs = torch.tensor(
+        [0.1, 0.2, 0.3],
+        dtype=torch.float16,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+    )
     lazy_logprob_dict = LazyLogprobDict(logprobs)
     assert lazy_logprob_dict[0] == Logprob(0.1)
     assert lazy_logprob_dict[1] == Logprob(0.2)
@@ -193,11 +199,20 @@ def test_lazy_logprob_dict():
 
     assert len(lazy_logprob_dict) == 3
     assert list(lazy_logprob_dict.keys()) == [0, 1, 2]
-    assert list(lazy_logprob_dict.values()) == [Logprob(0.1), Logprob(0.2), Logprob(0.3)]
-    assert list(lazy_logprob_dict.items()) == [(0, Logprob(0.1)), (1, Logprob(0.2)), (2, Logprob(0.3))]
+    assert list(lazy_logprob_dict.values()) == [
+        Logprob(0.1),
+        Logprob(0.2),
+        Logprob(0.3),
+    ]
+    assert list(lazy_logprob_dict.items()) == [
+        (0, Logprob(0.1)),
+        (1, Logprob(0.2)),
+        (2, Logprob(0.3)),
+    ]
     assert lazy_logprob_dict.get(0) == Logprob(0.1)
     assert lazy_logprob_dict.get(3) is None
     assert lazy_logprob_dict.get(3, 0.4) == 0.4
+
 
 @pytest.mark.asyncio
 async def test_mock_async_llm():
@@ -205,6 +220,4 @@ async def test_mock_async_llm():
     logprobs1 = await mock_async_llm.next_token_logprobs([0])
     logprobs2 = mock_async_llm.next_token_logprobs_sync([0])
     assert torch.allclose(logprobs1, logprobs2)
-    mock_async_llm.clear_cache() # no-op
-
-    
+    mock_async_llm.clear_cache()  # no-op

@@ -74,7 +74,7 @@ class AsyncLM(ABC):
 
     def clear_cache(self):
         """Clear any caches used by the language model. No-op in base class."""
-        pass # pragma: no cover
+        pass  # pragma: no cover
 
 
 class MockAsyncLM(AsyncLM):

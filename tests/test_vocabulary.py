@@ -107,12 +107,12 @@ def test_byte2str_fallbacks():
 
 def test_byte_decoder_error_handling():
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
-    
+
     # Test with invalid byte decoder
-    invalid_byte_decoder = {'a': 999}  # Invalid byte value
+    invalid_byte_decoder = {"a": 999}  # Invalid byte value
     with pytest.raises(ByteDecoderError):
         check_byte_decoder(tokenizer, invalid_byte_decoder)
-    
+
     # Test with missing bytes
     incomplete_byte_decoder = {}
     with pytest.raises(ByteDecoderError):

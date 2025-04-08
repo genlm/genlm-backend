@@ -222,8 +222,10 @@ class TokenCharacterTrie:
         """
         try:
             import graphviz
-        except ImportError: # pragma: no cover
-            raise ImportError("Please install graphviz: pip install graphviz") # pragma: no cover
+        except ImportError:  # pragma: no cover
+            raise ImportError(
+                "Please install graphviz: pip install graphviz"
+            )  # pragma: no cover
 
         if ws is not None and len(ws) != len(self.children):
             raise ValueError(

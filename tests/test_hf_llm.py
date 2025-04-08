@@ -42,7 +42,10 @@ def test_async_batching(async_llm, token_ids_list):
 
 def test_batch_next_token_logprobs_sync(async_llm, token_ids_list):
     haves = async_llm.batch_next_token_logprobs_sync(token_ids_list).cpu().numpy()
-    wants = [async_llm.next_token_logprobs_sync(token_ids).cpu().numpy() for token_ids in token_ids_list]
+    wants = [
+        async_llm.next_token_logprobs_sync(token_ids).cpu().numpy()
+        for token_ids in token_ids_list
+    ]
 
     for i, (have, want) in enumerate(zip(haves, wants)):
         max_rel_err = compare(have, want).max_rel_err
@@ -80,10 +83,10 @@ def test_empty_input(async_llm):
     # Test that empty input raises ValueError
     with pytest.raises(ValueError):
         asyncio.run(async_llm.next_token_logprobs([]))
-    
+
     with pytest.raises(ValueError):
         async_llm.next_token_logprobs_sync([])
-        
+
     with pytest.raises(ValueError):
         async_llm.next_token_logprobs_uncached([])
 
@@ -92,11 +95,11 @@ def test_cache_operations(async_llm):
     # Test cache clearing operations
     async_llm.clear_cache()
     async_llm.clear_kv_cache()
-    
+
     # Cache some data
     test_prompt = async_llm.tokenizer.encode("Test prompt")
     asyncio.run(async_llm.next_token_logprobs(test_prompt))
-    
+
     # Clear cache and verify it's empty
     async_llm.clear_cache()
     node, next_token_index, past, base = async_llm.walk_cache(test_prompt)
@@ -113,7 +116,7 @@ async def test_reset_async_queries(async_llm):
     test_prompt = async_llm.tokenizer.encode("Test prompt")
     future = asyncio.Future()
     async_llm.add_query(test_prompt, future, None)
-    
+
     # Reset queries
     async_llm.reset_async_queries()
     assert len(async_llm.queries) == 0
@@ -121,11 +124,11 @@ async def test_reset_async_queries(async_llm):
 
 def test_cache_kv(async_llm):
     async_llm.clear_cache()
-    
+
     # Test explicit KV caching
     test_prompt = async_llm.tokenizer.encode("Test KV caching")
     async_llm.cache_kv(test_prompt)
-    
+
     # Verify the cache contains the KV pairs
     node, next_token_index, past, base = async_llm.walk_cache(test_prompt)
 
@@ -137,13 +140,15 @@ def test_cache_kv(async_llm):
 
 def test_walk_cache_with_past(async_llm):
     async_llm.clear_cache()
-    
+
     base_prompt = async_llm.tokenizer.encode("This is a test of")
-    extended_prompt = base_prompt + async_llm.tokenizer.encode(" caching", add_special_tokens=False)
-    
+    extended_prompt = base_prompt + async_llm.tokenizer.encode(
+        " caching", add_special_tokens=False
+    )
+
     logprobs_before = asyncio.run(async_llm.next_token_logprobs(extended_prompt))
     assert logprobs_before is not None
-    
+
     async_llm.cache_kv(base_prompt)
     node, next_token_index, past, base = async_llm.walk_cache(extended_prompt)
     assert past is not None
@@ -152,9 +157,9 @@ def test_walk_cache_with_past(async_llm):
 
     logprobs_after = asyncio.run(async_llm.next_token_logprobs(extended_prompt))
     assert logprobs_after is not None
-    
+
     assert torch.allclose(logprobs_before, logprobs_after)
-    
+
 
 def test_next_token_logprobs_with_kv_cache(async_llm):
     async_llm.clear_cache()
@@ -163,9 +168,9 @@ def test_next_token_logprobs_with_kv_cache(async_llm):
 
     logprobs_before = asyncio.run(async_llm.next_token_logprobs(test_prompt))
     assert logprobs_before is not None
-    
+
     async_llm.cache_kv(test_prompt)
-    
+
     logprobs_after = asyncio.run(async_llm.next_token_logprobs(test_prompt))
     assert logprobs_after is not None
 
@@ -186,14 +191,14 @@ def test_next_token_logprobs_sync(async_llm):
 async def test_batch_timeout(async_llm):
     # Test that queries are processed after timeout
     async_llm.clear_cache()
-    
+
     test_prompt = async_llm.tokenizer.encode("Test timeout")
     future = asyncio.get_running_loop().create_future()
     async_llm.add_query(test_prompt, future, None)
-    
+
     # Wait slightly longer than timeout
     await asyncio.sleep(async_llm.timeout * 1.5)
-    
+
     # Future should be completed
     assert future.done()
 
@@ -209,8 +214,7 @@ async def test_full_batch_size(async_llm):
         async_llm.timeout = 10
 
         await asyncio.gather(
-            async_llm.next_token_logprobs([0]),
-            async_llm.next_token_logprobs([1])
+            async_llm.next_token_logprobs([0]), async_llm.next_token_logprobs([1])
         )
     finally:
         async_llm.batch_size = old_batch_size
@@ -221,23 +225,25 @@ def test_from_name_with_options(model_name):
     # Test model creation with various options
     bitsandbytes_opts = {"load_in_4bit": True}
     hf_opts = {"device_map": "auto", "torch_dtype": torch.float16}
-    
+
     model = AsyncTransformer.from_name(
         model_name,
         bitsandbytes_opts=bitsandbytes_opts,
         hf_opts=hf_opts,
         batch_size=10,
-        timeout=0.01
+        timeout=0.01,
     )
-    
+
     assert model.batch_size == 10
     assert model.timeout == 0.01
+
 
 def test_batch_evaluate_empty_queries(async_llm):
     # Test batch evaluation with empty query list
     async_llm.queries = []
     async_llm.batch_evaluate_queries()
     assert len(async_llm.queries) == 0
+
 
 def test_from_name_no_options(model_name):
     # Test model creation without optional parameters

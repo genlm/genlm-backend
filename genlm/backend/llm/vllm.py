@@ -19,25 +19,25 @@ try:
     )
 
     HAS_VLLM = True
-except ImportError: # pragma: no cover
-    HAS_VLLM = False # pragma: no cover
-    warnings.warn( # pragma: no cover
+except ImportError:  # pragma: no cover
+    HAS_VLLM = False  # pragma: no cover
+    warnings.warn(  # pragma: no cover
         "vLLM not installed. Run 'pip install vllm' to use the vLLM-based AsyncLM model."
-    ) 
+    )
 
 if not HAS_VLLM:
 
-    class AsyncVirtualLM: # pragma: no cover
+    class AsyncVirtualLM:  # pragma: no cover
         """Placeholder class when vLLM is not installed."""
 
-        def __init__(self, *args, **kwargs): # pragma: no cover
+        def __init__(self, *args, **kwargs):  # pragma: no cover
             raise ImportError(
                 "vLLM is not installed. Please install it with 'pip install vllm' "
                 "to use the vLLM-based AsyncLM model."
             )
 
         @classmethod
-        def from_name(cls, *args, **kwargs): # pragma: no cover
+        def from_name(cls, *args, **kwargs):  # pragma: no cover
             raise ImportError(
                 "vLLM is not installed. Please install it with 'pip install vllm' "
                 "to use the vLLM-based AsyncLM model."
@@ -96,7 +96,7 @@ else:
                 (AsyncVirtualLM): An `AsyncVirtualLM` instance.
             """
             if not HAS_VLLM:
-                raise ImportError( # pragma: no cover
+                raise ImportError(  # pragma: no cover
                     "vLLM not available. Install vLLM or use AsyncTransformer instead."
                 )
 

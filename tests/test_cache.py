@@ -14,11 +14,11 @@ def test_cache_size_limit(device):
     # Add first tensor
     cache["tensor1"] = torch.rand(1000, 1000, device=device)
     assert len(cache) == 1
-    
+
     # Add second tensor
     cache["tensor2"] = torch.rand(1000, 1000, device=device)
     assert len(cache) == 2
-    
+
     # Add third tensor (should evict first)
     cache["tensor3"] = torch.rand(1000, 1000, device=device)
     assert len(cache) == 2
@@ -77,15 +77,15 @@ def test_memory_freed_on_clear():
 @cuda_only
 def test_cache_cpu_transfer():
     cache = OutputCache(maxsize=2, move_to_cpu=True)
-    
+
     # Test storing tensor
     cuda_tensor = torch.rand(100, 100, device="cuda")
     cache["test"] = cuda_tensor
-    
+
     # Verify tensor was moved to CPU
     (_, value) = cache.cache["test"]
     assert value.device.type == "cpu"
-    
+
     # Test moving back to CUDA when accessing
     retrieved_tensor = cache["test"]
     assert retrieved_tensor.device.type == "cuda"
@@ -94,7 +94,7 @@ def test_cache_cpu_transfer():
 @cuda_only
 def test_cache_contains():
     cache = OutputCache(maxsize=2, move_to_cpu=False)
-    
+
     # Test __contains__
     tensor = torch.rand(100, 100, device="cuda")
     cache["key"] = tensor

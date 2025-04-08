@@ -84,7 +84,6 @@ def test_sequential_weight_max(decode):
         assert np.isclose(have, want, rtol=1e-5, atol=1e-8), [have, want, prefix]
 
 
-
 @pytest.mark.parametrize(
     "device",
     [
@@ -193,19 +192,17 @@ async def test_async_trie_cleanup(mock_llm, backend):
 
 def test_async_invalid_backend():
     with pytest.raises(ValueError):
-        AsyncTokenCharacterTrie.from_vocab(
-            ["a", "b", "c"], backend="invalid"
-        )
+        AsyncTokenCharacterTrie.from_vocab(["a", "b", "c"], backend="invalid")
 
 
 @pytest.mark.asyncio
 async def test_async_error_handling(decode):
-    async_trie = AsyncTokenCharacterTrie.from_vocab(
-        decode, backend="parallel"
-    )
+    async_trie = AsyncTokenCharacterTrie.from_vocab(decode, backend="parallel")
     async_trie.start()
     with pytest.raises(ValueError):
-        future = await async_trie._queue_request(torch.tensor([0.1, 0.2, 0.2, 0.5]), "invalid-op")
+        future = await async_trie._queue_request(
+            torch.tensor([0.1, 0.2, 0.2, 0.5]), "invalid-op"
+        )
         await future
 
 
@@ -268,9 +265,9 @@ def test_parallel_preprocessing(decode, device):
 
 def test_visualize(decode):
     trie = TokenCharacterTrie(decode=decode)
-    
+
     trie.visualize()
-    
+
     ws = torch.tensor([0.1] * len(trie.children))
     trie.visualize(ws)
 

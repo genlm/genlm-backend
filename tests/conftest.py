@@ -1,6 +1,7 @@
 import pytest
 import torch
 import sys
+
 try:
     from vllm import LLM, SamplingParams
     from vllm.inputs import TokensPrompt
@@ -33,12 +34,11 @@ def cleanup_modules():
     for mod_name in list(sys.modules.keys()):
         if mod_name.startswith("genlm.backend.llm"):
             sys.modules.pop(mod_name, None)
-    
+
     # Also ensure GPU cleanup
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
-
 
 
 def assert_roundtrip_bytes(test_case, tokenizer, byte_vocab):
@@ -123,8 +123,6 @@ def turn_off_space_cleaning(tokenizer):
         yield
     finally:
         tokenizer.clean_up_tokenization_spaces = original_value
-
-
 
 
 class ReferenceVirtualLM:
