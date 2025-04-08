@@ -1,6 +1,7 @@
 import pytest
 import asyncio
 import torch
+from conftest import cuda_only
 from arsenal.maths import compare
 from genlm.backend.llm import AsyncTransformer
 
@@ -221,11 +222,12 @@ async def test_full_batch_size(async_llm):
         async_llm.timeout = old_timeout
 
 
+@cuda_only
 def test_from_name_with_options(model_name):
     # Test model creation with various options
     bitsandbytes_opts = {"load_in_4bit": True}
     hf_opts = {
-        "device_map": "auto" if torch.cuda.is_available() else None,
+        "device_map": "auto",
         "torch_dtype": torch.float16,
     }
 
