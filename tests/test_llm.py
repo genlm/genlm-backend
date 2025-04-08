@@ -58,6 +58,7 @@ def test_next_token_logprobs(async_llm, reference_llm, token_ids_list):
         assert compare(have, want).max_rel_err < 1e-5, token_ids
 
 
+@cuda_only
 def test_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list):
     for token_ids in token_ids_list:
         have = async_llm.next_token_logprobs_sync(token_ids).cpu().numpy()

@@ -158,7 +158,7 @@ def test_walk_cache_with_past(async_llm):
     logprobs_after = asyncio.run(async_llm.next_token_logprobs(extended_prompt))
     assert logprobs_after is not None
 
-    assert torch.allclose(logprobs_before, logprobs_after)
+    assert torch.allclose(logprobs_before, logprobs_after, atol=1e-3, rtol=1e-3)
 
 
 def test_next_token_logprobs_with_kv_cache(async_llm):

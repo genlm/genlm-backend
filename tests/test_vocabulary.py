@@ -1,21 +1,9 @@
 import pytest
-from functools import wraps
 from transformers import AutoTokenizer
 from genlm.backend.tokenization import decode_vocab
 from genlm.backend.tokenization.bytes import ByteDecoderError, check_byte_decoder
 from conftest import assert_roundtrip_bytes
 from hypothesis import given, strategies as st, settings
-
-
-def skip_if_gated(f):
-    @wraps(f)
-    def wrapper(*args, **kwargs):
-        try:
-            return f(*args, **kwargs)
-        except OSError as e:
-            pytest.skip(f"Skipping due to gated model access: {e}")
-
-    return wrapper
 
 
 MAX_SIZE = 50
@@ -26,12 +14,14 @@ tokenizer_cache = {}
 def load_tokenizer(name, use_fast):
     if (name, use_fast) in tokenizer_cache:
         return tokenizer_cache[(name, use_fast)]
-    tokenizer = AutoTokenizer.from_pretrained(name, use_fast=use_fast)
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(name, use_fast=use_fast)
+    except OSError:
+        pytest.skip(f"Skipping due to gated model access: {name}")
     tokenizer_cache[(name, use_fast)] = tokenizer
     return tokenizer
 
 
-@skip_if_gated
 @settings(deadline=None, max_examples=MAX_EXAMPLES)
 @given(text=st.text(min_size=1, max_size=MAX_SIZE), is_fast=st.booleans())
 def test_gpt2(text, is_fast):
@@ -40,7 +30,6 @@ def test_gpt2(text, is_fast):
     assert_roundtrip_bytes(text, tokenizer, byte_vocab)
 
 
-@skip_if_gated
 @settings(deadline=None, max_examples=MAX_EXAMPLES)
 @given(text=st.text(min_size=1, max_size=MAX_SIZE), is_fast=st.booleans())
 def test_llama3(text, is_fast):
@@ -49,7 +38,6 @@ def test_llama3(text, is_fast):
     assert_roundtrip_bytes(text, tokenizer, byte_vocab)
 
 
-@skip_if_gated
 @settings(deadline=None, max_examples=MAX_EXAMPLES)
 @given(text=st.text(min_size=1, max_size=MAX_SIZE), is_fast=st.booleans())
 def test_codellama(text, is_fast):
@@ -58,7 +46,6 @@ def test_codellama(text, is_fast):
     assert_roundtrip_bytes(text, tokenizer, byte_vocab)
 
 
-@skip_if_gated
 @settings(deadline=None, max_examples=MAX_EXAMPLES)
 @given(text=st.text(min_size=1, max_size=MAX_SIZE), is_fast=st.booleans())
 def test_gemma(text, is_fast):
@@ -67,7 +54,6 @@ def test_gemma(text, is_fast):
     assert_roundtrip_bytes(text, tokenizer, byte_vocab)
 
 
-@skip_if_gated
 @settings(deadline=None, max_examples=MAX_EXAMPLES)
 @given(text=st.text(min_size=1, max_size=MAX_SIZE), is_fast=st.booleans())
 def test_phi(text, is_fast):
@@ -76,7 +62,6 @@ def test_phi(text, is_fast):
     assert_roundtrip_bytes(text, tokenizer, byte_vocab)
 
 
-@skip_if_gated
 @settings(deadline=None, max_examples=MAX_EXAMPLES)
 @given(text=st.text(min_size=1, max_size=MAX_SIZE), is_fast=st.booleans())
 def test_mistral(text, is_fast):
@@ -85,7 +70,6 @@ def test_mistral(text, is_fast):
     assert_roundtrip_bytes(text, tokenizer, byte_vocab)
 
 
-@skip_if_gated
 @settings(deadline=None, max_examples=MAX_EXAMPLES)
 @given(text=st.text(min_size=1, max_size=MAX_SIZE), is_fast=st.booleans())
 def test_deepseek_r1_unsloth(text, is_fast):
