@@ -140,7 +140,7 @@ class AsyncTransformer(AsyncLM):
 
     def clear_cache(self):
         """Clear the cache of log probabilities and key/value pairs."""
-        self.cache = TokenTrie(None, self.cache.logprobs)
+        self.cache = TokenTrie()
 
     def clear_kv_cache(self):
         """Clear any key and value vectors from the cache."""
@@ -159,7 +159,7 @@ class AsyncTransformer(AsyncLM):
             prompt_tokens (list[int]): token ids for the prompt to cache.
         """
         result = self.model(torch.tensor([prompt_tokens]).to(self.device))
-        node = self.cache.extend_cache(1, prompt_tokens, result.logits[0], 0)
+        node = self.cache.extend_cache(0, prompt_tokens, result.logits[0], 0)
         node.past_key_values = result.past_key_values
 
     @torch.no_grad()

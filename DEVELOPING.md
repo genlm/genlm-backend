@@ -26,6 +26,12 @@ When test dependencies are installed, the test suite can be run via:
 pytest tests
 ```
 
+To run the test suite with coverage, run:
+
+```bash
+pytest tests --cov=genlm/backend --cov-report=term-missing
+```
+
 ## Documentation
 
 Documentation is generated using [mkdocs](https://www.mkdocs.org/) and hosted on GitHub Pages. To build the documentation, run:

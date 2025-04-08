@@ -13,26 +13,31 @@ try:
     from vllm.model_executor.layers.sampler import SamplerOutput
     from vllm.sequence import SequenceOutput, CompletionSequenceGroupOutput, Logprob
 
-    HAS_VLLM = True
-except ImportError:
-    HAS_VLLM = False
-    warnings.warn(
-        "vLLM not installed. Run 'pip install vllm' to use the vLLM-based AsyncLM model."
+    from vllm.distributed.parallel_state import (
+        destroy_model_parallel,
+        destroy_distributed_environment,
     )
+
+    HAS_VLLM = True
+except ImportError: # pragma: no cover
+    HAS_VLLM = False # pragma: no cover
+    warnings.warn( # pragma: no cover
+        "vLLM not installed. Run 'pip install vllm' to use the vLLM-based AsyncLM model."
+    ) 
 
 if not HAS_VLLM:
 
-    class AsyncVirtualLM:
+    class AsyncVirtualLM: # pragma: no cover
         """Placeholder class when vLLM is not installed."""
 
-        def __init__(self, *args, **kwargs):
+        def __init__(self, *args, **kwargs): # pragma: no cover
             raise ImportError(
                 "vLLM is not installed. Please install it with 'pip install vllm' "
                 "to use the vLLM-based AsyncLM model."
             )
 
         @classmethod
-        def from_name(cls, *args, **kwargs):
+        def from_name(cls, *args, **kwargs): # pragma: no cover
             raise ImportError(
                 "vLLM is not installed. Please install it with 'pip install vllm' "
                 "to use the vLLM-based AsyncLM model."
@@ -91,7 +96,7 @@ else:
                 (AsyncVirtualLM): An `AsyncVirtualLM` instance.
             """
             if not HAS_VLLM:
-                raise ImportError(
+                raise ImportError( # pragma: no cover
                     "vLLM not available. Install vLLM or use AsyncTransformer instead."
                 )
 
@@ -267,6 +272,8 @@ else:
             """Clean up the vLLM engine and associated resources."""
             if async_engine := getattr(self, "async_llm_engine", None):
                 async_engine.shutdown_background_loop()
+                destroy_model_parallel()
+                destroy_distributed_environment()
 
 
 class DeferredSampler(torch.nn.Module):

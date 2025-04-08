@@ -1,5 +1,6 @@
 coverage
 pytest
+pytest-cov
 pytest-asyncio
 pytest-benchmark
 arsenal @ git+https://github.com/timvieira/arsenal
