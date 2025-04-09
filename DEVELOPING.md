@@ -7,7 +7,7 @@ on the `backend` codebase.
 
 Clone the repository:
 ```bash
-git clone git@github.com:genlm/backend.git
+git clone git@github.com:genlm/genlm-backend.git
 cd backend
 ```
 
