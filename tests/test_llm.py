@@ -3,7 +3,7 @@ import pytest
 import asyncio
 from conftest import cuda_only, ReferenceVirtualLM
 from arsenal.maths import compare
-from genlm.backend.llm import AsyncVirtualLM, AsyncTransformer, MockAsyncLM
+from genlm.backend.llm import load_model_by_name, MockAsyncLM, AsyncVirtualLM
 from genlm.backend.llm.vllm import LazyLogprobDict
 
 # from hypothesis import given, strategies as st, settings
@@ -23,15 +23,17 @@ def reference_llm(model_name):
 
 @pytest.fixture(scope="module")
 def async_llm(model_name):
-    return AsyncVirtualLM.from_name(
-        model_name, engine_opts={"gpu_memory_utilization": 0.2, "dtype": "float16"}
+    return load_model_by_name(
+        model_name,
+        backend="vllm",
+        llm_opts={"engine_opts": {"gpu_memory_utilization": 0.2, "dtype": "float16"}},
     )
 
 
 @pytest.fixture(scope="module")
 def transformer_llm(model_name):
-    return AsyncTransformer.from_name(
-        model_name, hf_opts={"torch_dtype": torch.float16}
+    return load_model_by_name(
+        model_name, backend="hf", llm_opts={"hf_opts": {"torch_dtype": torch.float16}}
     )
 
 
@@ -222,3 +224,8 @@ async def test_mock_async_llm():
     logprobs2 = mock_async_llm.next_token_logprobs_sync([0])
     assert torch.allclose(logprobs1, logprobs2)
     mock_async_llm.clear_cache()  # no-op
+
+
+def test_load_model_by_name_error():
+    with pytest.raises(ValueError):
+        load_model_by_name("gpt2", backend="invalid")
