@@ -15,7 +15,7 @@ GenLM Backend is a high-performance inference backend for language model probabi
 ## 🚀 Key Features
 - Automatic batching of concurrent log-probability requests, enabling efficient large-scale inference without having to write batching logic yourself
 - Byte-level decoding of transformers tokenizers, enabling advanced token-level control
-- Supports for arbitrary Hugging Face models (e.g., LLaMA, DeepSeek, etc.) with fast inference and automatic KV caching using vllm
+- Support for arbitrary Hugging Face models (e.g., LLaMA, DeepSeek, etc.) with fast inference and automatic KV caching using vllm
 
 See our [documentation](https://genlm.github.io/genlm-backend/).
 
