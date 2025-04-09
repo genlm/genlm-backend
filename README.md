@@ -83,8 +83,8 @@ async def autobatched_sis(n_particles, llm, masking_function, prompt_ids):
 
 # --- Run the example --- #
 llm = load_model_by_name("gpt2") # or e.g., "meta-llama/Llama-3.2-1B" if you have access
-mask_function = make_masking_function(llm, max_token_length=5, max_tokens=10)
-prompt_ids = llm.tokenizer.encode("I love")
+mask_function = make_masking_function(llm, max_token_length=10, max_tokens=10)
+prompt_ids = llm.tokenizer.encode("Montreal is")
 particles = await autobatched_sis( # use asyncio.run(autobatched_sis(...)) if you are not in an async context
     n_particles=10, llm=llm, masking_function=mask_function, prompt_ids=prompt_ids
 )
