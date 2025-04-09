@@ -13,7 +13,7 @@ GenLM Backend is a high-performance backend for language model probabilistic pro
 This library can be installed via pip:
 
 ```bash
-pip install genlm.backend
+pip install genlm_backend
 ```
 
 
