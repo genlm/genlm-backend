@@ -29,7 +29,7 @@ docs = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["genlm/backend/*"]
+include = ["genlm", "genlm/backend"]
 exclude = ["benchmark*", "tests*"]
 
 [build-system]
