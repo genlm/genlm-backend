@@ -4,12 +4,13 @@ from genlm.backend.llm.base import AsyncLM, MockAsyncLM
 
 import torch
 
+
 def load_model_by_name(name, backend=None, llm_opts=None):
     """Load a language model by name.
 
     Args:
         name (str): Hugging Face model name (e.g. "gpt2", "meta-llama/Llama-3.2-1B-Instruct")
-        backend (str, optional): Backend to use for inference. Can be "vllm" or "hf". 
+        backend (str, optional): Backend to use for inference. Can be "vllm" or "hf".
             If None, defaults to "vllm" if CUDA is available, otherwise "hf".
         llm_opts (dict, optional): Additional options to pass to the backend constructor.
             See AsyncVirtualLM and AsyncTransformer documentation for details.
@@ -22,7 +23,7 @@ def load_model_by_name(name, backend=None, llm_opts=None):
     """
     if backend is None:
         backend = "vllm" if torch.cuda.is_available() else "hf"
-    
+
     if llm_opts is None:
         llm_opts = {}
 
