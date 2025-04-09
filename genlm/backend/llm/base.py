@@ -3,7 +3,7 @@ import asyncio
 import numpy as np
 from abc import ABC, abstractmethod
 
-from genlm_backend.tokenization import decode_vocab
+from genlm.backend.tokenization import decode_vocab
 
 
 class AsyncLM(ABC):
@@ -74,7 +74,7 @@ class AsyncLM(ABC):
 
     def clear_cache(self):
         """Clear any caches used by the language model. No-op in base class."""
-        pass
+        pass  # pragma: no cover
 
 
 class MockAsyncLM(AsyncLM):

@@ -3,8 +3,8 @@ import logging
 import warnings
 from contextlib import contextmanager
 
-from genlm_backend.llm.base import AsyncLM
-from genlm_backend.cache import OutputCache
+from genlm.backend.llm.base import AsyncLM
+from genlm.backend.cache import OutputCache
 
 try:
     from vllm import AsyncLLMEngine, SamplingParams, AsyncEngineArgs
@@ -13,26 +13,31 @@ try:
     from vllm.model_executor.layers.sampler import SamplerOutput
     from vllm.sequence import SequenceOutput, CompletionSequenceGroupOutput, Logprob
 
+    from vllm.distributed.parallel_state import (
+        destroy_model_parallel,
+        destroy_distributed_environment,
+    )
+
     HAS_VLLM = True
-except ImportError:
-    HAS_VLLM = False
-    warnings.warn(
+except ImportError:  # pragma: no cover
+    HAS_VLLM = False  # pragma: no cover
+    warnings.warn(  # pragma: no cover
         "vLLM not installed. Run 'pip install vllm' to use the vLLM-based AsyncLM model."
     )
 
 if not HAS_VLLM:
 
-    class AsyncVirtualLM:
+    class AsyncVirtualLM:  # pragma: no cover
         """Placeholder class when vLLM is not installed."""
 
-        def __init__(self, *args, **kwargs):
+        def __init__(self, *args, **kwargs):  # pragma: no cover
             raise ImportError(
                 "vLLM is not installed. Please install it with 'pip install vllm' "
                 "to use the vLLM-based AsyncLM model."
             )
 
         @classmethod
-        def from_name(cls, *args, **kwargs):
+        def from_name(cls, *args, **kwargs):  # pragma: no cover
             raise ImportError(
                 "vLLM is not installed. Please install it with 'pip install vllm' "
                 "to use the vLLM-based AsyncLM model."
@@ -58,7 +63,7 @@ else:
             Args:
                 async_llm_engine (AsyncLLMEngine): The async vLLM engine instance.
                 cache_size (int, optional): Maximum size of the output cache. If 0, caching is disabled. Defaults to 0.
-                cache_opts (dict, optional): Additional options to pass to the [`OutputCache`][genlm_backend.cache.OutputCache] constructor. Defaults to {}.
+                cache_opts (dict, optional): Additional options to pass to the [`OutputCache`][backend.cache.OutputCache] constructor. Defaults to {}.
 
             Note:
                 The cache stores the log probabilities for previously seen token sequences to avoid redundant requests. KV caching is handled internally by the vLLM engine.
@@ -91,7 +96,7 @@ else:
                 (AsyncVirtualLM): An `AsyncVirtualLM` instance.
             """
             if not HAS_VLLM:
-                raise ImportError(
+                raise ImportError(  # pragma: no cover
                     "vLLM not available. Install vLLM or use AsyncTransformer instead."
                 )
 
@@ -267,6 +272,8 @@ else:
             """Clean up the vLLM engine and associated resources."""
             if async_engine := getattr(self, "async_llm_engine", None):
                 async_engine.shutdown_background_loop()
+                destroy_model_parallel()
+                destroy_distributed_environment()
 
 
 class DeferredSampler(torch.nn.Module):

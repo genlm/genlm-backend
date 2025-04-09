@@ -1,5 +1,5 @@
 import torch
-from genlm_backend.trie.base import TokenCharacterTrie
+from genlm.backend.trie.base import TokenCharacterTrie
 
 
 class ParallelTokenCharacterTrie(TokenCharacterTrie):

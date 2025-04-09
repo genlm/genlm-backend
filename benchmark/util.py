@@ -76,8 +76,8 @@ def token_prefix_batches(text, tokenizer, batch_size, prepend=""):
 
 
 def load_trie(llm, implementation):
-    from genlm_backend.trie.base import TokenCharacterTrie
-    from genlm_backend.trie.parallel import ParallelTokenCharacterTrie
+    from genlm.backend.trie.base import TokenCharacterTrie
+    from genlm.backend.trie.parallel import ParallelTokenCharacterTrie
 
     if implementation == "sequential":
         return TokenCharacterTrie(decode=llm.byte_vocab)

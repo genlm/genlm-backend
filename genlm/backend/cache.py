@@ -36,6 +36,9 @@ class OutputCache:
     def __contains__(self, key):
         return key in self.cache
 
+    def __len__(self):
+        return len(self.cache)
+
     def clear(self):
         self.cache.clear()
 

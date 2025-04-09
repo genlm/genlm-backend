@@ -4,8 +4,8 @@ import asyncio
 import numpy as np
 from transformers import AutoTokenizer
 
-from genlm_backend.llm import MockAsyncLM
-from genlm_backend.trie import (
+from genlm.backend.llm import MockAsyncLM
+from genlm.backend.trie import (
     TokenCharacterTrie,
     ParallelTokenCharacterTrie,
     AsyncTokenCharacterTrie,
@@ -106,6 +106,11 @@ def test_single_agreement(decode, device):
 
     assert np.allclose(parallel_weights, sequential_weights, rtol=1e-5, atol=1e-8)
 
+    parallel_weights = parallel_trie.weight_max(ws)
+    sequential_weights = trie.weight_max(ws)
+
+    assert np.allclose(parallel_weights, sequential_weights, rtol=1e-5, atol=1e-8)
+
 
 @pytest.mark.parametrize(
     "device",
@@ -180,8 +185,25 @@ async def test_async_trie_cleanup(mock_llm, backend):
     async_trie = AsyncTokenCharacterTrie.from_vocab(
         mock_llm.byte_vocab, backend=backend
     )
+    async_trie.start()
     await async_trie.cleanup()
     assert async_trie._task is None
+
+
+def test_async_invalid_backend():
+    with pytest.raises(ValueError):
+        AsyncTokenCharacterTrie.from_vocab(["a", "b", "c"], backend="invalid")
+
+
+@pytest.mark.asyncio
+async def test_async_error_handling(decode):
+    async_trie = AsyncTokenCharacterTrie.from_vocab(decode, backend="parallel")
+    async_trie.start()
+    with pytest.raises(ValueError):
+        future = await async_trie._queue_request(
+            torch.tensor([0.1, 0.2, 0.2, 0.5]), "invalid-op"
+        )
+        await future
 
 
 def test_sequential_preprocessing(decode):
@@ -243,5 +265,19 @@ def test_parallel_preprocessing(decode, device):
 
 def test_visualize(decode):
     trie = TokenCharacterTrie(decode=decode)
+
+    trie.visualize()
+
     ws = torch.tensor([0.1] * len(trie.children))
     trie.visualize(ws)
+
+    ws = torch.tensor([0] * len(trie.children))
+    trie.visualize(ws)
+
+    with pytest.raises(ValueError):
+        trie.visualize(torch.tensor([0.1] * (len(trie.children) + 1)))
+
+
+def test_parallel_invalid_device():
+    with pytest.raises(ValueError):
+        ParallelTokenCharacterTrie(decode=["a", "b", "c"], device="invalid")
