@@ -17,8 +17,13 @@ theme:
 
 plugins:
   - search
-  - search
-  - mkdocstrings
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            members_order: source
+            members_order_submodules: source
+            group_by_category: false
   - gen-files:
       scripts:
       - docs/gen_reference_page.py
