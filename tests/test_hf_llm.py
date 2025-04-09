@@ -3,7 +3,7 @@ import asyncio
 import torch
 from conftest import cuda_only
 from arsenal.maths import compare
-from genlm.backend.llm import AsyncTransformer
+from genlm.backend.llm import load_model_by_name, AsyncTransformer
 
 
 @pytest.fixture(scope="module")
@@ -13,7 +13,7 @@ def model_name():
 
 @pytest.fixture(scope="module")
 def async_llm(model_name):
-    return AsyncTransformer.from_name(model_name)
+    return load_model_by_name(model_name, backend="hf")
 
 
 @pytest.fixture(scope="module")
@@ -248,3 +248,7 @@ def test_batch_evaluate_empty_queries(async_llm):
     async_llm.queries = []
     async_llm.batch_evaluate_queries()
     assert len(async_llm.queries) == 0
+
+
+def test_load_model_by_name_no_backend():
+    load_model_by_name("gpt2")
