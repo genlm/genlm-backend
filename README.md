@@ -10,14 +10,15 @@
 
 </div>
 
-GenLM Backend is a high-performance inference backend for language model probabilistic programs, built for seamless integration with the GenLM ecosystem. It provides an **asynchronous** and **autobatched** interface to LLMs served by `vllm` or `transformers`, enabling scalable and efficient inference.
+GenLM Backend is a high-performance backend for language model probabilistic programs, built for the GenLM ecosystem. It provides an **asynchronous** and **autobatched** interface to `vllm` and `transformers` language models, enabling scalable and efficient inference.
+
+See our [documentation](https://genlm.github.io/genlm-backend/).
 
 ## 🚀 Key Features
 - Automatic batching of concurrent log-probability requests, enabling efficient large-scale inference without having to write batching logic yourself
 - Byte-level decoding of transformers tokenizers, enabling advanced token-level control
 - Support for arbitrary Hugging Face models (e.g., LLaMA, DeepSeek, etc.) with fast inference and automatic KV caching using vllm
 
-See our [documentation](https://genlm.github.io/genlm-backend/).
 
 ## ⚡ Quick Start
 
@@ -29,7 +30,7 @@ pip install genlm-backend
 
 ## 🧪 Example: Autobatched Sequential Importance Sampling with LLMs
 
-This example demonstrates how `genlm-backend` enables concise, scalable probabilistic inference with language models. It implements a Sequential Importance Sampling (SIS) algorithm in which inference is performed via asynchronous and autobatched calls to a language model.
+This example demonstrates how `genlm-backend` enables concise, scalable probabilistic inference with language models. It implements a Sequential Importance Sampling (SIS) algorithm that makes asynchronous log-probabality requests which get automatically batched by the language model.
 
 
 ```python
@@ -100,7 +101,7 @@ for s, p in sorted(zip(strings, probs), key=lambda x: -x[1]):
 
 This example highlights the following features:
 
-* 🌀 **Asynchronous Inference Loop.** Each particle runs independently, but all LLM calls are scheduled concurrently via `asyncio.gather`. The backend batches them automatically, so you get the efficiency of large batched inference without writing batching logic yourself.
+* 🌀 **Asynchronous Inference Loop.** Each particle runs independently, but all LLM calls are scheduled concurrently via `asyncio.gather`. The backend batches them automatically, so we get the efficiency of large batched inference without having to write the batching logic.
 * 🔁 **Byte-level Tokenization Support.** Token filtering is done using the model’s byte-level vocabulary, which `genlm-backend` exposes. This enables low-level control over generation in ways not possible with most high-level APIs.
 
 
