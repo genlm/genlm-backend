@@ -6,7 +6,7 @@
 [![codecov](https://codecov.io/github/genlm/genlm-backend/graph/badge.svg?token=PwmHwMJC2y)](https://codecov.io/github/genlm/genlm-backend)
 [![PyPI](https://img.shields.io/pypi/v/genlm-backend?label=pypi)](https://pypi.org/project/genlm-backend/)
 
-GenLM Backend is a high-performance inference backend for language model probabilistic programs, built for seamless integration with the GenLM ecosystem. It provides an **asynchronous**, **autobatched** interface to LLMs served by `vllm` or `transformers`, enabling scalable and efficient inference.
+GenLM Backend is a high-performance backend for language model probabilistic programs, built for the GenLM ecosystem. It provides an **asynchronous** and **autobatched** interface to `vllm` and `transformers` language models, enabling scalable and efficient inference.
 
 ## Key Features
 - Automatic batching of concurrent log-probability requests—enabling efficient large-scale inference without having to write batching logic yourself
@@ -24,7 +24,7 @@ pip install genlm-backend
 
 ## Example: Autobatched Sequential Importance Sampling with LLMs
 
-This example demonstrates how `genlm-backend` enables concise, scalable probabilistic inference with language models. It implements a Sequential Importance Sampling (SIS) algorithm in which inference is performed via asynchronous, automatically batched calls to a language model.
+This example demonstrates how `genlm-backend` enables concise, scalable probabilistic inference with language models. It implements a Sequential Importance Sampling (SIS) algorithm that makes asynchronous log-probabality requests which get automatically batched by the language model.
 
 
 ```python

@@ -21,9 +21,6 @@ try:
     HAS_VLLM = True
 except ImportError:  # pragma: no cover
     HAS_VLLM = False  # pragma: no cover
-    warnings.warn(  # pragma: no cover
-        "vLLM not installed. Run 'pip install vllm' to use the vLLM-based AsyncLM model."
-    )
 
 if not HAS_VLLM:
 
