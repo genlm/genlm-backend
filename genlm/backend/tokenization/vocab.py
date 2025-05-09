@@ -1,6 +1,5 @@
 """Functions to get and check HuggingFace tokenizer vocabularies"""
 
-import warnings
 from transformers import AutoTokenizer
 
 from genlm.backend.tokenization.bytes import ByteVocabError, get_byte_vocab
