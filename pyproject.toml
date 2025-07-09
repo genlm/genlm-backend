@@ -15,7 +15,7 @@ dependencies = [
     "accelerate",
     "bitsandbytes",
     "numba",
-    "vllm>=0.6.6,<0.8.5; sys_platform == 'linux'",
+    "vllm>=0.6.6; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
