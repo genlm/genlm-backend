@@ -152,6 +152,7 @@ class ReferenceVirtualLM:
         llm_opts = {
             "enable_prefix_caching": True,
             "disable_log_stats": True,
+            "dtype": "float16",
             **(llm_opts or {}),
         }
         llm = LLM(model=model_name, tokenizer=model_name, **llm_opts)
