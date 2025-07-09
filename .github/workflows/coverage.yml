@@ -31,6 +31,7 @@ jobs:
 
       - name: Run tests with vllm V0
         run: |
+          source venv/bin/activate
           export VLLM_USE_V1="0"
           coverage run --source=genlm/backend -m pytest --benchmark-disable
           coverage json --omit "*/test*"
@@ -38,6 +39,7 @@ jobs:
 
       - name: Run tests with vllm V1 # Currently, we force the use of v0, but we will want to be compatible with v1 soon.
         run: |
+          source venv/bin/activate
           export VLLM_USE_V1="1"
           pytest test/
 
