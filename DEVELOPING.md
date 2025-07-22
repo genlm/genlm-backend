@@ -8,14 +8,23 @@ on the `backend` codebase.
 Clone the repository:
 ```bash
 git clone git@github.com:genlm/genlm-backend.git
-cd backend
+cd genlm-backend
 ```
 
-Install the package with pip:
+Create a new environment. For example, with `uv`:
 
 ```bash
-pip install -e ".[docs]"
-pip install -r requirements-dev.txt
+uv venv .venv --python 3.11
+source .venv/bin/activate
+```
+
+> Note: You may need to install `uv` via `curl -LsSf https://astral.sh/uv/install.sh | sh`. See also [the installation methods for uv](https://docs.astral.sh/uv/getting-started/installation/).
+
+Then, install the package with pip:
+
+```bash
+uv pip install -e ".[docs]"
+uv pip install -r requirements-dev.txt
 ```
 
 ## Testing
