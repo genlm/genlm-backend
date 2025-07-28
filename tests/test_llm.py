@@ -226,6 +226,10 @@ async def test_mock_async_llm():
     mock_async_llm.clear_cache()  # no-op
 
 
+def test_load_model_by_name_mock():
+    load_model_by_name("gpt2", backend="mock")
+
+
 def test_load_model_by_name_error():
     with pytest.raises(ValueError):
         load_model_by_name("gpt2", backend="invalid")
