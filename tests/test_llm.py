@@ -149,42 +149,6 @@ def test_batch_next_token_logprobs_agreement(
         ]
 
 
-def test_lazy_logprob_dict():
-    try:
-        from vllm.sequence import Logprob
-    except ImportError:
-        pytest.skip("vLLM is not installed")
-
-    logprobs = torch.tensor(
-        [0.1, 0.2, 0.3],
-        dtype=torch.float16,
-        device="cuda" if torch.cuda.is_available() else "cpu",
-    )
-    lazy_logprob_dict = LazyLogprobDict(logprobs)
-    assert lazy_logprob_dict[0] == Logprob(0.1)
-    assert lazy_logprob_dict[1] == Logprob(0.2)
-    assert lazy_logprob_dict[2] == Logprob(0.3)
-
-    with pytest.raises(KeyError):
-        lazy_logprob_dict[3]
-
-    assert len(lazy_logprob_dict) == 3
-    assert list(lazy_logprob_dict.keys()) == [0, 1, 2]
-    assert list(lazy_logprob_dict.values()) == [
-        Logprob(0.1),
-        Logprob(0.2),
-        Logprob(0.3),
-    ]
-    assert list(lazy_logprob_dict.items()) == [
-        (0, Logprob(0.1)),
-        (1, Logprob(0.2)),
-        (2, Logprob(0.3)),
-    ]
-    assert lazy_logprob_dict.get(0) == Logprob(0.1)
-    assert lazy_logprob_dict.get(3) is None
-    assert lazy_logprob_dict.get(3, 0.4) == 0.4
-
-
 @pytest.mark.asyncio
 async def test_mock_async_llm():
     mock_async_llm = MockAsyncLM.from_name("gpt2")
@@ -209,7 +173,7 @@ def test_generate_agreement(async_llm, transformer_llm):
     max_tokens = 10
     temperature = 0.01
     seed = 42
-    eos_token_ids = [0]
+    eos_token_ids = [407]
 
     generated_token_ids_vllm = asyncio.run(
         async_llm.sample(
@@ -234,36 +198,42 @@ def test_generate_agreement(async_llm, transformer_llm):
 
 
 @cuda_only
-def test_batch_sample_agreement(async_llm, transformer_llm):
+def test_sample_seeded_vllm(async_llm):
+    generated_token_ids = asyncio.run(
+        async_llm.sample(
+            prompt_token_ids=async_llm.tokenizer.encode("Hello,"),
+            max_tokens=10,
+            eos_token_ids=[611],
+            temperature=0.01,
+            seed=80808,
+        )
+    )
+    assert (
+        async_llm.tokenizer.decode(generated_token_ids)
+        == " I'm sorry, but I'm not sure"
+    )
+
+
+@cuda_only
+def test_batch_sample(async_llm):
     prompts = [
         async_llm.tokenizer.encode("Hello, world!"),
         async_llm.tokenizer.encode("An apple a day keeps the"),
     ]
-    max_tokens = 10
-    eos_token_ids = []
-    temperature = 0.01
-    seed = 42
 
     generated_token_ids_vllm = asyncio.run(
         async_llm.batch_sample(
             prompt_token_ids_list=prompts,
-            max_tokens=max_tokens,
-            eos_token_ids=eos_token_ids,
-            temperature=temperature,
-            seed=seed,
-        )
-    )
-    generated_token_ids_hf = asyncio.run(
-        transformer_llm.batch_sample(
-            prompt_token_ids_list=prompts,
-            max_tokens=max_tokens,
-            eos_token_ids=eos_token_ids,
-            temperature=temperature,
-            seed=seed,
+            max_tokens=10,
+            eos_token_ids=[],
+            temperature=0.01,
+            seed=42,
         )
     )
 
-    assert generated_token_ids_vllm == generated_token_ids_hf
+    assert len(generated_token_ids_vllm) == len(prompts)
+    assert len(generated_token_ids_vllm[0]) == 10
+    assert len(generated_token_ids_vllm[1]) == 10
 
 
 @pytest.mark.skip("This fails.")

@@ -267,7 +267,7 @@ def test_sample_seeded(async_llm):
         )
     )
 
-    assert async_llm.tokenizer.decode(generated_token_ids) == " sun at bay,"
+    assert async_llm.tokenizer.decode(generated_token_ids) == " sun at bay"
 
 
 def test_batch_sample(async_llm):

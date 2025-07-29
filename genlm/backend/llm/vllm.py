@@ -124,6 +124,10 @@ else:
 
             return cls(engine, **kwargs)
 
+        @property
+        def underlying_model(self):
+            return self.async_llm_engine.engine.model_executor.driver_worker.model_runner.model
+
         async def next_token_logprobs(self, token_ids):
             """Request log probabilities of next token asynchronously with output caching.
 
@@ -277,4 +281,7 @@ else:
                     assert len(output.outputs) == 1, (
                         "Expected exactly one sequence group"
                     )
-                    return list(output.outputs[0].token_ids)
+                    token_ids = list(output.outputs[0].token_ids)
+                    if token_ids[-1] in eos_token_ids:
+                        token_ids = token_ids[:-1]
+                    return token_ids
