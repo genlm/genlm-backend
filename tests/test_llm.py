@@ -4,7 +4,6 @@ import asyncio
 from conftest import cuda_only, ReferenceVirtualLM
 from arsenal.maths import compare
 from genlm.backend.llm import load_model_by_name, MockAsyncLM, AsyncVirtualLM
-from genlm.backend.llm.vllm import LazyLogprobDict
 
 # from hypothesis import given, strategies as st, settings
 
