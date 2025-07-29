@@ -4,6 +4,7 @@ import torch
 from conftest import cuda_only
 from arsenal.maths import compare
 from genlm.backend.llm import load_model_by_name, AsyncTransformer
+from unittest.mock import patch
 
 
 @pytest.fixture(scope="module")
@@ -251,4 +252,42 @@ def test_batch_evaluate_empty_queries(async_llm):
 
 
 def test_load_model_by_name_no_backend():
-    load_model_by_name("gpt2")
+    with patch("torch.cuda.is_available", return_value=False):
+        load_model_by_name("gpt2")
+
+
+def test_sample_seeded(async_llm):
+    generated_token_ids = asyncio.run(
+        async_llm.sample(
+            prompt_token_ids=async_llm.tokenizer.encode("An apple a day keeps the"),
+            max_tokens=10,
+            eos_token_ids=[11],
+            temperature=0.5,
+            seed=80808,
+        )
+    )
+
+    assert async_llm.tokenizer.decode(generated_token_ids) == " sun at bay,"
+
+
+def test_batch_sample(async_llm):
+    prompts = [
+        "An apple a day keeps the",
+        "The quick brown fox",
+        "Jumping jacks",
+    ]
+    max_tokens = 5
+    eos_token_ids = []
+    temperature = 0.5
+
+    prompt_token_ids = [async_llm.tokenizer.encode(p) for p in prompts]
+    generated_token_ids = asyncio.run(
+        async_llm.batch_sample(
+            prompt_token_ids_list=prompt_token_ids,
+            max_tokens=max_tokens,
+            eos_token_ids=eos_token_ids,
+            temperature=temperature,
+        )
+    )
+    assert len(generated_token_ids) == len(prompts)
+    assert all(len(ids) == max_tokens for ids in generated_token_ids)
