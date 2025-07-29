@@ -288,10 +288,10 @@ else:
 
             Args:
                 prompt_token_ids (list[int]): The token IDs of the prompt.
+                eos_token_ids (list[int]): The token IDs of the end-of-sequence tokens.
+                temperature (float, optional): The temperature to use to rescale the logits. Defaults to 1.0.
                 max_tokens (int): The maximum number of tokens to generate.
-                eos_token_ids (list[int]): The token IDs of the end-of-sequence token.
                 seed (int, optional): The seed for the random number generator. Defaults to None.
-                temperature (float, optional): The temperature for the logits. Defaults to 1.0.
 
             Returns:
                 (list[int]): The sampled token IDs.

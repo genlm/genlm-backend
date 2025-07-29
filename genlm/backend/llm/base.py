@@ -83,7 +83,7 @@ class AsyncLM(ABC):
 
         Args:
             prompt_token_ids (list[int]): The token IDs of the prompt.
-            eos_token_ids (list[int]): The token IDs of the end-of-sequence token.
+            eos_token_ids (list[int]): The token IDs of the end-of-sequence tokens.
             temperature (float): The temperature to use for the logits.
             max_tokens (int): The maximum number of tokens to generate.
             seed (int, optional): The seed for the random number generator. Defaults to None.
