@@ -40,8 +40,8 @@ if not HAS_VLLM:
 else:
     logging.getLogger("vllm.engine.async_llm_engine").setLevel(logging.WARNING)
 
-    class GetLogitsProcessor:
-        """A logits processor that stores the logits."""
+    class PassThroughLogitsProcessor:
+        """A logits processor that stores the logprobs and passes the logits through."""
 
         def __init__(self):
             self.log_probs = None
@@ -52,10 +52,6 @@ else:
             )
             self.log_probs = torch.log_softmax(logits, dim=-1, dtype=logits.dtype)
             return logits
-
-    class V0AsyncEngineAdapter:
-        def __init__(self, async_engine):
-            self.async_engine = async_engine
 
     class AsyncVirtualLM(AsyncLM):
         default_params = {
@@ -166,7 +162,7 @@ else:
             prompt = TokensPrompt(prompt_token_ids=token_ids)
 
             outputs = []
-            processor = GetLogitsProcessor()
+            processor = PassThroughLogitsProcessor()
             async for output in self.async_llm_engine.generate(
                 prompt=prompt,
                 sampling_params=SamplingParams(
@@ -208,7 +204,7 @@ else:
             for token_ids in token_ids_list:
                 req_id = str(next(self.request_counter))
                 req_ids.append(req_id)
-                processor = GetLogitsProcessor()
+                processor = PassThroughLogitsProcessor()
                 req_id2processors[req_id] = processor
                 self.async_llm_engine.engine.add_request(
                     prompt=TokensPrompt(prompt_token_ids=token_ids),
