@@ -29,19 +29,12 @@ jobs:
           pip install -e .[test]
           pip install -r requirements-dev.txt
 
-      - name: Run tests with vllm V0
+      - name: Run tests
         run: |
           source venv/bin/activate
-          export VLLM_USE_V1="0"
           coverage run --source=genlm/backend -m pytest --benchmark-disable
           coverage json --omit "*/test*"
           coverage report --omit "*/test*"
-
-      - name: Run tests with vllm V1 # Currently, we force the use of v0, but we will want to be compatible with v1 soon.
-        run: |
-          source venv/bin/activate
-          export VLLM_USE_V1="1"
-          pytest test/
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
