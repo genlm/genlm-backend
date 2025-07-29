@@ -78,13 +78,13 @@ class AsyncLM(ABC):
 
     async def sample(
         self, prompt_token_ids, max_tokens, eos_token_ids, temperature=1.0, seed=None
-    ) -> str:
+    ):
         """Sample from the language model.
 
         Args:
             prompt_token_ids (list[int]): The token IDs of the prompt.
             eos_token_ids (list[int]): The token IDs of the end-of-sequence tokens.
-            temperature (float): The temperature to use for the logits.
+            temperature (float, optional): The temperature to use to rescale the logits. Defaults to 1.0.
             max_tokens (int): The maximum number of tokens to generate.
             seed (int, optional): The seed for the random number generator. Defaults to None.
 
