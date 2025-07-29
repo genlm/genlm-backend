@@ -213,10 +213,22 @@ def test_generate_agreement(async_llm, transformer_llm):
     eos_token_ids = []
 
     generated_token_ids_vllm = asyncio.run(
-        async_llm.sample(prompt, max_tokens, eos_token_ids, temperature, seed)
+        async_llm.sample(
+            prompt_token_ids=prompt,
+            max_tokens=max_tokens,
+            eos_token_ids=eos_token_ids,
+            temperature=temperature,
+            seed=seed,
+        )
     )
     generated_token_ids_hf = asyncio.run(
-        transformer_llm.sample(prompt, max_tokens, eos_token_ids, temperature, seed)
+        transformer_llm.sample(
+            prompt_token_ids=prompt,
+            max_tokens=max_tokens,
+            eos_token_ids=eos_token_ids,
+            temperature=temperature,
+            seed=seed,
+        )
     )
 
     assert generated_token_ids_vllm == generated_token_ids_hf
