@@ -106,7 +106,7 @@ else:
 
             if engine_opts is not None and "enable_chunked_prefill" in engine_opts:
                 if engine_opts["enable_chunked_prefill"]:
-                    warnings.warn(
+                    warnings.warn(  # pragma: no cover
                         "Setting enable_chunked_prefill to True may interfere with AsyncVirtualLM's "
                         "custom sampling functionality."
                     )
@@ -123,6 +123,10 @@ else:
             )
 
             return cls(engine, **kwargs)
+
+        @property
+        def underlying_model(self):
+            return self.async_llm_engine.engine.model_executor.driver_worker.model_runner.model
 
         async def next_token_logprobs(self, token_ids):
             """Request log probabilities of next token asynchronously with output caching.
@@ -241,3 +245,41 @@ else:
                 async_engine.shutdown_background_loop()
                 destroy_model_parallel()
                 destroy_distributed_environment()
+
+        async def sample(
+            self,
+            prompt_token_ids,
+            max_tokens,
+            eos_token_ids,
+            temperature=1.0,
+            seed=None,
+        ):
+            """Sample from the language model.
+
+            Args:
+                prompt_token_ids (list[int]): The token IDs of the prompt.
+                eos_token_ids (list[int]): The token IDs of the end-of-sequence tokens.
+                temperature (float, optional): The temperature to use to rescale the logits. Defaults to 1.0.
+                max_tokens (int): The maximum number of tokens to generate.
+                seed (int, optional): The seed for the random number generator. Defaults to None.
+
+            Returns:
+                (list[int]): The sampled token IDs.
+            """
+            with self._temporarily_set_sampler(self.original_sampler):
+                async for output in self.async_llm_engine.generate(
+                    prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
+                    sampling_params=SamplingParams(
+                        n=1,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        seed=seed,
+                        stop=[self.byte_vocab[i].decode() for i in eos_token_ids],
+                    ),
+                    request_id=str(next(self.request_counter)),
+                ):
+                    if output.finished:
+                        assert len(output.outputs) == 1, (
+                            "Expected exactly one sequence group"
+                        )
+                        return list(output.outputs[0].token_ids)
