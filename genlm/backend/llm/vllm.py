@@ -124,10 +124,6 @@ else:
 
             return cls(engine, **kwargs)
 
-        @property
-        def underlying_model(self):
-            return self.async_llm_engine.engine.model_executor.driver_worker.model_runner.model
-
         async def next_token_logprobs(self, token_ids):
             """Request log probabilities of next token asynchronously with output caching.
 
@@ -266,20 +262,19 @@ else:
             Returns:
                 (list[int]): The sampled token IDs.
             """
-            with self._temporarily_set_sampler(self.original_sampler):
-                async for output in self.async_llm_engine.generate(
-                    prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
-                    sampling_params=SamplingParams(
-                        n=1,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        seed=seed,
-                        stop=[self.byte_vocab[i].decode() for i in eos_token_ids],
-                    ),
-                    request_id=str(next(self.request_counter)),
-                ):
-                    if output.finished:
-                        assert len(output.outputs) == 1, (
-                            "Expected exactly one sequence group"
-                        )
-                        return list(output.outputs[0].token_ids)
+            async for output in self.async_llm_engine.generate(
+                prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
+                sampling_params=SamplingParams(
+                    n=1,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    seed=seed,
+                    stop=[self.byte_vocab[i].decode() for i in eos_token_ids],
+                ),
+                request_id=str(next(self.request_counter)),
+            ):
+                if output.finished:
+                    assert len(output.outputs) == 1, (
+                        "Expected exactly one sequence group"
+                    )
+                    return list(output.outputs[0].token_ids)
