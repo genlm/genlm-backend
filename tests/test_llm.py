@@ -208,9 +208,9 @@ def test_load_model_by_name_error():
 def test_generate_agreement(async_llm, transformer_llm):
     prompt = async_llm.tokenizer.encode("Hello, world!")
     max_tokens = 10
-    temperature = 0.0001
+    temperature = 0.01
     seed = 42
-    eos_token_ids = []
+    eos_token_ids = [0]
 
     generated_token_ids_vllm = asyncio.run(
         async_llm.sample(
@@ -242,7 +242,7 @@ def test_batch_sample_agreement(async_llm, transformer_llm):
     ]
     max_tokens = 10
     eos_token_ids = []
-    temperature = 0.0001
+    temperature = 0.01
     seed = 42
 
     generated_token_ids_vllm = asyncio.run(
