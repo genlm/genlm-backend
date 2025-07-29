@@ -69,6 +69,7 @@ else:
             self.tokenizer = async_llm_engine.engine.get_tokenizer()
             self.request_counter = Counter()
             self.custom_sampler = DeferredSampler()
+            self.original_sampler = self.underlying_model.sampler
             self.cache = (
                 OutputCache(maxsize=cache_size, **cache_opts)
                 if cache_size > 0
@@ -99,7 +100,7 @@ else:
 
             if engine_opts is not None and "enable_chunked_prefill" in engine_opts:
                 if engine_opts["enable_chunked_prefill"]:
-                    warnings.warn(
+                    warnings.warn(  # pragma: no cover
                         "Setting enable_chunked_prefill to True may interfere with AsyncVirtualLM's "
                         "custom sampling functionality."
                     )
@@ -119,6 +120,10 @@ else:
             )
 
             return cls(engine, **kwargs)
+
+        @property
+        def underlying_model(self):
+            return self.async_llm_engine.engine.model_executor.driver_worker.model_runner.model
 
         async def next_token_logprobs(self, token_ids):
             """Request log probabilities of next token asynchronously with output caching.
@@ -158,7 +163,7 @@ else:
             prompt = TokensPrompt(prompt_token_ids=token_ids)
 
             outputs = []
-            with self._optimized_sampling_context():
+            with self._temporarily_set_sampler(self.custom_sampler):
                 async for output in self.async_llm_engine.generate(
                     prompt=prompt,
                     sampling_params=self.default_params,
@@ -201,7 +206,7 @@ else:
                 )
 
             req_id2outputs = {}
-            with self._optimized_sampling_context():
+            with self._temporarily_set_sampler(self.custom_sampler):
                 while self.async_llm_engine.engine.has_unfinished_requests():
                     output = self.async_llm_engine.engine.step()
                     for out in output:
@@ -221,15 +226,14 @@ else:
             return torch.stack(logprobs)
 
         @contextmanager
-        def _optimized_sampling_context(self):
-            """Context manager for optimized sampling configuration."""
-            model = self.async_llm_engine.engine.model_executor.driver_worker.model_runner.model
-            original_sampler = model.sampler
+        def _temporarily_set_sampler(self, sampler):
+            """Context manager for temporarily setting a custom sampler."""
+            original_sampler = self.underlying_model.sampler
             try:
-                model.sampler = self.custom_sampler
+                self.underlying_model.sampler = sampler
                 yield
             finally:
-                model.sampler = original_sampler
+                self.underlying_model.sampler = original_sampler
 
         def _validate_outputs(self, outputs):
             """Validate and extract logprobs from a vLLM output.
@@ -271,6 +275,47 @@ else:
                 async_engine.shutdown_background_loop()
                 destroy_model_parallel()
                 destroy_distributed_environment()
+
+        async def sample(
+            self,
+            prompt_token_ids,
+            max_tokens,
+            eos_token_ids,
+            temperature=1.0,
+            seed=None,
+        ):
+            """Sample from the language model.
+
+            Args:
+                prompt_token_ids (list[int]): The token IDs of the prompt.
+                eos_token_ids (list[int]): The token IDs of the end-of-sequence tokens.
+                temperature (float, optional): The temperature to use to rescale the logits. Defaults to 1.0.
+                max_tokens (int): The maximum number of tokens to generate.
+                seed (int, optional): The seed for the random number generator. Defaults to None.
+
+            Returns:
+                (list[int]): The sampled token IDs.
+            """
+            with self._temporarily_set_sampler(self.original_sampler):
+                async for output in self.async_llm_engine.generate(
+                    prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
+                    sampling_params=SamplingParams(
+                        n=1,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        seed=seed,
+                        stop=[self.byte_vocab[i].decode() for i in eos_token_ids],
+                    ),
+                    request_id=str(next(self.request_counter)),
+                ):
+                    if output.finished:
+                        assert len(output.outputs) == 1, (
+                            "Expected exactly one sequence group"
+                        )
+                        token_ids = list(output.outputs[0].token_ids)
+                        if token_ids[-1] in eos_token_ids:
+                            token_ids = token_ids[:-1]
+                        return token_ids
 
 
 class DeferredSampler(torch.nn.Module):

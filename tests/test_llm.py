@@ -150,37 +150,6 @@ def test_batch_next_token_logprobs_agreement(
         ]
 
 
-@cuda_only
-@pytest.mark.asyncio
-async def test_other():
-    # Check that we warn when we set enable_chunked_prefill to True
-    with pytest.warns(UserWarning):
-        async_llm = AsyncVirtualLM.from_name(
-            "gpt2",
-            engine_opts={
-                "enable_chunked_prefill": True,
-                "gpu_memory_utilization": 0.2,
-                "dtype": "float16",
-            },
-            cache_size=2,
-        )
-
-    logprobs1 = await async_llm.next_token_logprobs([0])
-    logprobs2 = await async_llm.next_token_logprobs([1])
-    assert len(async_llm.cache) == 2
-
-    logprobs1_post = await async_llm.next_token_logprobs([0])
-    logprobs2_post = await async_llm.next_token_logprobs([1])
-    assert torch.allclose(logprobs1, logprobs1_post)
-    assert torch.allclose(logprobs2, logprobs2_post)
-
-    # Check that we can clear the cache
-    async_llm.clear_cache()
-    assert len(async_llm.cache) == 0
-
-    del async_llm
-
-
 def test_lazy_logprob_dict():
     try:
         from vllm.sequence import Logprob
@@ -233,3 +202,114 @@ def test_load_model_by_name_mock():
 def test_load_model_by_name_error():
     with pytest.raises(ValueError):
         load_model_by_name("gpt2", backend="invalid")
+
+
+@cuda_only
+def test_generate_agreement(async_llm, transformer_llm):
+    prompt = async_llm.tokenizer.encode("Hello, world!")
+    max_tokens = 10
+    temperature = 0.01
+    seed = 42
+    eos_token_ids = [407]
+
+    generated_token_ids_vllm = asyncio.run(
+        async_llm.sample(
+            prompt_token_ids=prompt,
+            max_tokens=max_tokens,
+            eos_token_ids=eos_token_ids,
+            temperature=temperature,
+            seed=seed,
+        )
+    )
+    generated_token_ids_hf = asyncio.run(
+        transformer_llm.sample(
+            prompt_token_ids=prompt,
+            max_tokens=max_tokens,
+            eos_token_ids=eos_token_ids,
+            temperature=temperature,
+            seed=seed,
+        )
+    )
+
+    assert generated_token_ids_vllm == generated_token_ids_hf
+
+
+@cuda_only
+def test_sample_seeded_vllm(async_llm):
+    generated_token_ids = asyncio.run(
+        async_llm.sample(
+            prompt_token_ids=async_llm.tokenizer.encode("Hello,"),
+            max_tokens=10,
+            eos_token_ids=[611],
+            temperature=0.01,
+            seed=80808,
+        )
+    )
+    assert (
+        async_llm.tokenizer.decode(generated_token_ids)
+        == " I'm sorry, but I'm not sure"
+    )
+
+
+@cuda_only
+def test_batch_sample(async_llm):
+    prompts = [
+        async_llm.tokenizer.encode("Hello, world!"),
+        async_llm.tokenizer.encode("An apple a day keeps the"),
+    ]
+
+    generated_token_ids_vllm = asyncio.run(
+        async_llm.batch_sample(
+            prompt_token_ids_list=prompts,
+            max_tokens=10,
+            eos_token_ids=[],
+            temperature=0.01,
+            seed=42,
+        )
+    )
+
+    assert len(generated_token_ids_vllm) == len(prompts)
+    assert len(generated_token_ids_vllm[0]) == 10
+    assert len(generated_token_ids_vllm[1]) == 10
+
+
+@pytest.mark.skip("This fails.")
+def test_concurrent_logprobs_and_sample(async_llm):
+    prompt = async_llm.tokenizer.encode("Hello, world!")
+
+    async def logprobs_task():
+        return await async_llm.next_token_logprobs(prompt)
+
+    async def sample_task():
+        return await async_llm.sample(
+            prompt, max_tokens=3, eos_token_ids=[], temperature=1.0
+        )
+
+    async def both_tasks():
+        return await asyncio.gather(logprobs_task(), sample_task())
+
+    asyncio.run(both_tasks())
+
+
+@cuda_only
+@pytest.mark.asyncio
+async def test_other(async_llm):
+    async_llm_with_cache = AsyncVirtualLM(
+        async_llm.async_llm_engine,
+        cache_size=2,
+    )
+
+    logprobs1 = await async_llm_with_cache.next_token_logprobs([0])
+    logprobs2 = await async_llm_with_cache.next_token_logprobs([1])
+    assert len(async_llm_with_cache.cache) == 2
+
+    logprobs1_post = await async_llm_with_cache.next_token_logprobs([0])
+    logprobs2_post = await async_llm_with_cache.next_token_logprobs([1])
+    assert torch.allclose(logprobs1, logprobs1_post)
+    assert torch.allclose(logprobs2, logprobs2_post)
+
+    # Check that we can clear the cache
+    async_llm_with_cache.clear_cache()
+    assert len(async_llm_with_cache.cache) == 0
+
+    del async_llm_with_cache

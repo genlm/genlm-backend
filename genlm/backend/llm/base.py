@@ -76,6 +76,77 @@ class AsyncLM(ABC):
         """Clear any caches used by the language model. No-op in base class."""
         pass  # pragma: no cover
 
+    async def sample(
+        self, prompt_token_ids, max_tokens, eos_token_ids, temperature=1.0, seed=None
+    ):
+        """Sample from the language model.
+
+        Args:
+            prompt_token_ids (list[int]): The token IDs of the prompt.
+            eos_token_ids (list[int]): The token IDs of the end-of-sequence tokens.
+            temperature (float, optional): The temperature to use to rescale the logits. Defaults to 1.0.
+            max_tokens (int): The maximum number of tokens to generate.
+            seed (int, optional): The seed for the random number generator. Defaults to None.
+
+        Returns:
+            (list[int]): The sampled token IDs.
+        """
+        if seed is not None:
+            generator = torch.Generator()
+            generator.manual_seed(seed)
+        else:
+            generator = None
+
+        generated_token_ids = []
+        for _ in range(max_tokens):
+            logprobs = await self.next_token_logprobs(
+                prompt_token_ids + generated_token_ids
+            )
+            probs = torch.softmax(logprobs / temperature, dim=-1)
+            next_token_id = torch.multinomial(
+                probs.cpu() if seed is not None else probs,
+                num_samples=1,
+                generator=generator,
+            ).item()
+            if next_token_id in eos_token_ids:
+                break
+            generated_token_ids.append(next_token_id)
+
+        return generated_token_ids
+
+    async def batch_sample(
+        self,
+        prompt_token_ids_list,
+        max_tokens,
+        eos_token_ids,
+        temperature=1.0,
+        seed=None,
+    ):
+        """Batch sample from the language model.
+
+        Args:
+            prompt_token_ids_list (list[list[int]]): The token IDs of the prompts.
+            max_tokens (int): The maximum number of tokens to generate.
+            eos_token_ids (list[int]): The token IDs of the end-of-sequence token.
+            temperature (float): The temperature to use for the logits.
+            seed (int, optional): The seed for the random number generator. Defaults to None.
+
+        Returns:
+            (list[list[int]]): The sampled token IDs.
+        """
+        return await asyncio.gather(
+            *[
+                self.sample(
+                    prompt_token_ids=prompt_token_ids,
+                    max_tokens=max_tokens,
+                    eos_token_ids=eos_token_ids,
+                    temperature=temperature,
+                    seed=seed,
+                )
+                for prompt_token_ids in prompt_token_ids_list
+            ]
+        )
+
 
 class MockAsyncLM(AsyncLM):
     """Mock implementation of AsyncLM used for testing."""
