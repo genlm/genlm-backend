@@ -108,9 +108,9 @@ class AsyncLM(ABC):
                 num_samples=1,
                 generator=generator,
             ).item()
-            generated_token_ids.append(next_token_id)
             if next_token_id in eos_token_ids:
                 break
+            generated_token_ids.append(next_token_id)
 
         return generated_token_ids
 

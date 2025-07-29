@@ -312,7 +312,10 @@ else:
                         assert len(output.outputs) == 1, (
                             "Expected exactly one sequence group"
                         )
-                        return list(output.outputs[0].token_ids)
+                        token_ids = list(output.outputs[0].token_ids)
+                        if token_ids[-1] in eos_token_ids:
+                            token_ids = token_ids[:-1]
+                        return token_ids
 
 
 class DeferredSampler(torch.nn.Module):
