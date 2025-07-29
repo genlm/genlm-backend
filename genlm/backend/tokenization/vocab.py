@@ -1,6 +1,5 @@
 """Functions to get and check HuggingFace tokenizer vocabularies"""
 
-import warnings
 from transformers import AutoTokenizer
 
 from genlm.backend.tokenization.bytes import ByteVocabError, get_byte_vocab
@@ -90,14 +89,5 @@ def bytes_to_strs(tokenizer, byte_vocab, byte2str_fallback):
             seen_tokens[token] = [token_id]
 
         str_vocab.append(token)
-
-    duplicates = {
-        token: indices for token, indices in seen_tokens.items() if len(indices) > 1
-    }
-    if duplicates:
-        warnings.warn(
-            "Duplicate tokens found in string vocabulary. "
-            "This may lead to downstream issues with the string vocabulary; we recommend using the byte vocabulary."
-        )
 
     return str_vocab
