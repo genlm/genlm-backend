@@ -22,12 +22,16 @@ jobs:
           python-version: 3.11.5
           cache: 'pip'
 
-      - name: Run Tests
+      - name: Install dependencies
         run: |
           python -m venv venv
           source venv/bin/activate
           pip install -e .[test]
           pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: |
+          source venv/bin/activate
           coverage run --source=genlm/backend -m pytest --benchmark-disable
           coverage json --omit "*/test*"
           coverage report --omit "*/test*"
