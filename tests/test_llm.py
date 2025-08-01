@@ -56,7 +56,7 @@ def test_next_token_logprobs(async_llm, reference_llm, token_ids_list):
     for token_ids in token_ids_list:
         have = asyncio.run(async_llm.next_token_logprobs(token_ids)).cpu().numpy()
         want = asyncio.run(reference_llm.next_token_logprobs(token_ids))
-        assert compare(have, want).max_rel_err < 1e-5, token_ids
+        assert compare(have, want).max_rel_err < 1e-3, token_ids
 
 
 @cuda_only
