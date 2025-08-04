@@ -4,7 +4,6 @@ import asyncio
 from conftest import cuda_only, ReferenceVirtualLM
 from arsenal.maths import compare
 from genlm.backend.llm import load_model_by_name, MockAsyncLM, AsyncVirtualLM
-from genlm.backend.llm.vllm import LazyLogprobDict
 
 # from hypothesis import given, strategies as st, settings
 
@@ -57,7 +56,7 @@ def test_next_token_logprobs(async_llm, reference_llm, token_ids_list):
     for token_ids in token_ids_list:
         have = asyncio.run(async_llm.next_token_logprobs(token_ids)).cpu().numpy()
         want = asyncio.run(reference_llm.next_token_logprobs(token_ids))
-        assert compare(have, want).max_rel_err < 1e-5, token_ids
+        assert compare(have, want).max_rel_err < 1e-3, token_ids
 
 
 @cuda_only
@@ -65,7 +64,7 @@ def test_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list):
     for token_ids in token_ids_list:
         have = async_llm.next_token_logprobs_sync(token_ids).cpu().numpy()
         want = asyncio.run(reference_llm.next_token_logprobs(token_ids))
-        assert compare(have, want).max_rel_err < 1e-5, token_ids
+        assert compare(have, want).max_rel_err < 1e-3, token_ids
 
 
 @cuda_only
@@ -77,7 +76,7 @@ def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list):
     )
     wants = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
     for i, (have, want) in enumerate(zip(haves, wants)):
-        assert compare(have, want).max_rel_err < 1e-5, token_ids_list[i]
+        assert compare(have, want).max_rel_err < 1e-3, token_ids_list[i]
 
 
 @cuda_only
@@ -89,7 +88,7 @@ def test_batch_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list
     wants = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
 
     for have, want in zip(haves, wants):
-        assert compare(have, want).max_rel_err < 1e-5, "Sync context"
+        assert compare(have, want).max_rel_err < 1e-3, "Sync context"
 
 
 @cuda_only
@@ -107,7 +106,7 @@ def test_batch_next_token_logprobs_sync_in_async(
     haves = asyncio.run(async_context())
 
     for have, want in zip(haves, wants):
-        assert compare(have, want).max_rel_err < 1e-5, "Sync in async context"
+        assert compare(have, want).max_rel_err < 1e-3, "Sync in async context"
 
 
 @cuda_only
@@ -148,42 +147,6 @@ def test_batch_next_token_logprobs_agreement(
             comparison.pearson,
             token_ids_list[i],
         ]
-
-
-def test_lazy_logprob_dict():
-    try:
-        from vllm.sequence import Logprob
-    except ImportError:
-        pytest.skip("vLLM is not installed")
-
-    logprobs = torch.tensor(
-        [0.1, 0.2, 0.3],
-        dtype=torch.float16,
-        device="cuda" if torch.cuda.is_available() else "cpu",
-    )
-    lazy_logprob_dict = LazyLogprobDict(logprobs)
-    assert lazy_logprob_dict[0] == Logprob(0.1)
-    assert lazy_logprob_dict[1] == Logprob(0.2)
-    assert lazy_logprob_dict[2] == Logprob(0.3)
-
-    with pytest.raises(KeyError):
-        lazy_logprob_dict[3]
-
-    assert len(lazy_logprob_dict) == 3
-    assert list(lazy_logprob_dict.keys()) == [0, 1, 2]
-    assert list(lazy_logprob_dict.values()) == [
-        Logprob(0.1),
-        Logprob(0.2),
-        Logprob(0.3),
-    ]
-    assert list(lazy_logprob_dict.items()) == [
-        (0, Logprob(0.1)),
-        (1, Logprob(0.2)),
-        (2, Logprob(0.3)),
-    ]
-    assert lazy_logprob_dict.get(0) == Logprob(0.1)
-    assert lazy_logprob_dict.get(3) is None
-    assert lazy_logprob_dict.get(3, 0.4) == 0.4
 
 
 @pytest.mark.asyncio

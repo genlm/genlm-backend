@@ -1,7 +1,6 @@
 import torch
 import logging
 import warnings
-from contextlib import contextmanager
 
 from genlm.backend.llm.base import AsyncLM
 from genlm.backend.cache import OutputCache
@@ -10,8 +9,6 @@ try:
     from vllm import AsyncLLMEngine, SamplingParams, AsyncEngineArgs
     from vllm.utils import Counter
     from vllm.inputs import TokensPrompt
-    from vllm.model_executor.layers.sampler import SamplerOutput
-    from vllm.sequence import SequenceOutput, CompletionSequenceGroupOutput, Logprob
 
     from vllm.distributed.parallel_state import (
         destroy_model_parallel,
@@ -43,16 +40,27 @@ if not HAS_VLLM:
 else:
     logging.getLogger("vllm.engine.async_llm_engine").setLevel(logging.WARNING)
 
+    class PassThroughLogitsProcessor:
+        """A logits processor that stores the logprobs and passes the logits through."""
+
+        def __init__(self):
+            self.log_probs = None
+
+        def __call__(self, past_token_ids, logits):
+            assert self.log_probs is None, (
+                "Log probs already set. This should never happen."
+            )
+            self.log_probs = torch.log_softmax(logits, dim=-1, dtype=logits.dtype)
+            return logits
+
     class AsyncVirtualLM(AsyncLM):
-        """A wrapper around vLLM's `AsyncLLMEngine` for asynchronous next token log probability computations.
-
-        This class provides an asynchronous interface for computing log probabilities using vLLM's engine.
-        It is optimized for next token log probability computations and supports caching of results (outputs and KV).
-        """
-
-        default_params = SamplingParams(
-            max_tokens=1, n=1, logprobs=1, detokenize=False, stop=None, ignore_eos=True
-        )
+        default_params = {
+            "max_tokens": 1,
+            "n": 1,
+            "detokenize": False,
+            "stop": None,
+            "ignore_eos": True,
+        }
 
         def __init__(self, async_llm_engine, cache_size=0, cache_opts={}):
             """Initialize an `AsyncVirtualLM` instance.
@@ -68,8 +76,6 @@ else:
             self.async_llm_engine = async_llm_engine
             self.tokenizer = async_llm_engine.engine.get_tokenizer()
             self.request_counter = Counter()
-            self.custom_sampler = DeferredSampler()
-            self.original_sampler = self.underlying_model.sampler
             self.cache = (
                 OutputCache(maxsize=cache_size, **cache_opts)
                 if cache_size > 0
@@ -108,10 +114,7 @@ else:
             engine_opts = {
                 "enable_prefix_caching": True,
                 "disable_log_requests": True,
-                "disable_async_output_proc": True,
-                # Need to disable chunked prefill to avoid issues
-                # with our custom sampler.
-                "enable_chunked_prefill": False,
+                "disable_async_output_proc": True,  # This parameter forces vLLM to use v0, which is currently what we want to do.
                 **(engine_opts or {}),
             }
 
@@ -163,16 +166,21 @@ else:
             prompt = TokensPrompt(prompt_token_ids=token_ids)
 
             outputs = []
-            with self._temporarily_set_sampler(self.custom_sampler):
-                async for output in self.async_llm_engine.generate(
-                    prompt=prompt,
-                    sampling_params=self.default_params,
-                    request_id=req_id,
-                ):
-                    if output.finished:
-                        outputs.append(output)
+            processor = PassThroughLogitsProcessor()
+            async for output in self.async_llm_engine.generate(
+                prompt=prompt,
+                sampling_params=SamplingParams(
+                    **self.default_params, logits_processors=[processor]
+                ),
+                request_id=req_id,
+            ):
+                if output.finished:
+                    outputs.append(output)
 
-            return self._validate_outputs(outputs)
+            assert processor.log_probs is not None, (
+                "Log probs should be set by the logits processor."
+            )
+            return processor.log_probs
 
         def next_token_logprobs_sync(self, token_ids):
             """Request log probabilities of next token synchronously.
@@ -196,69 +204,31 @@ else:
                 (torch.Tensor): A tensor of normalized log probability tensors, one for each prompt in the input list.
             """
             req_ids = []
+            req_id2processors = {}
             for token_ids in token_ids_list:
                 req_id = str(next(self.request_counter))
                 req_ids.append(req_id)
+                processor = PassThroughLogitsProcessor()
+                req_id2processors[req_id] = processor
                 self.async_llm_engine.engine.add_request(
                     prompt=TokensPrompt(prompt_token_ids=token_ids),
-                    params=self.default_params,
+                    params=SamplingParams(
+                        **self.default_params, logits_processors=[processor]
+                    ),
                     request_id=req_id,
                 )
 
-            req_id2outputs = {}
-            with self._temporarily_set_sampler(self.custom_sampler):
-                while self.async_llm_engine.engine.has_unfinished_requests():
-                    output = self.async_llm_engine.engine.step()
-                    for out in output:
-                        if out.finished:
-                            assert out.request_id not in req_id2outputs, (
-                                f"Duplicate outputs for request {out.request_id}"
-                            )
-                            assert out.request_id in req_ids, (
-                                f"{out.request_id} not in requested IDs"
-                            )
-                            req_id2outputs[out.request_id] = out
+            while self.async_llm_engine.engine.has_unfinished_requests():
+                output = self.async_llm_engine.engine.step()
+                for out in output:
+                    if out.finished:
+                        assert out.request_id in req_id2processors, (
+                            f"{out.request_id} not in requested IDs"
+                        )
 
-            logprobs = [
-                self._validate_outputs([req_id2outputs[req_id]]) for req_id in req_ids
-            ]
-
-            return torch.stack(logprobs)
-
-        @contextmanager
-        def _temporarily_set_sampler(self, sampler):
-            """Context manager for temporarily setting a custom sampler."""
-            original_sampler = self.underlying_model.sampler
-            try:
-                self.underlying_model.sampler = sampler
-                yield
-            finally:
-                self.underlying_model.sampler = original_sampler
-
-        def _validate_outputs(self, outputs):
-            """Validate and extract logprobs from a vLLM output.
-
-            Args:
-                outputs: List of sequence group outputs from vLLM generation
-
-            Returns:
-                Tensor of log probabilities for the next token
-
-            Raises:
-                AssertionError: If output structure doesn't match expected format
-            """
-            assert len(outputs) == 1, "Expected exactly one sequence group"
-            seq_group = outputs[0]
-
-            assert len(seq_group.outputs) == 1, (
-                "Expected exactly one sequence in output"
+            return torch.stack(
+                [req_id2processors[req_id].log_probs for req_id in req_ids]
             )
-            sequence = seq_group.outputs[0]
-
-            assert len(sequence.logprobs) == 1, "Expected exactly one set of logprobs"
-            token_logprobs = sequence.logprobs[0].logprobs
-
-            return token_logprobs
 
         def clear_cache(self):
             """Clear output cache."""
@@ -296,141 +266,22 @@ else:
             Returns:
                 (list[int]): The sampled token IDs.
             """
-            with self._temporarily_set_sampler(self.original_sampler):
-                async for output in self.async_llm_engine.generate(
-                    prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
-                    sampling_params=SamplingParams(
-                        n=1,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        seed=seed,
-                        stop=[self.byte_vocab[i].decode() for i in eos_token_ids],
-                    ),
-                    request_id=str(next(self.request_counter)),
-                ):
-                    if output.finished:
-                        assert len(output.outputs) == 1, (
-                            "Expected exactly one sequence group"
-                        )
-                        token_ids = list(output.outputs[0].token_ids)
-                        if token_ids[-1] in eos_token_ids:
-                            token_ids = token_ids[:-1]
-                        return token_ids
-
-
-class DeferredSampler(torch.nn.Module):
-    """A custom vLLM sampler optimized for efficient next-token probability calculations.
-
-    This sampler replaces vLLM's default sampling mechanism to optimize for scenarios
-    where we only need the next token probabilities without actually sampling tokens.
-
-    Note:
-        While this sampler implements vLLM's expected interface, it intentionally
-        avoids actual token sampling to optimize for probability calculation use cases.
-        It should not be used in scenarios where actual token generation is needed.
-    """
-
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, logits, sampling_metadata):
-        """Process model logits to create vLLM-compatible sampling outputs.
-
-        This method implements the required vLLM sampler interface but optimizes for
-        probability requests.
-
-        Args:
-            logits (torch.Tensor): Raw model logits with shape (num_tokens, vocab_size).
-            sampling_metadata: vLLM metadata containing sequence grouping information.
-
-        Returns:
-            SamplerOutput: A vLLM-compatible output structure containing:
-                - Sequence group outputs with lazy probability dictionaries
-                - Placeholder values for unused sampling fields
-                - No actual sampled tokens (uses dummy token_id=0)
-
-        Note:
-            The sampler uses token_id=0 as a placeholder.
-        """
-        assert logits is not None
-
-        logprobs = logits.log_softmax(dim=-1, dtype=torch.float)
-
-        sample_idx = 0
-        sampler_output = []
-        for seq_group in sampling_metadata.seq_groups:
-            seq_ids = seq_group.seq_ids
-            num_parent_seqs = len(seq_ids)
-            logprobs_by_seq = logprobs[sample_idx : sample_idx + num_parent_seqs]
-
-            if not seq_group.do_sample:
-                sampler_output.append(
-                    CompletionSequenceGroupOutput(samples=[], prompt_logprobs=[])
-                )
-            else:
-                assert len(logprobs_by_seq) == len(seq_ids)
-                seq_outputs = []
-                for seq_id, seq_logprobs in zip(seq_ids, logprobs_by_seq):
-                    seq_outputs.append(
-                        SequenceOutput(seq_id, 0, LazyLogprobDict(seq_logprobs))
+            async for output in self.async_llm_engine.generate(
+                prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
+                sampling_params=SamplingParams(
+                    n=1,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    seed=seed,
+                    stop=[self.byte_vocab[i].decode() for i in eos_token_ids],
+                ),
+                request_id=str(next(self.request_counter)),
+            ):
+                if output.finished:
+                    assert len(output.outputs) == 1, (
+                        "Expected exactly one sequence group"
                     )
-
-                sampler_output.append(
-                    CompletionSequenceGroupOutput(
-                        samples=seq_outputs, prompt_logprobs=[]
-                    )
-                )
-
-            sample_idx += 1
-
-        sampler_outputs = SamplerOutput(
-            outputs=sampler_output,
-            sampled_token_probs=None,
-            sampled_token_ids=None,
-            logprobs=None,
-            deferred_sample_results_args=None,
-        )
-
-        return sampler_outputs
-
-
-class LazyLogprobDict:
-    """An efficient dictionary-like interface required by vLLM's output processing.
-
-    vLLM's output processor expects token probabilities to be provided as a dictionary
-    mapping token IDs to Logprob objects. However, creating this full dictionary is
-    computationally expensive, especially when dealing with large vocabulary sizes
-    (often 50k+ tokens).
-
-    This class provides a compatible interface that satisfies vLLM's requirements while
-    avoiding the overhead.
-    """
-
-    def __init__(self, logprobs):
-        self.logprobs = logprobs
-
-    def __getitem__(self, key):
-        if 0 <= key < len(self.logprobs):
-            return Logprob(self.logprobs[key])
-        raise KeyError(key)
-
-    def __contains__(self, key):
-        return 0 <= key < len(self.logprobs)
-
-    def __len__(self):
-        return len(self.logprobs)
-
-    def items(self):
-        return ((i, Logprob(prob)) for i, prob in enumerate(self.logprobs))
-
-    def keys(self):
-        return range(len(self.logprobs))
-
-    def values(self):
-        return iter(map(Logprob, self.logprobs))
-
-    def get(self, key, default=None):
-        try:
-            return self[key]
-        except KeyError:
-            return default
+                    token_ids = list(output.outputs[0].token_ids)
+                    if token_ids[-1] in eos_token_ids:
+                        token_ids = token_ids[:-1]
+                    return token_ids
