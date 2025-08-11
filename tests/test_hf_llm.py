@@ -257,9 +257,11 @@ def test_load_model_by_name_no_backend():
 
 
 def test_sample_seeded(async_llm):
-    generated_token_ids = asyncio.run(
+    prompt_token_ids = async_llm.tokenizer.encode("An apple a day keeps the")
+    
+    first_token_ids = asyncio.run(
         async_llm.sample(
-            prompt_token_ids=async_llm.tokenizer.encode("An apple a day keeps the"),
+            prompt_token_ids=prompt_token_ids,
             max_tokens=10,
             eos_token_ids=[11],
             temperature=0.5,
@@ -267,7 +269,17 @@ def test_sample_seeded(async_llm):
         )
     )
 
-    assert async_llm.tokenizer.decode(generated_token_ids) == " sun at bay"
+    second_token_ids = asyncio.run(
+        async_llm.sample(
+            prompt_token_ids=prompt_token_ids,
+            max_tokens=10,
+            eos_token_ids=[11],
+            temperature=0.5,
+            seed=80808,
+        )
+    )
+
+    assert first_token_ids == second_token_ids
 
 
 def test_batch_sample(async_llm):
