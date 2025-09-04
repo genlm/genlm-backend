@@ -23,10 +23,14 @@ jobs:
           python-version: 3.11.5
           cache: 'pip'
 
+      - name: Install UV
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+
       - name: Run Tests
         run: |
-          python -m venv venv
+          uv venv venv
           source venv/bin/activate
-          pip install -e .[test]
-          pip install -r requirements-dev.txt
-          python -m pytest tests
+          uv pip install -e .[test]
+          uv pip install -r requirements-dev.txt
+          python -m pytest tests -v
