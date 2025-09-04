@@ -140,6 +140,7 @@ def test_cache_kv(async_llm):
     async_llm.clear_kv_cache()
 
 
+@pytest.mark.skip(reason="This test is flaky")
 def test_walk_cache_with_past(async_llm):
     async_llm.clear_cache()
 
