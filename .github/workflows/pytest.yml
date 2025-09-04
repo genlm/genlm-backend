@@ -33,4 +33,4 @@ jobs:
           source venv/bin/activate
           uv pip install -e .[test]
           uv pip install -r requirements-dev.txt
-          python -m pytest tests
+          python -m pytest tests -v
