@@ -3,7 +3,7 @@ name = "genlm-backend"
 dynamic = ["version"]
 description = ""
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [
     { name = "Ben LeBrun" },
 ]
@@ -16,7 +16,15 @@ dependencies = [
     "bitsandbytes; sys_platform == 'linux'",
     "numba",
     "vllm>=0.6.6,<=0.10.0; sys_platform == 'linux'",
-    "triton>=3.2.0; sys_platform == 'linux'"
+    "triton>=3.2.0; sys_platform == 'linux'",
+    "coverage>=7.10.6",
+    "pytest>=8.4.2",
+    "pytest-cov>=6.2.1",
+    "pytest-asyncio>=1.1.0",
+    "pytest-benchmark>=5.1.0",
+    "hypothesis>=6.138.14",
+    "ipython>=8.37.0",
+    "arsenal",
 ]
 
 [project.optional-dependencies]
@@ -38,3 +46,6 @@ requires = ["setuptools>=64.0", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools_scm]
+
+[tool.uv.sources]
+arsenal = { git = "https://github.com/timvieira/arsenal" }
