@@ -32,4 +32,4 @@ jobs:
           uv venv venv
           source venv/bin/activate
           uv sync
-          python -m pytest tests -v
+          uv run python -m pytest tests -v
