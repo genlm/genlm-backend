@@ -117,11 +117,11 @@ else:
                 "disable_async_output_proc": True,  # This parameter forces vLLM to use v0, which is currently what we want to do.
                 **(engine_opts or {}),
             }
-
+            print(engine_opts)
             engine = AsyncLLMEngine.from_engine_args(
                 AsyncEngineArgs(model=model_name, tokenizer=model_name, **engine_opts)
             )
-
+            print(engine)
             return cls(engine, **kwargs)
 
         @property

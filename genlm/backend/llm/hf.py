@@ -102,11 +102,17 @@ class AsyncTransformer(AsyncLM):
         }
         if hf_opts:
             _hf_opts.update(hf_opts)
-
-        tok = AutoTokenizer.from_pretrained(model_id)
-        mod = AutoModelForCausalLM.from_pretrained(
-            model_id, quantization_config=bnb_config, **_hf_opts
-        )
+        print(_hf_opts)
+        print(bnb_config)
+        tok = AutoTokenizer.from_pretrained(model_id, **_hf_opts)
+        model_kwargs = _hf_opts
+        if bnb_config: #can't dequantize with bnb yet? needs precision plugin
+            model_kwargs["quantization_config"] = bnb_config
+        # rn we only dequantize even on an H100, because we use triton 3.3.1 (because of torch 2.7.1), need 3.4.0, didn't try upgrading
+        mod = AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
+        # mod = AutoModelForCausalLM.from_pretrained(
+        #     model_id, quantization_config=bnb_config, **_hf_opts
+        # )
 
         return cls(mod, tok, **kwargs)
 
