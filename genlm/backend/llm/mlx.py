@@ -12,7 +12,6 @@ from typing import (
 
 import mlx.core as mx
 import mlx.nn as nn
-import functools
 
 from mlx_lm.models import cache
 
@@ -163,12 +162,12 @@ else:
                 model,
                 max_kv_size=max_kv_size,
             )
-        quantize_cache_fn = functools.partial(
+        """ quantize_cache_fn = functools.partial(
             maybe_quantize_kv_cache,
             quantized_kv_start=quantized_kv_start,
             kv_group_size=kv_group_size,
             kv_bits=kv_bits,
-        )
+        ) """
 
         def _model_call(input_tokens: mx.array):
             return model(input_tokens, cache=prompt_cache)
@@ -179,7 +178,7 @@ else:
                     input_tokens=input_tokens[None],
                 )
                 logits = logits[:, -1, :]
-                quantize_cache_fn(prompt_cache)
+                # quantize_cache_fn(prompt_cache)
                 logprobs = logits - mx.logsumexp(logits, keepdims=True)
                 return logprobs.squeeze(0)
 
@@ -191,7 +190,7 @@ else:
                 _model_call(
                     input_tokens=prompt[:n_to_process][None],
                 )
-                quantize_cache_fn(prompt_cache)
+                # quantize_cache_fn(prompt_cache)
                 mx.eval([c.state for c in prompt_cache])
                 prompt_processed_tokens += n_to_process
                 prompt = prompt[n_to_process:]

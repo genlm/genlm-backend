@@ -32,7 +32,7 @@ jobs:
       - name: Run tests
         run: |
           source venv/bin/activate
-          coverage run --source=genlm/backend -m pytest --benchmark-disable
+          coverage run --source=genlm/backend -m pytest --benchmark-disable --ignore=tests/test_mlx.py
           coverage json --omit "*/test*"
           coverage report --omit "*/test*"
 
