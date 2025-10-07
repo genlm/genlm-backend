@@ -1,10 +1,8 @@
 import pytest
 import asyncio
 import torch
-from conftest import cuda_only
 from arsenal.maths import compare
-from genlm.backend.llm import load_model_by_name, AsyncMlxLM
-from unittest.mock import patch
+from genlm.backend.llm import load_model_by_name
 
 
 # returns the default gpt2 model name
@@ -33,34 +31,25 @@ def token_ids_list(async_llm):
 
 # async and sync batching should yield the same distributions
 def test_async_batching(async_llm, token_ids_list):
-
-
-    haves = (
-        asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list))
-    )
+    haves = asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list))
     wants = [
-        async_llm.next_token_logprobs_sync(token_ids)
-        for token_ids in token_ids_list
+        async_llm.next_token_logprobs_sync(token_ids) for token_ids in token_ids_list
     ]
 
     for i, (have, want) in enumerate(zip(haves, wants)):
         max_rel_err = compare(have, want).max_rel_err
         assert max_rel_err == 0, [max_rel_err, token_ids_list[i]]
-
-
 
 
 def test_batch_next_token_logprobs_sync(async_llm, token_ids_list):
     haves = async_llm.batch_next_token_logprobs_sync(token_ids_list)
     wants = [
-        async_llm.next_token_logprobs_sync(token_ids)
-        for token_ids in token_ids_list
+        async_llm.next_token_logprobs_sync(token_ids) for token_ids in token_ids_list
     ]
 
     for i, (have, want) in enumerate(zip(haves, wants)):
         max_rel_err = compare(have, want).max_rel_err
         assert max_rel_err == 0, [max_rel_err, token_ids_list[i]]
-
 
 
 # Test that empty input raises ValueError
@@ -70,8 +59,6 @@ def test_empty_input(async_llm):
 
     with pytest.raises(ValueError):
         async_llm.next_token_logprobs_sync([])
-
-
 
 
 def test_next_token_logprobs_sync(async_llm):
@@ -84,10 +71,9 @@ def test_next_token_logprobs_sync(async_llm):
     assert torch.allclose(have, want)
 
 
-
 def test_sample_seeded(async_llm):
     prompt_token_ids = async_llm.tokenizer.encode("An apple a day keeps the")
-    
+
     first_token_ids = asyncio.run(
         async_llm.sample(
             prompt_token_ids=prompt_token_ids,
