@@ -43,3 +43,54 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.json
           slug: genlm/genlm-backend
+          partial: true
+
+  test_mlx_coverage:
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: 3.11.5
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+          pip install -e .[mlx]
+          pip install -r requirements-dev.txt
+
+      - name: Run MLX tests
+        run: |
+          source venv/bin/activate
+          coverage run --source=genlm/backend -m pytest tests/test_mlx.py --benchmark-disable
+          coverage json --omit "*/test*"
+          coverage report --omit "*/test*"
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.json
+          slug: genlm/genlm-backend
+          partial: true
+
+
+  finalize_coverage:
+    needs: [test_coverage, test_mlx_coverage]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Finalize coverage reports
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: genlm/genlm-backend
+          fail_ci_if_error: false
+          partial: false
+          final: true

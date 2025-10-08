@@ -19,7 +19,15 @@ def async_llm(model_name):
 
 @pytest.fixture(scope="module")
 def reference_llm(model_name):
-    return load_model_by_name(model_name, backend="hf")
+    return load_model_by_name(
+        model_name,
+        backend="hf",
+        llm_opts={
+            "hf_opts": {
+                "device_map": None,
+            }
+        },
+    )
 
 
 # return a list of token ids for the test prompts
