@@ -259,7 +259,7 @@ def test_load_model_by_name_no_backend():
 
 def test_sample_seeded(async_llm):
     prompt_token_ids = async_llm.tokenizer.encode("An apple a day keeps the")
-    
+
     first_token_ids = asyncio.run(
         async_llm.sample(
             prompt_token_ids=prompt_token_ids,

@@ -17,6 +17,11 @@ def async_llm(model_name):
     return load_model_by_name(model_name, backend="mlx")
 
 
+@pytest.fixture(scope="module")
+def reference_llm(model_name):
+    return load_model_by_name(model_name, backend="hf")
+
+
 # return a list of token ids for the test prompts
 @pytest.fixture(scope="module")
 def token_ids_list(async_llm):
@@ -27,6 +32,13 @@ def token_ids_list(async_llm):
         "with the language model code",  # Check duplicate query logic
     ]
     return [async_llm.tokenizer.encode(p) for p in test_prompts]
+
+
+def test_next_token_logprobs(async_llm, reference_llm, token_ids_list):
+    for token_ids in token_ids_list:
+        have = asyncio.run(async_llm.next_token_logprobs(token_ids)).cpu().numpy()
+        want = asyncio.run(reference_llm.next_token_logprobs(token_ids)).cpu().numpy()
+        assert compare(have, want).max_rel_err < 1e-3, token_ids
 
 
 # async and sync batching should yield the same distributions
