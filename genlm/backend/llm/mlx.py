@@ -1,5 +1,6 @@
 from genlm.backend.llm.base import AsyncLM
 from genlm.backend.cache import OutputMLXCache
+import torch
 
 
 from typing import (
@@ -147,7 +148,7 @@ else:
                 token_ids_list (list[int]): A list of token IDs, representing a prompt to the language model.
 
             Returns:
-                result (mlx.core.array): Normalized log probability tensor.
+                result (torch.Tensor): Normalized log probability tensor.
 
             Warning:
                 Do not use `asyncio.run(next_token_logprobs())` as it may interfere with MLX's background loop.
@@ -162,7 +163,7 @@ else:
                 token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
 
             Returns:
-                (mlx.core.array): Normalized log probability tensor.
+                (torch.Tensor): Normalized log probability tensor.
             """
             key = tuple(token_ids)
 
@@ -174,7 +175,7 @@ else:
 
             if self.cache is not None:
                 self.cache[key] = logprobs
-            return logprobs
+            return torch.tensor(logprobs)
 
         async def batch_next_token_logprobs(self, token_ids_list):
             """
@@ -182,7 +183,7 @@ else:
             Args:
                 token_ids_list (list[list[int]]): A list of token ID lists, each representing a prompt to the language model.
             Returns:
-                (mlx.core.array): A tensor of normalized log probability tensors, one for each prompt in the input list.
+                (torch.Tensor): A tensor of normalized log probability tensors, one for each prompt in the input list.
             """
             return self.batch_next_token_logprobs_sync(token_ids_list)
 
@@ -192,12 +193,12 @@ else:
             Args:
                 token_ids_list (list[list[int]]): A list of token ID lists, each representing a prompt to the language model.
             Returns:
-                (mlx.core.array): A tensor of normalized log probability tensors, one for each prompt in the input list.
+                (torch.Tensor): A tensor of normalized log probability tensors, one for each prompt in the input list.
             """
             outputs = []
             for token_ids in token_ids_list:
                 outputs.append(self.next_token_logprobs_sync(token_ids))
-            return mx.stack(outputs)
+            return torch.stack(outputs)
 
         async def sample(
             self,
