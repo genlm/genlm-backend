@@ -9,15 +9,12 @@ from typing import (
     Optional,
 )
 
-import mlx.core as mx
-
-from mlx_lm.models import cache
-
 
 try:
     import mlx_lm
     from mlx_lm.generate import generate_step
     import mlx.core as mx
+    from mlx_lm.models import cache
     from mlx_lm.sample_utils import make_sampler
 
     HAS_MLX = True
@@ -83,10 +80,6 @@ else:
 
             model, tokenizer = mlx_lm.load(model_name)
             return cls(model, tokenizer, **kwargs)
-
-        @property
-        def underlying_model(self):
-            return self.mlx_lm_model
 
         def clear_cache(self):
             """Clear output cache."""
