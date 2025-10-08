@@ -1,7 +1,5 @@
-import torch
-
 from genlm.backend.llm.base import AsyncLM
-from genlm.backend.cache import OutputCache
+from genlm.backend.cache import OutputMLXCache
 
 
 from typing import (
@@ -49,14 +47,14 @@ else:
             Args:
                 mlx_lm_model (Model): The async MLX LM model instance.
                 cache_size (int, optional): Maximum size of the output cache. If 0, caching is disabled. Defaults to 0.
-                cache_opts (dict, optional): Additional options to pass to the [`OutputCache`][genlm.backend.cache.OutputCache] constructor. Defaults to {}.
+                cache_opts (dict, optional): Additional options to pass to the [`OutputMLXCache`][genlm.backend.cache.OutputMLXCache] constructor. Defaults to {}.
 
             """
 
             self.mlx_lm_model = mlx_lm_model
             self.tokenizer = tokenizer
             self.cache = (
-                OutputCache(maxsize=cache_size, **cache_opts)
+                OutputMLXCache(maxsize=cache_size, **cache_opts)
                 if cache_size > 0
                 else None
             )
@@ -149,7 +147,7 @@ else:
                 token_ids_list (list[int]): A list of token IDs, representing a prompt to the language model.
 
             Returns:
-                result (torch.Tensor): Normalized log probability tensor.
+                result (mlx.core.array): Normalized log probability tensor.
 
             Warning:
                 Do not use `asyncio.run(next_token_logprobs())` as it may interfere with MLX's background loop.
@@ -164,7 +162,7 @@ else:
                 token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
 
             Returns:
-                (torch.Tensor): Normalized log probability tensor.
+                (mlx.core.array): Normalized log probability tensor.
             """
             key = tuple(token_ids)
 
@@ -173,11 +171,20 @@ else:
 
             token_ids_array = mx.array(token_ids)
             logprobs = self._generate_step_custom(token_ids_array)
-            logprobs = torch.tensor(logprobs)
 
             if self.cache is not None:
                 self.cache[key] = logprobs
             return logprobs
+
+        async def batch_next_token_logprobs(self, token_ids_list):
+            """
+            Request log probabilities of next tokens in a batch asynchronously.
+            Args:
+                token_ids_list (list[list[int]]): A list of token ID lists, each representing a prompt to the language model.
+            Returns:
+                (mlx.core.array): A tensor of normalized log probability tensors, one for each prompt in the input list.
+            """
+            return self.batch_next_token_logprobs_sync(token_ids_list)
 
         def batch_next_token_logprobs_sync(self, token_ids_list):
             """
@@ -185,12 +192,12 @@ else:
             Args:
                 token_ids_list (list[list[int]]): A list of token ID lists, each representing a prompt to the language model.
             Returns:
-                (torch.Tensor): A tensor of normalized log probability tensors, one for each prompt in the input list.
+                (mlx.core.array): A tensor of normalized log probability tensors, one for each prompt in the input list.
             """
             outputs = []
             for token_ids in token_ids_list:
                 outputs.append(self.next_token_logprobs_sync(token_ids))
-            return torch.stack(outputs)
+            return mx.stack(outputs)
 
         async def sample(
             self,
