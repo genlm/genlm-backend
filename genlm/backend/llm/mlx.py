@@ -7,7 +7,6 @@ from typing import (
     Optional,
 )
 
-
 try:
     import mlx_lm
     from mlx_lm.generate import generate_step

@@ -14,7 +14,7 @@ def model_name():
 # returns the instantiated async lm with the default gpt model from the hf backend
 @pytest.fixture(scope="module")
 def async_llm(model_name):
-    return load_model_by_name(model_name, backend="mlx")
+    return load_model_by_name(model_name, backend="mlx", llm_opts={"cache_size": 5})
 
 
 @pytest.fixture(scope="module")
@@ -138,3 +138,13 @@ def test_batch_sample(async_llm):
     )
     assert len(generated_token_ids) == len(prompts)
     assert all(len(ids) == max_tokens for ids in generated_token_ids)
+
+
+def test_caching(async_llm):
+    async_llm.clear_cache()
+
+    test_prompt = async_llm.tokenizer.encode("Test sync")
+    have = async_llm.next_token_logprobs_sync(test_prompt)
+    want = asyncio.run(async_llm.next_token_logprobs(test_prompt))
+
+    assert torch.allclose(have, want)

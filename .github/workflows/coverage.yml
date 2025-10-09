@@ -43,7 +43,6 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.json
           slug: genlm/genlm-backend
-          partial: true
 
   test_mlx_coverage:
     runs-on: macos-14
@@ -79,7 +78,6 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.json
           slug: genlm/genlm-backend
-          partial: true
 
 
   finalize_coverage:
@@ -92,5 +90,4 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: genlm/genlm-backend
           fail_ci_if_error: false
-          partial: false
           final: true
