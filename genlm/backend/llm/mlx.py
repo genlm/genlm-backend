@@ -1,6 +1,6 @@
 from genlm.backend.llm.base import AsyncLM
 from genlm.backend.cache import OutputMLXCache
-
+import torch
 
 from typing import (
     Any,
@@ -171,7 +171,7 @@ else:
 
             token_ids_array = mx.array(token_ids)
             logprobs = self._generate_step_custom(token_ids_array)
-
+            logprobs = torch.tensor(logprobs)
             if self.cache is not None:
                 self.cache[key] = logprobs
             return logprobs
@@ -197,7 +197,7 @@ else:
             outputs = []
             for token_ids in token_ids_list:
                 outputs.append(self.next_token_logprobs_sync(token_ids))
-            return mx.stack(outputs)
+            return torch.stack(outputs)
 
         async def sample(
             self,
