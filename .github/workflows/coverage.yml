@@ -1,4 +1,4 @@
-name: GPU tests + code coverage
+name: GPU tests + Code Coverage
 
 on:
   workflow_dispatch:
@@ -6,7 +6,6 @@ on:
   push:
     branches:
       - main
-
 
 jobs:
   test_coverage:
@@ -29,20 +28,26 @@ jobs:
           pip install -e .[test]
           pip install -r requirements-dev.txt
 
-      - name: Run tests
+      - name: Run tests (GPU)
         run: |
           source venv/bin/activate
-          coverage run --source=genlm/backend -m pytest --benchmark-disable --ignore=tests/test_mlx.py
-          coverage json --omit "*/test*"
+          coverage run --source=genlm -m pytest --benchmark-disable --ignore=tests/test_mlx.py
           coverage report --omit "*/test*"
 
-      - name: Upload coverage to Codecov
+      - name: Upload coverage data
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-gpu
+          path: .coverage
+
+      - name: Upload to Codecov (GPU partial)
         uses: codecov/codecov-action@v5
         with:
-          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage.json
+          flags: gpu-tests
           slug: genlm/genlm-backend
+          fail_ci_if_error: false
+
 
   test_mlx_coverage:
     runs-on: macos-14
@@ -67,27 +72,49 @@ jobs:
       - name: Run MLX tests
         run: |
           source venv/bin/activate
-          coverage run --source=genlm/backend -m pytest tests/test_mlx.py --benchmark-disable
-          coverage json --omit "*/test*"
+          coverage run --source=genlm -m pytest tests/test_mlx.py --benchmark-disable
           coverage report --omit "*/test*"
 
-      - name: Upload coverage to Codecov
+      - name: Upload coverage data
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-mlx
+          path: .coverage
+
+      - name: Upload to Codecov (MLX partial)
         uses: codecov/codecov-action@v5
         with:
-          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage.json
+          flags: mlx-tests
           slug: genlm/genlm-backend
+          fail_ci_if_error: false
 
 
   finalize_coverage:
     needs: [test_coverage, test_mlx_coverage]
     runs-on: ubuntu-latest
+
     steps:
-      - name: Finalize coverage reports
+      - uses: actions/checkout@v4
+
+      - name: Download coverage artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: coverage_data
+
+      - name: Combine coverage reports
+        run: |
+          pip install coverage
+          coverage combine coverage_data
+          coverage json --omit "*/test*"
+          coverage report --omit "*/test*"
+
+      - name: Upload combined coverage
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.json
+          flags: combined
           slug: genlm/genlm-backend
           fail_ci_if_error: false
           final: true
