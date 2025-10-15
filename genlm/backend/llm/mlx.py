@@ -26,15 +26,15 @@ if not HAS_MLX:
 
         def __init__(self, *args, **kwargs):  # pragma: no cover
             raise ImportError(
-                "MLX is not installed. Please install it with 'pip install mlx-lm' "
-                "to use the MLX-based AsyncLM model."
+                "To use the MLX-based AsyncLM model, "
+                "install the package with 'pip install genlm-backend[mlx]'"
             )
 
         @classmethod
         def from_name(cls, *args, **kwargs):  # pragma: no cover
             raise ImportError(
-                "MLX is not installed. Please install it with 'pip install mlx-lm' "
-                "to use the MLX-based AsyncLM model."
+                "To use the MLX-based AsyncLM model, "
+                "install the package with 'pip install genlm-backend[mlx]'"
             )
 
 else:
