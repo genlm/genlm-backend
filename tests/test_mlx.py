@@ -148,3 +148,10 @@ def test_caching(async_llm):
     want = asyncio.run(async_llm.next_token_logprobs(test_prompt))
 
     assert torch.allclose(have, want)
+
+
+def test_mlx_cache(async_llm, token_ids_list):
+    async_llm.clear_cache()
+    for token_ids in token_ids_list:
+        async_llm.next_token_logprobs_sync(token_ids)
+    assert len(async_llm.cache) == 3
