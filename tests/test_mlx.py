@@ -14,7 +14,7 @@ def model_name():
 # returns the instantiated async lm with the default gpt model from the hf backend
 @pytest.fixture(scope="module")
 def async_llm(model_name):
-    return load_model_by_name(model_name, backend="mlx", llm_opts={"cache_size": 5})
+    return load_model_by_name(model_name, backend="mlx", llm_opts={"cache_size": 3})
 
 
 @pytest.fixture(scope="module")
