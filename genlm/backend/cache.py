@@ -43,6 +43,33 @@ class OutputCache:
         self.cache.clear()
 
 
+class OutputMLXCache(OutputCache):
+    """A cache for storing tensor outputs with MLX.
+
+    Since MLX uses unified memory, we don't need to move tensors between CPU and GPU.
+
+    Args:
+        maxsize (int): Maximum number of items to store in the cache
+    """
+
+    def __init__(self, maxsize):
+        super().__init__(maxsize, move_to_cpu=False)
+
+    def __getitem__(self, key):
+        if key in self.cache:
+            value = self.cache.pop(key)
+            self.cache[key] = value
+            return value
+        raise KeyError(key)
+
+    def __setitem__(self, key, value):
+        if len(self.cache) >= self.maxsize:
+            _, old_tensor = self.cache.popitem(last=False)
+            del old_tensor
+
+        self.cache[key] = value
+
+
 class TokenTrie:
     """Class used internally to cache language model results.
 

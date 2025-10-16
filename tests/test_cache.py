@@ -1,7 +1,7 @@
 import pytest
 import torch
 from conftest import cuda_only
-from genlm.backend.cache import OutputCache
+from genlm.backend.cache import OutputCache, OutputMLXCache
 
 
 @pytest.mark.parametrize("device", ["cuda", "cpu"])
@@ -32,6 +32,32 @@ def test_invalid_key():
 
     with pytest.raises(KeyError):
         cache["invalid"]
+
+
+def test_mlx_invalid_key():
+    cache = OutputMLXCache(maxsize=2)
+
+    with pytest.raises(KeyError):
+        cache["invalid"]
+
+
+def test_mlx_cache_size_limit():
+    cache = OutputMLXCache(maxsize=2)
+
+    # Add first tensor
+    cache["tensor1"] = torch.rand(1000, 1000)
+    assert len(cache) == 1
+
+    # Add second tensor
+    cache["tensor2"] = torch.rand(1000, 1000)
+    assert len(cache) == 2
+
+    # Add third tensor (should evict first)
+    cache["tensor3"] = torch.rand(1000, 1000)
+    assert len(cache) == 2
+    assert "tensor1" not in cache
+    assert "tensor2" in cache
+    assert "tensor3" in cache
 
 
 @cuda_only
