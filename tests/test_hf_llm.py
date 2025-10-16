@@ -230,7 +230,7 @@ def test_from_name_with_options(model_name):
     bitsandbytes_opts = {"load_in_4bit": True}
     hf_opts = {
         "device_map": "auto",
-        "torch_dtype": torch.float16,
+        "dtype": torch.float16,
     }
 
     model = AsyncTransformer.from_name(
@@ -259,7 +259,7 @@ def test_load_model_by_name_no_backend():
 
 def test_sample_seeded(async_llm):
     prompt_token_ids = async_llm.tokenizer.encode("An apple a day keeps the")
-    
+
     first_token_ids = asyncio.run(
         async_llm.sample(
             prompt_token_ids=prompt_token_ids,
