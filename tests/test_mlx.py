@@ -140,6 +140,19 @@ def test_batch_sample(async_llm):
     assert all(len(ids) == max_tokens for ids in generated_token_ids)
 
 
+def test_sample_eos_token_ids(async_llm):
+    prompt_token_ids = async_llm.tokenizer.encode("I am the ")
+    eos_token_ids = list(range(len(async_llm.tokenizer.vocab.keys())))
+    generated_token_ids = asyncio.run(
+        async_llm.sample(
+            prompt_token_ids=prompt_token_ids,
+            max_tokens=10,
+            eos_token_ids=eos_token_ids,
+        )
+    )
+    assert len(generated_token_ids) == 0
+
+
 def test_caching(async_llm):
     async_llm.clear_cache()
 
