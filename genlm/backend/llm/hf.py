@@ -98,7 +98,7 @@ class AsyncTransformer(AsyncLM):
 
         _hf_opts = {
             "device_map": "auto",
-            "torch_dtype": "auto",
+            "dtype": "auto",
         }
         if hf_opts:
             _hf_opts.update(hf_opts)
