@@ -78,16 +78,3 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.json
           slug: genlm/genlm-backend
-
-
-  finalize_coverage:
-    needs: [test_coverage, test_mlx_coverage]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Finalize coverage reports
-        uses: codecov/codecov-action@v5
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          slug: genlm/genlm-backend
-          fail_ci_if_error: false
-          final: true
