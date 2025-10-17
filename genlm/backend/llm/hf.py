@@ -104,14 +104,53 @@ class AsyncTransformer(AsyncLM):
             _hf_opts.update(hf_opts)
 
         tok = AutoTokenizer.from_pretrained(model_id)
-        model_kwargs = _hf_opts
-        if bnb_config:
-            model_kwargs["quantization_config"] = bnb_config # pass the bnb configuration as an hf parameter
         mod = AutoModelForCausalLM.from_pretrained(
-            model_id, **model_kwargs
+            model_id, quantization_config=bnb_config, **_hf_opts
         )
 
         return cls(mod, tok, **kwargs)
+
+    # @classmethod
+    # def from_name(cls, model_id, bitsandbytes_opts=None, hf_opts=None, **kwargs):
+    #     """Create an AsyncTransformer instance from a pretrained HuggingFace model.
+
+    #     Args:
+    #         model_id (str): Model identifier in HuggingFace's model hub.
+    #         bitsandbytes_opts (dict, optional): Additional configuration options for bitsandbytes quantization.
+    #             Defaults to None.
+    #         hf_opts (dict, optional): Additional configuration options for loading the HuggingFace model.
+    #             Defaults to None.
+    #         **kwargs: Additional arguments passed to the `AsyncTransformer` constructor
+
+    #     Returns:
+    #         (AsyncTransformer): An initialized `AsyncTransformer` instance.
+    #     """
+    #     if bitsandbytes_opts:
+    #         bnb_config = BitsAndBytesConfig(**bitsandbytes_opts)
+    #     else:
+    #         bnb_config = None
+
+    #     _hf_opts = {
+    #         "device_map": "auto",
+    #         "torch_dtype": "auto",
+    #     }
+    #     if hf_opts:
+    #         _hf_opts.update(hf_opts)
+
+    #     tok = AutoTokenizer.from_pretrained(model_id)
+    #     # model_kwargs = _hf_opts
+    #     # if bnb_config:
+    #     #     model_kwargs["quantization_config"] = bnb_config # pass the bnb configuration as an hf parameter
+    #     # mod = AutoModelForCausalLM.from_pretrained(
+    #     #     model_id, **model_kwargs
+    #     # )
+    #     mod = AutoModelForCausalLM.from_pretrained(
+    #         model_id, quantization_config=bnb_config, **_hf_opts
+    #     )
+
+
+
+    #     return cls(mod, tok, **kwargs)
 
     @torch.no_grad()
     def __init__(self, hf_model, hf_tokenizer, batch_size=20, timeout=0.02):

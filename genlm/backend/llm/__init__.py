@@ -1,4 +1,4 @@
-from genlm.backend.llm.vllm import AsyncVirtualLM
+from genlm.backend.llm.vllmV1 import AsyncVirtualLM
 from genlm.backend.llm.hf import AsyncTransformer
 from genlm.backend.llm.base import AsyncLM, MockAsyncLM
 
