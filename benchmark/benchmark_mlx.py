@@ -22,19 +22,29 @@ text = get_wikitext()
 def load_model(model, batch_size=None):
     model_name = "gpt2"
     if model == "mlx":
-        return AsyncMlxLM.from_name(model_name)
+        return AsyncMlxLM.from_name(model_name, batch_size=batch_size)
     else:
         return AsyncTransformer.from_name(model_name, batch_size=batch_size)
 
 
-@pytest.mark.parametrize("model", ["mlx", "transformer"])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "mlx",
+    ],
+)
 def test_await_next_token_logprobs(benchmark, model):
     llm = load_model(model, batch_size=1)
     sequences = token_prefixes(text, tokenizer=llm.tokenizer)
     run_await_next_token_logprobs(benchmark=benchmark, llm=llm, sequences=sequences)
 
 
-@pytest.mark.parametrize("model", ["mlx", "transformer"])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "mlx",
+    ],
+)
 def test_await_batch_next_token_logprobs(benchmark, model, batch_size=5):
     llm = load_model(model, batch_size=batch_size)
     batches = token_prefix_batches(text, tokenizer=llm.tokenizer, batch_size=batch_size)

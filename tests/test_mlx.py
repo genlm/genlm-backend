@@ -5,10 +5,15 @@ from arsenal.maths import compare
 from genlm.backend.llm import load_model_by_name
 
 
-# returns the default gpt2 model name
-@pytest.fixture(scope="module")
-def model_name():
-    return "openai-community/gpt2"
+@pytest.fixture(
+    scope="module",
+    params=[
+        "tiiuae/falcon-mamba-7b-instruct",
+        "openai-community/gpt2",
+    ],
+)
+def model_name(request):
+    return request.param
 
 
 # returns the instantiated async lm with the default gpt model from the hf backend
@@ -158,6 +163,7 @@ def test_caching(async_llm):
 
     test_prompt = async_llm.tokenizer.encode("Test sync")
     have = async_llm.next_token_logprobs_sync(test_prompt)
+    async_llm.clear_cache()
     want = asyncio.run(async_llm.next_token_logprobs(test_prompt))
 
     assert torch.allclose(have, want)
