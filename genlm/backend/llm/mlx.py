@@ -52,15 +52,28 @@ else:
         """Converts MLX array into torch tensors."""
         if isinstance(logprobs, mx.array):
             if logprobs.dtype in [mx.bfloat16]:
-                print("triggered")
                 logprobs = logprobs.astype(mx.float32)
             return torch.tensor(logprobs)
         elif isinstance(logprobs, (list, tuple)):
             return [_to_torch(lp) for lp in logprobs]
         return logprobs
 
+    def _has_bf16(mlx_lm_model):
+        def check(x):
+            if isinstance(x, dict):
+                return any(check(v) for v in x.values())
+            return getattr(x, "dtype", None) == mx.bfloat16
+
+        return any(
+            check(param)
+            for layer in mlx_lm_model.layers
+            for param in layer.parameters().values()
+        )
+
     def _supports_batching(mlx_lm_model):
         """Return True if the MLX-LM supports batched inference for this model."""
+        if _has_bf16(mlx_lm_model):
+            return False
         if not hasattr(mlx_lm_model, "make_cache"):
             return True
 
@@ -74,8 +87,6 @@ else:
 
     class BatchGeneratorCustom(BatchGenerator):
         def _next(self):
-            # tic = time.perf_counter()
-
             prompt_processing = False
             batch = self.active_batch
             num_active = len(batch) if batch else 0
@@ -93,9 +104,6 @@ else:
                 if batch is not None and not prompt_processing:
                     # Finish any active completion tokens
                     mx.eval(batch.y, batch.logprobs)
-                    # self._stats.generation_time += time.perf_counter() - tic
-                    # tic = time.perf_counter()
-
                 batch = self._process_prompts(prompts)
                 self.unprocessed_prompts = self.unprocessed_prompts[
                     self.prefill_batch_size :
@@ -114,9 +122,6 @@ else:
             y, logprobs = batch.y, batch.logprobs
             batch.y, batch.logprobs = self._step(y[:, None], batch.cache)
             mx.async_eval(batch.y, batch.logprobs)
-            # print(batch.cache[0], batch.cache[0].keys, batch.cache[0].values, batch.cache[0].left_padding)
-            # print(batch.cache[0].shape, batch.cache[0].keys.shape, batch.cache[0].values.shape, batch.cache[0].left_padding.shape)
-
             return logprobs, batch
 
     class Query:
@@ -157,6 +162,7 @@ else:
             self.timeout = timeout
             self.timer = None
             self.native_batching = _supports_batching(self.mlx_lm_model)
+            print("The model supports batching: ", self.native_batching)
 
             super().__init__(tokenizer=self.tokenizer)
 
