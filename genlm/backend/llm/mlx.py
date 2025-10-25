@@ -70,22 +70,24 @@ else:
             for param in layer.parameters().values()
         )
 
-    def _supports_batching(mlx_lm_model):
-        """Return True if the MLX-LM supports batched inference for this model."""
-        if _has_bf16(mlx_lm_model):
-            return False
+    def _cache_batchable(mlx_lm_model):
         if not hasattr(mlx_lm_model, "make_cache"):
             return True
 
         cache = mlx_lm_model.make_cache()
         batchable = (CacheList, KVCache, ArraysCache)
-
         return all(
             isinstance(c, batchable) or (isinstance(c, RotatingKVCache) and c.keep == 0)
             for c in cache
         )
 
+    def _supports_batching(mlx_lm_model):
+        """Return True only if MLX-LM has batching cache support for the model, and does not have bfloat16 parameters."""
+        return _cache_batchable(mlx_lm_model) and not _has_bf16(mlx_lm_model)
+
     class BatchGeneratorCustom(BatchGenerator):
+        """A custom batch generator optimzed for logprobs computation."""
+
         def _next(self):
             prompt_processing = False
             batch = self.active_batch
@@ -138,7 +140,7 @@ else:
             tokenizer,
             cache_size=0,
             cache_opts={},
-            batch_size=10,
+            batch_size=5,
             timeout=0.02,
         ):
             """Initialize an `AsyncMlxLM` instance.
@@ -147,7 +149,6 @@ else:
                 mlx_lm_model (Model): The async MLX LM model instance.
                 cache_size (int, optional): Maximum size of the output cache. If 0, caching is disabled. Defaults to 0.
                 cache_opts (dict, optional): Additional options to pass to the [`OutputMLXCache`][genlm.backend.cache.OutputMLXCache] constructor. Defaults to {}.
-
             """
             self.mlx_lm_model = mlx_lm_model
             self.tokenizer = tokenizer
@@ -161,8 +162,7 @@ else:
             self.batch_size = batch_size
             self.timeout = timeout
             self.timer = None
-            self.native_batching = _supports_batching(self.mlx_lm_model)
-            print("The model supports batching: ", self.native_batching)
+            self.batching = _supports_batching(self.mlx_lm_model) and batch_size > 1
 
             super().__init__(tokenizer=self.tokenizer)
 
@@ -290,10 +290,8 @@ else:
             unique_queries = [group[0] for group in query_groups.values()]
 
             input_prompts = [q.prompt for q in unique_queries]
-            if self.native_batching and self.batch_size > 1:
-                results = self._batch_logits_custom(
-                    input_prompts, max_tokens=[1 for _ in unique_queries]
-                )
+            if self.batching:
+                results = self._batch_logits_custom(input_prompts)
             else:
                 results = [
                     self.next_token_logprobs_sync(q.prompt) for q in unique_queries
@@ -301,10 +299,10 @@ else:
 
             assert len(results) == len(unique_queries)
 
+            results = _to_torch(results)
             for i, q in enumerate(unique_queries):
-                result = results[i]
                 for dup_query in query_groups[tuple(q.prompt)]:
-                    dup_query.future.set_result(result)
+                    dup_query.future.set_result(results[i])
 
         def add_query(self, query, future):
             """Add a query to be evaluated in the next batch.
@@ -348,7 +346,6 @@ else:
             future = asyncio.get_running_loop().create_future()
             self.add_query(token_ids, future)
             logprobs = await future
-            logprobs = _to_torch(logprobs)
             if self.cache is not None:
                 self.cache[key] = logprobs
             return logprobs

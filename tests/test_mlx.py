@@ -25,7 +25,7 @@ def model_name(request):
 @pytest.fixture(scope="module")
 def async_llm(model_name):
     return load_model_by_name(
-        model_name, backend="mlx", llm_opts={"cache_size": 3, "batch_size": 3}
+        model_name, backend="mlx", llm_opts={"cache_size": 3, "batch_size": 2}
     )
 
 
@@ -64,6 +64,7 @@ def test_next_token_logprobs(async_llm, reference_llm, token_ids_list, model_nam
 
 # async and sync batching should yield the same distributions
 def test_async_batching(async_llm, token_ids_list):
+    async_llm.clear_cache()
     haves = asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list))
     wants = [
         async_llm.next_token_logprobs_sync(token_ids) for token_ids in token_ids_list
@@ -75,6 +76,7 @@ def test_async_batching(async_llm, token_ids_list):
 
 
 def test_batch_next_token_logprobs_sync(async_llm, token_ids_list):
+    async_llm.clear_cache()
     haves = async_llm.batch_next_token_logprobs_sync(token_ids_list)
     wants = [
         async_llm.next_token_logprobs_sync(token_ids) for token_ids in token_ids_list
