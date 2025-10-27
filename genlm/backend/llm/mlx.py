@@ -142,6 +142,7 @@ else:
             cache_opts={},
             batch_size=5,
             timeout=0.02,
+            **batch_opts,
         ):
             """Initialize an `AsyncMlxLM` instance.
 
@@ -163,6 +164,7 @@ else:
             self.timeout = timeout
             self.timer = None
             self.batching = _supports_batching(self.mlx_lm_model) and batch_size > 1
+            self.batch_opts = batch_opts
 
             super().__init__(tokenizer=self.tokenizer)
 
@@ -245,10 +247,14 @@ else:
             mx.async_eval(logprobs)
             return logprobs
 
+        def reset_async_queries(self):
+            """Clear any pending language model queries from the queue. Use this method when an exception prevented an inference algorithm from executing
+            to completion."""
+            self.queries = []
+
         def _batch_logits_custom(
             self,
             prompts,
-            **kwargs,
         ):
             """
             Compute next-token logits for each prompt in a batch using BatchGenerator.
@@ -263,7 +269,9 @@ else:
                 Tuple[List[mx.array], Stats]: A list of logits arrays (one per prompt),
                 and BatchGenerator statistics.
             """
-            gen = BatchGeneratorCustom(self.mlx_lm_model, stop_tokens=[], **kwargs)
+            gen = BatchGeneratorCustom(
+                self.mlx_lm_model, stop_tokens=[], **self.batch_opts
+            )
             with wired_limit(self.mlx_lm_model, [self.generation_stream]):
                 _ = gen.insert(prompts, 1)
                 logprobs, batch = gen.next()
@@ -291,7 +299,9 @@ else:
 
             input_prompts = [q.prompt for q in unique_queries]
             if self.batching:
-                results = self._batch_logits_custom(input_prompts)
+                results = self._batch_logits_custom(
+                    input_prompts,
+                )
             else:
                 results = [
                     self.next_token_logprobs_sync(q.prompt) for q in unique_queries
@@ -342,7 +352,6 @@ else:
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
 
-            # Create a future with the prompt
             future = asyncio.get_running_loop().create_future()
             self.add_query(token_ids, future)
             logprobs = await future
@@ -357,7 +366,7 @@ else:
                 token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
 
             Returns:
-                (mlx.core.array): Normalized log probability tensor.
+                (torch.Tensor): Normalized log probability tensor.
             """
             if not token_ids:
                 raise ValueError("Token ids must not be empty")
