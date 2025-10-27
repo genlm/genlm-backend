@@ -1,3 +1,7 @@
+FORCE_V0 = True #Currently, we force thw model to use V0, to switch to V1 simply set this to False
+LOGPROBS_PER_REQUEST = 256 #These are th elogprobs that are retrieved currently in V1
+
+from syslog import LOG_PERROR
 import torch
 import logging
 import warnings
@@ -43,7 +47,7 @@ if not HAS_VLLM:
                 "to use the vLLM-based AsyncLM model."
             )
 
-elif envs.VLLM_USE_V1: #If V1
+elif envs.VLLM_USE_V1 and not FORCE_V0: #If V1
 
     logging.getLogger("vllm.engine.async_llm_engine").setLevel(logging.WARNING)
 
@@ -54,12 +58,12 @@ elif envs.VLLM_USE_V1: #If V1
             "detokenize": False,
             "stop": None,
             "ignore_eos": True,
-            "logprobs": 256,  # Request logprobs for top 1000 tokens
+            "logprobs": LOGPROBS_PER_REQUEST,  # This parameter fixes the number of requested logprobs. 
         }
 
-        def __init__(self, async_llm_engine, cache_size=0, cache_opts={}, logits_processors=None):
+        def __init__(self, async_llm_engine, cache_size=0, cache_opts={}):
             """Initialize an `AsyncVirtualLM` instance.
-
+ 
             Args:
                 async_llm_engine (AsyncLLMEngine): The async vLLM engine instance.
                 cache_size (int, optional): Maximum size of the output cache. If 0, caching is disabled. Defaults to 0.
@@ -72,8 +76,6 @@ elif envs.VLLM_USE_V1: #If V1
             # Wrap v1 tokenizer to be compatible with base class
             self.tokenizer = self._wrap_tokenizer(async_llm_engine.tokenizer)
             self.request_counter = Counter()
-            # Store logits processors for compatibility (not used in v1)
-            self._logits_processors = list(logits_processors or [])
             self.cache = (
                 OutputCache(maxsize=cache_size, **cache_opts)
                 if cache_size > 0
@@ -85,7 +87,8 @@ elif envs.VLLM_USE_V1: #If V1
             super().__init__(tokenizer=self.tokenizer)
 
         def _wrap_tokenizer(self, tokenizer):
-            """Wrap v1 tokenizer to be compatible with base class expectations."""
+            """Wrap v1 tokenizer to be compatible with base class expectations.
+            Note that in V1 async_llm_engine.tokenizer is a TokenizerGroup object"""
             class TokenizerWrapper:
                 def __init__(self, tokenizer):
                     # Access the underlying tokenizer from TokenizerGroup
@@ -94,7 +97,7 @@ elif envs.VLLM_USE_V1: #If V1
                     self.is_fast = True  # Assume fast tokenizer for v1
                     self.name_or_path = getattr(self._tokenizer, 'name_or_path', 'unknown')
 
-                def __getattr__(self, name):
+                def __getattr__(self, name): # Retrieve the tokenizer from the TokenizerGroup object
                     return getattr(self._tokenizer, name)
                 
                 def __len__(self):
@@ -114,11 +117,14 @@ elif envs.VLLM_USE_V1: #If V1
 
             Returns:
                 (AsyncVirtualLM): An `AsyncVirtualLM` instance.
+
+            Note: for GPT-OSS,  vLLM >= 0.10.2 is required 
             """
             if not HAS_VLLM:
                 raise ImportError(  # pragma: no cover
                     "vLLM not available. Install vLLM or use AsyncTransformer instead."
                 )
+                
 
             if engine_opts is not None and "enable_chunked_prefill" in engine_opts:
                 if engine_opts["enable_chunked_prefill"]:
@@ -129,11 +135,8 @@ elif envs.VLLM_USE_V1: #If V1
 
             engine_opts = {
                 "enable_prefix_caching": True,
-                "disable_log_requests": True,
-                "gpu_memory_utilization": 0.3,  # Reduce GPU memory usage
-                "max_model_len": 512,  # Reduce max sequence length
-                "max_logprobs": 1000,  # Allow up to 1000 logprobs per token
-                # "disable_async_output_proc": True,  # This parameter forces vLLM to use v0, which is currently what we want to do.
+                "max_logprobs": LOGPROBS_PER_REQUEST,
+                # "disable_log_requests": True,
                 **(engine_opts or {}),
             }
 
@@ -160,8 +163,8 @@ elif envs.VLLM_USE_V1: #If V1
             Returns:
                 result (torch.Tensor): Normalized log probability tensor.
             """
-            # Handle string input properly
-            if isinstance(token_ids, str):
+            # Note that differently from V0, V1 takes inout string by default
+            if isinstance(token_ids, str):  
                 key = token_ids
             else:
                 key = tuple(token_ids)
@@ -186,12 +189,12 @@ elif envs.VLLM_USE_V1: #If V1
                 (torch.Tensor): Normalized log probability tensor.
             """
             req_id = str(next(self.request_counter))
-            print(f"request id: {req_id}")
+            # print(f"request id: {req_id}")
             # For v1, use string prompt directly instead of TokensPrompt
             if isinstance(token_ids, str):
                 prompt = token_ids
             else:
-                # Convert token IDs back to string for v1 compatibility
+                # Convert token IDs to string for v1 compatibility
                 prompt = self.tokenizer.decode(token_ids)
 
             outputs = []
@@ -212,35 +215,32 @@ elif envs.VLLM_USE_V1: #If V1
             logprobs = output.logprobs
             
             assert logprobs
-            print(f"shape of logprobs before: {len(logprobs[0]),type(logprobs)}")
             # v1 logprobs format: list of dicts with token_id -> logprob
-            # With max_logprobs=1000, we get many more logprobs
             vocab_size = len(self.tokenizer)
             logprobs_tensor = torch.full((1, vocab_size), -float('inf'), dtype=torch.float32)
             
             for token_id, logprob in logprobs[0].items():
-                print(f"token_id: {token_id}, logprob: {logprob}")
-                # if isinstance(token_id, int) and 0 <= token_id < vocab_size:
-                    # Extract the actual logprob value from the Logprob object
+                #Assign the logprobs to the top-k retrieved tokens in the vocabulary.                    
                 if hasattr(logprob, 'logprob'):
                     logprobs_tensor[0, token_id] = logprob.logprob
                 else:
                     logprobs_tensor[0, token_id] = float(logprob)
             
+            # Question: do we actually need to renormalize or can we just leave to -inf ??
             #Distribute the remaining mass across the tokens that are not in the top-k
             non_inf_mask = logprobs_tensor[0] != -float('inf') # create boolean non-inf mask
-            if non_inf_mask.sum() > 0:
+            if non_inf_mask.sum() > 0: 
                 # Get the logprobs for the top-k tokens
                 top_logprobs = logprobs_tensor[0][non_inf_mask]
-                remaining_prob = 1.0 - torch.exp(top_logprobs).sum().item()
-                remaining_tokens = (~non_inf_mask).sum().item()
-                uniform_logprob = torch.log(torch.tensor(remaining_prob / remaining_tokens))
+                remaining_prob = max( 1.0 - torch.exp(top_logprobs).sum().item(),0.0 ) #Compute the remaining probability mass
+                remaining_tokens = (~non_inf_mask).sum().item() #Compute the number of remaining tokens
+                uniform_logprob = torch.log(torch.tensor(remaining_prob / remaining_tokens)) #Compute the uniform log probability
                 logprobs_tensor[0][~non_inf_mask] = uniform_logprob
                 
             logprobs = logprobs_tensor
             return logprobs[0]  # Return shape (vocab_size,) instead of (1, vocab_size)
 
-        def next_token_logprobs_sync(self, token_ids):
+        def next_token_logprobs_sync(self, token_ids): #For now, this simply uses the asynchronous method.
             """Request log probabilities of next token synchronously.
 
             Args:
@@ -252,39 +252,6 @@ elif envs.VLLM_USE_V1: #If V1
             import asyncio
             return asyncio.run(self.next_token_logprobs(token_ids))
 
-        async def batch_next_token_logprobs(self, token_ids_list):
-            """
-            Request log probabilities of next tokens in a batch asynchronously.
-
-            Args:
-                token_ids_list (list[list[int]]): A list of token ID lists, each representing a prompt to the language model.
-
-            Returns:
-                (torch.Tensor): A tensor of normalized log probability tensors, one for each prompt in the input list.
-            """
-            # Handle empty batch
-            if not token_ids_list:
-                return torch.empty((0, len(self.tokenizer)), dtype=torch.float32)
-            
-            # Use the base class implementation
-            return await super().batch_next_token_logprobs(token_ids_list)
-
-        def batch_next_token_logprobs_sync(self, token_ids_list):
-            """
-            Request log probabilities of next tokens in a batch synchronously.
-
-            Args:
-                token_ids_list (list[list[int]]): A list of token ID lists, each representing a prompt to the language model.
-
-            Returns:
-                (torch.Tensor): A tensor of normalized log probability tensors, one for each prompt in the input list.
-            """
-            # Handle empty batch
-            if not token_ids_list:
-                return torch.empty((0, len(self.tokenizer)), dtype=torch.float32)
-            
-            # Use the base class implementation
-            return super().batch_next_token_logprobs_sync(token_ids_list)
 
         def clear_cache(self):
             """Clear output cache."""
@@ -328,7 +295,7 @@ elif envs.VLLM_USE_V1: #If V1
             elif isinstance(prompt_token_ids, str):
                 pass
             else:
-                raise f"Invalid prompt_ids_Type: {type(prompt_token_ids)}"
+                raise ValueError(f"Invalid prompt_ids_Type: {type(prompt_token_ids)}")
 
             async for output in self.async_llm_engine.generate(
                 prompt=prompt_token_ids,
@@ -337,7 +304,7 @@ elif envs.VLLM_USE_V1: #If V1
                     max_tokens=max_tokens,
                     temperature=temperature,
                     seed=seed,
-                    stop=[self.byte_vocab[i].decode() for i in eos_token_ids],
+                    stop=[self.tokenizer.decode([i]) for i in eos_token_ids],
                 ),
                 request_id=str(next(self.request_counter)),
             ):
