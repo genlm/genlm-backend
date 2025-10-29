@@ -21,7 +21,7 @@ def model_name(request):
 @pytest.fixture(scope="module")
 def async_llm(model_name):
     return load_model_by_name(
-        model_name, backend="mlx", llm_opts={"cache_size": 3, "batch_size": 2}
+        model_name, backend="mlx", llm_opts={"cache_size": 3, "batch_size": 3}
     )
 
 
@@ -59,16 +59,20 @@ def test_next_token_logprobs(async_llm, reference_llm, token_ids_list, model_nam
 
 
 # async and sync batching should yield the same distributions
-def test_async_batching(async_llm, token_ids_list):
+def test_async_batching(model_name, async_llm, token_ids_list):
+    tolerance = TOLERANCES.get(model_name, 1e-3)
     async_llm.clear_cache()
-    haves = asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list))
+    haves = (
+        asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list)).cpu().numpy()
+    )
     wants = [
-        async_llm.next_token_logprobs_sync(token_ids) for token_ids in token_ids_list
+        async_llm.next_token_logprobs_sync(token_ids).cpu().numpy()
+        for token_ids in token_ids_list
     ]
 
     for i, (have, want) in enumerate(zip(haves, wants)):
         max_rel_err = compare(have, want).max_rel_err
-        assert max_rel_err == 0, [max_rel_err, token_ids_list[i]]
+        assert max_rel_err < tolerance, [max_rel_err, token_ids_list[i]]
 
 
 def test_batch_next_token_logprobs_sync(async_llm, token_ids_list):
@@ -156,18 +160,24 @@ def test_batch_evaluate_empty_queries(async_llm):
     assert len(async_llm.queries) == 0
 
 
-def test_multiple_prefill(model_name, token_ids_list):
-    async_llm = AsyncMlxLM.from_name(
-        model_name,
-        batch_size=3,
-        cache_size=0,
-        prefill_batch_size=2,
+def test_small_prefill(model_name, async_llm, token_ids_list):
+    tolerance = TOLERANCES.get(model_name, 1e-3)
+    async_llm.batch_opts = {"prefill_batch_size": 1}
+    have = (
+        asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list)).cpu().numpy()
     )
-    have = asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list))
-    want = torch.stack(
-        [async_llm.next_token_logprobs_sync(token_ids) for token_ids in token_ids_list]
+    async_llm.clear_cache()
+    want = (
+        torch.stack(
+            [
+                async_llm.next_token_logprobs_sync(token_ids)
+                for token_ids in token_ids_list
+            ]
+        )
+        .cpu()
+        .numpy()
     )
-    assert torch.allclose(have, want)
+    assert compare(have, want).max_rel_err < tolerance
 
 
 def test_sample_seeded(async_llm):

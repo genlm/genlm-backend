@@ -276,6 +276,7 @@ else:
                 _ = gen.insert(prompts, 1)
                 logprobs, batch = gen.next()
                 self.gen = batch
+            mx.clear_cache()
             return logprobs
 
         def batch_evaluate_queries(self):
