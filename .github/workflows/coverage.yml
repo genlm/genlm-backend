@@ -67,7 +67,7 @@ jobs:
       - name: Run MLX tests
         run: |
           source venv/bin/activate
-          coverage run --source=genlm/backend -m pytest tests/test_mlx.py --benchmark-disable
+          coverage run --source=genlm/backend -m pytest tests/test_mlx.py
           coverage json --omit "*/test*"
           coverage report --omit "*/test*"
 
