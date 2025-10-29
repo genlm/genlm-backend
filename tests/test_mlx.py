@@ -5,14 +5,14 @@ from arsenal.maths import compare
 from genlm.backend.llm import load_model_by_name, AsyncMlxLM
 
 TOLERANCES = {
-    "tiiuae/falcon-mamba-7b-instruct": 1.5,
+    "yujiepan/mamba2-tiny-random": 1.5,
     "openai-community/gpt2": 1e-3,
 }
 
 
 @pytest.fixture(
     scope="module",
-    params=["openai-community/gpt2", "tiiuae/falcon-mamba-7b-instruct"],
+    params=["openai-community/gpt2", "yujiepan/mamba2-tiny-random"],
 )
 def model_name(request):
     return request.param
