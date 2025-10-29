@@ -62,7 +62,10 @@ else:
         def check(x):
             if isinstance(x, dict):
                 return any(check(v) for v in x.values())
-            return getattr(x, "dtype", None) == mx.bfloat16
+            elif isinstance(x, mx.array):
+                return getattr(x, "dtype", None) == mx.bfloat16
+            else:
+                return False
 
         return any(
             check(param)
