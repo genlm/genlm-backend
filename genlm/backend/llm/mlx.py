@@ -92,7 +92,6 @@ else:
         """A custom batch generator optimzed for logprobs computation."""
 
         def _next(self):
-            prompt_processing = False
             batch = self.active_batch
             num_active = len(batch) if batch else 0
             num_to_add = self.completion_batch_size - num_active
@@ -101,19 +100,10 @@ else:
                 # Finish processing the last examples of the last batch
                 if len(prompts) == 0 and num_active > 0:
                     break
-                # No more prompts and no more completions, all done
-                elif len(prompts) == 0:
-                    self.active_batch = None
-                    return []
-                # Process prompts
-                if batch is not None and not prompt_processing:
-                    # Finish any active completion tokens
-                    mx.eval(batch.y, batch.logprobs)
                 batch = self._process_prompts(prompts)
                 self.unprocessed_prompts = self.unprocessed_prompts[
                     self.prefill_batch_size :
                 ]
-                prompt_processing = True
                 # If there was no active batch, set it
                 if self.active_batch is None:
                     self.active_batch = batch
