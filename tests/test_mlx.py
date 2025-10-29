@@ -140,6 +140,15 @@ async def test_full_batch_size(async_llm):
         async_llm.timeout = old_timeout
 
 
+@pytest.mark.asyncio
+async def test_reset_async_queries(async_llm):
+    test_prompt = async_llm.tokenizer.encode("Test prompt")
+    future = asyncio.get_running_loop().create_future()
+    async_llm.add_query(test_prompt, future)
+    async_llm.reset_async_queries()
+    assert len(async_llm.queries) == 0
+
+
 def test_from_name_with_options(model_name):
     # Test model creation with various options
 
