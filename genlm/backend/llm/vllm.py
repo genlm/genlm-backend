@@ -38,8 +38,7 @@ if not HAS_VLLM:
                 "to use the vLLM-based AsyncLM model."
             )
 
-else: 
-
+else:
     logging.getLogger("vllm.engine.async_llm_engine").setLevel(logging.WARNING)
 
     class PassThroughLogitsProcessor:
@@ -56,10 +55,16 @@ else:
             return logits
 
     class AsyncVirtualLM(AsyncLM):
-
-        def __init__(self, async_llm_engine, cache_size=0, cache_opts={}, logprobs_per_request=256, v1=False):
+        def __init__(
+            self,
+            async_llm_engine,
+            cache_size=0,
+            cache_opts={},
+            logprobs_per_request=256,
+            v1=False,
+        ):
             """Initialize an `AsyncVirtualLM` instance.
- 
+
             Args:
                 async_llm_engine (AsyncLLMEngine): The async vLLM engine instance.
                 cache_size (int, optional): Maximum size of the output cache. If 0, caching is disabled. Defaults to 0.
@@ -73,16 +78,20 @@ else:
             self.v1 = v1
             self.async_llm_engine = async_llm_engine
             self.default_params = {
-            "max_tokens": 1,
-            "n": 1,
-            "detokenize": False,
-            "stop": None,
-            "ignore_eos": True,
+                "max_tokens": 1,
+                "n": 1,
+                "detokenize": False,
+                "stop": None,
+                "ignore_eos": True,
             }
             # Version specific modifications
             if self.v1:
-                self.default_params["logprobs"] = logprobs_per_request # set the retrieved logprobs
-                self.tokenizer = self._wrap_tokenizer(async_llm_engine.tokenizer) # wrap tokenizer for V1
+                self.default_params["logprobs"] = (
+                    logprobs_per_request  # set the retrieved logprobs
+                )
+                self.tokenizer = self._wrap_tokenizer(
+                    async_llm_engine.tokenizer
+                )  # wrap tokenizer for V1
                 async_llm_engine.log_stats = False
             else:
                 self.tokenizer = async_llm_engine.engine.get_tokenizer()
@@ -99,24 +108,36 @@ else:
         def _wrap_tokenizer(self, tokenizer):
             """Wrap v1 tokenizer to be compatible with base class expectations.
             Note that in V1 async_llm_engine.tokenizer is a TokenizerGroup object"""
+
             class TokenizerWrapper:
                 def __init__(self, tokenizer):
                     # Access the underlying tokenizer from TokenizerGroup
-                    self._tokenizer = getattr(tokenizer, 'tokenizer', tokenizer)
+                    self._tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
                     # Add compatibility attributes
                     self.is_fast = True  # Assume fast tokenizer for v1
-                    self.name_or_path = getattr(self._tokenizer, 'name_or_path', 'unknown')
+                    self.name_or_path = getattr(
+                        self._tokenizer, "name_or_path", "unknown"
+                    )
 
-                def __getattr__(self, name): # Retrieve the tokenizer from the TokenizerGroup object
+                def __getattr__(
+                    self, name
+                ):  # Retrieve the tokenizer from the TokenizerGroup object
                     return getattr(self._tokenizer, name)
-                
+
                 def __len__(self):
                     return len(self._tokenizer)
-            
+
             return TokenizerWrapper(tokenizer)
 
         @classmethod
-        def from_name(cls, model_name, v1=False, logprobs_per_request=256 ,engine_opts=None, **kwargs):
+        def from_name(
+            cls,
+            model_name,
+            v1=False,
+            logprobs_per_request=256,
+            engine_opts=None,
+            **kwargs,
+        ):
             """Create a `AsyncVirtualLM` instance from a model name.
 
             Args:
@@ -128,13 +149,12 @@ else:
             Returns:
                 (AsyncVirtualLM): An `AsyncVirtualLM` instance.
 
-            Note: for GPT-OSS,  vLLM >= 0.10.2 is required 
+            Note: for GPT-OSS,  vLLM >= 0.10.2 is required
             """
             if not HAS_VLLM:
                 raise ImportError(  # pragma: no cover
                     "vLLM not available. Install vLLM or use AsyncTransformer instead."
                 )
-                
 
             if engine_opts is not None and "enable_chunked_prefill" in engine_opts:
                 if engine_opts["enable_chunked_prefill"]:
@@ -144,9 +164,14 @@ else:
                     )
 
             if v1:
-                original_v1_env = os.environ.get("VLLM_USE_V1") # The engine type may be set as an environmrntal varible
+                original_v1_env = os.environ.get(
+                    "VLLM_USE_V1"
+                )  # The engine type may be set as an environmrntal varible
                 os.environ["VLLM_USE_V1"] = "1"
-                from vllm.engine.arg_utils import AsyncEngineArgs # the AsyncEngineArgs import is different in V1 and V0.
+                from vllm.engine.arg_utils import (
+                    AsyncEngineArgs,
+                )  # the AsyncEngineArgs import is different in V1 and V0.
+
                 engine_opts = {
                     "enable_prefix_caching": True,
                     "max_logprobs": logprobs_per_request,
@@ -155,21 +180,22 @@ else:
             else:
                 original_v1_env = os.environ.get("VLLM_USE_V1")
                 os.environ["VLLM_USE_V1"] = "0"
-                from vllm import AsyncEngineArgs # the AsyncEngineArgs import is different in V1 and V0
+                from vllm import (
+                    AsyncEngineArgs,
+                )  # the AsyncEngineArgs import is different in V1 and V0
+
                 engine_opts = {
-                "enable_prefix_caching": True,
-                "disable_log_requests": True,
-                "disable_async_output_proc": True,  # This parameter forces vLLM to use v0, which is currently what we want to do.
-                **(engine_opts or {}),
-            }
+                    "enable_prefix_caching": True,
+                    "disable_log_requests": True,  # is it possible to remove this parameter? it is cauing problems with vllm >= v 0.10.0
+                    "disable_async_output_proc": True,  # This parameter forces vLLM to use v0, which is currently what we want to do.
+                    **(engine_opts or {}),
+                }
 
             engine = AsyncLLMEngine.from_engine_args(  # Set up the engine
-                AsyncEngineArgs(model=model_name,
-                tokenizer=model_name,
-                **engine_opts)
+                AsyncEngineArgs(model=model_name, tokenizer=model_name, **engine_opts)
             )
 
-            try: # reset  the environmental variable, so that it does not interfere with other instances
+            try:  # reset  the environmental variable, so that it does not interfere with other instances
                 if original_v1_env is not None:
                     os.environ["VLLM_USE_V1"] = original_v1_env
                 else:
@@ -177,7 +203,9 @@ else:
             except Exception:
                 pass  # Ignore cleanup errors
 
-            return cls(engine, v1=v1, logprobs_per_request=logprobs_per_request, **kwargs)
+            return cls(
+                engine, v1=v1, logprobs_per_request=logprobs_per_request, **kwargs
+            )
 
         @property
         def underlying_model(self):
@@ -196,7 +224,7 @@ else:
             Returns:
                 result (torch.Tensor): Normalized log probability tensor.
             """
-            
+
             key = tuple(token_ids)
 
             if self.cache is not None and key in self.cache:
@@ -243,21 +271,22 @@ else:
             # v1 provides logprobs in the output when logprobs parameter is set
             output = outputs[0].outputs[0]
             logprobs = output.logprobs
-            
+
             assert logprobs, "Log probs should have been retrieved at this point"
             # v1 logprobs format: list of dicts with token_id -> logprob
             vocab_size = len(self.tokenizer)
-            logprobs_tensor = torch.full((1, vocab_size), -float('inf'), dtype=torch.float32)
-            
+            logprobs_tensor = torch.full(
+                (1, vocab_size), -float("inf"), dtype=torch.float32
+            )
+
             for token_id, logprob in logprobs[0].items():
-                #Assign the logprobs to the top-k retrieved tokens in the vocabulary. 
-                assert hasattr(logprob, 'logprob'), "Logprob field is required"
+                # Assign the logprobs to the top-k retrieved tokens in the vocabulary.
+                assert hasattr(logprob, "logprob"), "Logprob field is required"
                 logprobs_tensor[0, token_id] = logprob.logprob
-                                   
-                
-            #Right now we don't re-normalize! We might want to change this,
-            #the remaining mass can either be redistributed among the remaining tokens 
-            # or among the selected ones.               
+
+            # Right now we don't re-normalize! We might want to change this,
+            # the remaining mass can either be redistributed among the remaining tokens
+            # or among the selected ones.
             logprobs = logprobs_tensor
             return logprobs[0]  # Return shape (vocab_size,) instead of (1, vocab_size)
 
@@ -299,7 +328,7 @@ else:
             Returns:
                 (torch.Tensor): Normalized log probability tensor.
             """
-            assert not self.v1 #Currently implemented only for V0
+            assert not self.v1  # Currently implemented only for V0
             return self.batch_next_token_logprobs_sync([token_ids])[0]
 
         def batch_next_token_logprobs_sync(self, token_ids_list):
@@ -312,7 +341,7 @@ else:
             Returns:
                 (torch.Tensor): A tensor of normalized log probability tensors, one for each prompt in the input list.
             """
-            assert not self.v1 #Currently implemented only for V0
+            assert not self.v1  # Currently implemented only for V0
             req_ids = []
             req_id2processors = {}
             for token_ids in token_ids_list:
@@ -339,7 +368,6 @@ else:
             return torch.stack(
                 [req_id2processors[req_id].log_probs for req_id in req_ids]
             )
-
 
         def clear_cache(self):
             """Clear output cache."""
@@ -386,12 +414,18 @@ else:
                 elif isinstance(prompt_token_ids, str):
                     pass
                 else:
-                    raise ValueError(f"Invalid prompt_ids_Type: {type(prompt_token_ids)}")
+                    raise ValueError(
+                        f"Invalid prompt_ids_Type: {type(prompt_token_ids)}"
+                    )
             else:
                 prompt_token_ids = TokensPrompt(prompt_token_ids=prompt_token_ids)
 
-            # Question to check: Why do we need to use "byte_vocab"? 
-            decode_eos = lambda eos_token_ids : [self.tokenizer.decode([i]) for i in eos_token_ids] if self.v1 else [self.byte_vocab[i].decode() for i in eos_token_ids] 
+            # Question to check: Why do we need to use "byte_vocab"?
+            def decode_eos(eos_token_ids):
+                if self.v1:
+                    return [self.tokenizer.decode([i]) for i in eos_token_ids]
+                else:  # What is the adavntage of using "byte_vocab" instead of the tokenizer. Can we do this also with V1 ?
+                    [self.byte_vocab[i].decode() for i in eos_token_ids]
 
             async for output in self.async_llm_engine.generate(
                 prompt=prompt_token_ids,
@@ -400,7 +434,7 @@ else:
                     max_tokens=max_tokens,
                     temperature=temperature,
                     seed=seed,
-                    stop= decode_eos(eos_token_ids),
+                    stop=decode_eos(eos_token_ids),
                 ),
                 request_id=str(next(self.request_counter)),
             ):

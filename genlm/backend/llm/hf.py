@@ -148,8 +148,6 @@ class AsyncTransformer(AsyncLM):
     #         model_id, quantization_config=bnb_config, **_hf_opts
     #     )
 
-
-
     #     return cls(mod, tok, **kwargs)
 
     @torch.no_grad()

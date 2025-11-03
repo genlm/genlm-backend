@@ -4,7 +4,6 @@ import asyncio
 from conftest import cuda_only, ReferenceVirtualLM
 from arsenal.maths import compare
 from genlm.backend.llm import load_model_by_name, MockAsyncLM, AsyncVirtualLM
-import os
 
 # from hypothesis import given, strategies as st, settings
 
@@ -12,7 +11,6 @@ import os
 @pytest.fixture(scope="module")
 def model_name():
     return "gpt2"
-
 
 
 @pytest.fixture(scope="module")
@@ -30,12 +28,16 @@ def async_llm(model_name):
         llm_opts={"engine_opts": {"gpu_memory_utilization": 0.2, "dtype": "float16"}},
     )
 
+
 @pytest.fixture(scope="module")
 def async_llm_v1(model_name):
     return load_model_by_name(
         model_name,
         backend="vllm",
-        llm_opts={"v1": True, "engine_opts": {"gpu_memory_utilization": 0.2, "dtype": "float16"}},
+        llm_opts={
+            "v1": True,
+            "engine_opts": {"gpu_memory_utilization": 0.2, "dtype": "float16"},
+        },
     )
 
 
@@ -158,25 +160,27 @@ def test_batch_next_token_logprobs_agreement(
             token_ids_list[i],
         ]
 
+
 @cuda_only
-@pytest.mark.asyncio # Need to run V1 with asyncio. For some reason gets messed up with multiple event loops
+@pytest.mark.asyncio  # Need to run V1 with asyncio. For some reason gets messed up with multiple event loops
 async def test_v1_next_token_logprobs(async_llm_v1, reference_llm, token_ids_list):
     """Test V1 logprobs against reference (on top-256 tokens only)."""
     for token_ids in token_ids_list:
         logprobs_v1 = await async_llm_v1.next_token_logprobs(token_ids)
         logprobs_ref = await reference_llm.next_token_logprobs(token_ids)
-        
+
         # Filter non-inf tokens. Note that V1 retrieves only th etpo-k tokens and sets the other to -inf
-        valid_mask = logprobs_v1 != -float('inf')
+        valid_mask = logprobs_v1 != -float("inf")
         if valid_mask.sum() <= 128:
             pytest.skip("Less than 128 tokens to compare!")
-        
+
         comparison = compare(
-            logprobs_v1[valid_mask].cpu().numpy(),
-            logprobs_ref[valid_mask]
+            logprobs_v1[valid_mask].cpu().numpy(), logprobs_ref[valid_mask]
         )
-        
-        assert comparison.max_rel_err < 0.1, token_ids # Had to increase a bit the tollerance for V1. Note that the V1 engine might slightly differ in how the weights are handled.
+
+        assert comparison.max_rel_err < 0.1, (
+            token_ids
+        )  # Had to increase a bit the tollerance for V1. Note that the V1 engine might slightly differ in how the weights are handled.
         assert comparison.pearson > 0.95, token_ids
 
 
