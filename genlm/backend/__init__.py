@@ -15,3 +15,5 @@ __all__ = [
     "ParallelTokenCharacterTrie",
     "AsyncTokenCharacterTrie",
 ]
+
+HELLO = "World"
