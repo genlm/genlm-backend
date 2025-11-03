@@ -18,6 +18,7 @@ See our [documentation](https://genlm.github.io/genlm-backend/).
 - Automatic batching of concurrent log-probability requests, enabling efficient large-scale inference without having to write batching logic yourself
 - Byte-level decoding of transformers tokenizers, enabling advanced token-level control
 - Support for arbitrary Hugging Face models (e.g., LLaMA, DeepSeek, etc.) with fast inference and automatic KV caching using vllm
+- NEW: support for MLX-LM library, allowing faster inference on Apple silicon devices.
 
 
 ## ⚡ Quick Start
@@ -27,6 +28,13 @@ This library supports installation via pip:
 ```bash
 pip install genlm-backend
 ```
+
+Or to install with MLX support, run:
+
+```bash
+pip install genlm-backend[mlx]
+```
+
 
 ## 🧪 Example: Autobatched Sequential Importance Sampling with LLMs
 

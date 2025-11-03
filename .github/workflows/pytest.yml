@@ -29,4 +29,25 @@ jobs:
           source venv/bin/activate
           pip install -e .[test]
           pip install -r requirements-dev.txt
-          python -m pytest tests
+          python -m pytest tests --ignore=tests/test_mlx.py
+
+  test-mlx:
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: 3.11.5
+          cache: 'pip'
+
+      - name: Run MLX Tests
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+          pip install -e .[mlx]
+          pip install -r requirements-dev.txt
+          python -m pytest tests/test_mlx.py

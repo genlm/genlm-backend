@@ -20,6 +20,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+mlx = [
+    "mlx",
+    "mlx-lm"
+]
 docs = [
     "mkdocs",
     "mkdocstrings[python]",
