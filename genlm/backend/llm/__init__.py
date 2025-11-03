@@ -1,6 +1,7 @@
 from genlm.backend.llm.vllm import AsyncVirtualLM
 from genlm.backend.llm.hf import AsyncTransformer
 from genlm.backend.llm.base import AsyncLM, MockAsyncLM
+from genlm.backend.llm.mlx import AsyncMlxLM
 
 import torch
 
@@ -33,6 +34,8 @@ def load_model_by_name(name, backend=None, llm_opts=None):
         return AsyncTransformer.from_name(name, **llm_opts)
     elif backend == "mock":
         return MockAsyncLM.from_name(name, **llm_opts)
+    elif backend == "mlx":
+        return AsyncMlxLM.from_name(name, **llm_opts)
     else:
         raise ValueError(f"Invalid backend: {backend}")
 
@@ -42,5 +45,6 @@ __all__ = [
     "AsyncLM",
     "AsyncVirtualLM",
     "AsyncTransformer",
+    "AsyncMlxLM",
     "MockAsyncLM",
 ]

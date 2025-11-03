@@ -27,6 +27,11 @@ uv pip install -e ".[docs]"
 uv pip install -r requirements-dev.txt
 ```
 
+To build with MLX support, run:
+```bash
+uv pip install -e ".[mlx]"
+```
+
 ## Testing
 
 When test dependencies are installed, the test suite can be run via:
