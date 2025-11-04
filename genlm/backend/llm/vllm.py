@@ -166,7 +166,7 @@ else:
             if v1:
                 original_v1_env = os.environ.get(
                     "VLLM_USE_V1"
-                )  # The engine type may be set as an environmrntal varible
+                )  # The Engine Type could be set as an environmental variable so we set it to either V1 or V0 (after copying it in order to reset it later)
                 os.environ["VLLM_USE_V1"] = "1"
                 from vllm.engine.arg_utils import (
                     AsyncEngineArgs,
@@ -195,13 +195,11 @@ else:
                 AsyncEngineArgs(model=model_name, tokenizer=model_name, **engine_opts)
             )
 
-            try:  # reset  the environmental variable, so that it does not interfere with other instances
-                if original_v1_env is not None:
-                    os.environ["VLLM_USE_V1"] = original_v1_env
-                else:
-                    os.environ.pop("VLLM_USE_V1", None)
-            except Exception:
-                pass  # Ignore cleanup errors
+            # reset  the environmental variable, so that it does not interfere with other instances
+            if original_v1_env is not None:
+                os.environ["VLLM_USE_V1"] = original_v1_env
+            else:
+                os.environ.pop("VLLM_USE_V1", None)
 
             return cls(
                 engine, v1=v1, logprobs_per_request=logprobs_per_request, **kwargs

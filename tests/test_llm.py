@@ -31,6 +31,13 @@ def async_llm(model_name):
 
 @pytest.fixture(scope="module")
 def async_llm_v1(model_name):
+    try:
+        capability = torch.cuda.get_device_capability(0)
+        if capability[0] < 8:
+            pytest.skip("vLLM V1 requires GPU with Compute Capability >= 8.0")
+    except Exception:
+        pytest.skip("CUDA unavailable or cannot access CUDA capability")
+
     return load_model_by_name(
         model_name,
         backend="vllm",
