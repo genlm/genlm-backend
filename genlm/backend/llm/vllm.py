@@ -163,7 +163,7 @@ else:
                 )
 
             if engine_opts is not None and "enable_chunked_prefill" in engine_opts:
-                if engine_opts["enable_chunked_prefill"]:
+                if engine_opts["enable_chunked_prefill"]:  # pragma: no cover
                     warnings.warn(  # pragma: no cover
                         "Setting enable_chunked_prefill to True may interfere with AsyncVirtualLM's "
                         "custom sampling functionality."
@@ -213,11 +213,11 @@ else:
 
         @property
         def underlying_model(self):
-            raise NotImplementedError
+            raise NotImplementedError  # pragma: no cover
 
         @property
         def logits_processors(self):
-            return self._logits_processors
+            return self._logits_processors  # pragma: no cover
 
         async def next_token_logprobs(self, token_ids):
             """Request log probabilities of next token asynchronously with output caching.
