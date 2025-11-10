@@ -45,5 +45,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.coverage.report] # rn, V1 must be excluded from coverage as it requires compute capability >= 8, which is not available on the CI.
 exclude_lines = [
+    "pragma: no cover",
     "if self.v1:",
     "if v1:"]
