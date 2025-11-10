@@ -42,3 +42,8 @@ requires = ["setuptools>=64.0", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools_scm]
+
+[tool.coverage.report] # rn, V1 must be excluded from coverage as it requires compute capability >= 8, which is not available on the CI.
+exclude_lines = [
+    "if self.v1:",
+    "if v1:"]
