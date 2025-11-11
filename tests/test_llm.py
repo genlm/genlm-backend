@@ -169,14 +169,14 @@ def test_batch_next_token_logprobs_agreement(
 
 
 @cuda_only
-@pytest.mark.asyncio  # Need to run V1 with asyncio. For some reason gets messed up with multiple event loops
+@pytest.mark.asyncio  # Need to run V1 with asyncio. For some reason gets messed up with multiple event loops.
 async def test_v1_next_token_logprobs(async_llm_v1, reference_llm, token_ids_list):
     """Test V1 logprobs against reference (on top-256 tokens only)."""
     for token_ids in token_ids_list:
         logprobs_v1 = await async_llm_v1.next_token_logprobs(token_ids)
         logprobs_ref = await reference_llm.next_token_logprobs(token_ids)
 
-        # Filter non-inf tokens. Note that V1 retrieves only th etpo-k tokens and sets the other to -inf
+        # Filter non-inf tokens. Note that V1 retrieves only the top-k tokens and sets the other to -inf.
         valid_mask = logprobs_v1 != -float("inf")
         if valid_mask.sum() <= 128:
             pytest.skip("Less than 128 tokens to compare!")

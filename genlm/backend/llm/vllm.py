@@ -87,11 +87,11 @@ else:
             # Version specific modifications
             if self.v1:  # pragma: no cover
                 self.default_params["logprobs"] = (  # pragma: no cover
-                    logprobs_per_request  # set the retrieved logprobs
+                    logprobs_per_request  # Set the retrieved logprobs.
                 )
                 self.tokenizer = self._wrap_tokenizer(  # pragma: no cover
                     async_llm_engine.tokenizer
-                )  # wrap tokenizer for V1 # pragma: no cover
+                )  # Wrap tokenizer for V1. # pragma: no cover
                 async_llm_engine.log_stats = False  # pragma: no cover
             else:
                 self.tokenizer = async_llm_engine.engine.get_tokenizer()
@@ -111,11 +111,11 @@ else:
 
             class TokenizerWrapper:  # pragma: no cover
                 def __init__(self, tokenizer):  # pragma: no cover
-                    # Access the underlying tokenizer from TokenizerGroup
+                    # Access the underlying tokenizer from TokenizerGroup.
                     self._tokenizer = getattr(
                         tokenizer, "tokenizer", tokenizer
                     )  # pragma: no cover
-                    # Add compatibility attributes
+                    # Add compatibility attributes.
                     self.is_fast = (
                         True  # Assume fast tokenizer for v1 # pragma: no cover
                     )
@@ -127,7 +127,7 @@ else:
 
                 def __getattr__(  # pragma: no cover
                     self, name
-                ):  # Retrieve the tokenizer from the TokenizerGroup object
+                ):  # Retrieve the tokenizer from the TokenizerGroup object.
                     return getattr(self._tokenizer, name)
 
                 def __len__(self):  # pragma: no cover
@@ -155,7 +155,7 @@ else:
             Returns:
                 (AsyncVirtualLM): An `AsyncVirtualLM` instance.
 
-            Note: for GPT-OSS,  vLLM >= 0.10.2 is required
+            Note: for GPT-OSS, vLLM >= 0.10.2 is required
             """
             if not HAS_VLLM:
                 raise ImportError(  # pragma: no cover
@@ -172,11 +172,11 @@ else:
             if v1:  # pragma: no cover
                 original_v1_env = os.environ.get(
                     "VLLM_USE_V1"  # pragma: no cover
-                )  # The Engine Type could be set as an environmental variable so we set it to either V1 or V0 (after copying it in order to reset it later)
+                )  # The Engine Type could have already been set as an environmental variable so we set it to either V1 or V0 (after copying it in order to reset it later).
                 os.environ["VLLM_USE_V1"] = "1"  # pragma: no cover
                 from vllm.engine.arg_utils import (
                     AsyncEngineArgs,
-                )  # the AsyncEngineArgs import is different in V1 and V0. # pragma: no cover
+                )  # The AsyncEngineArgs import is different in V1 and V0. # pragma: no cover
 
                 engine_opts = {
                     "enable_prefix_caching": True,
@@ -188,20 +188,20 @@ else:
                 os.environ["VLLM_USE_V1"] = "0"
                 from vllm import (
                     AsyncEngineArgs,
-                )  # the AsyncEngineArgs import is different in V1 and V0
+                )  # The AsyncEngineArgs import is different in V1 and V0.
 
                 engine_opts = {
                     "enable_prefix_caching": True,
-                    "disable_log_requests": True,  # is it possible to remove this parameter? it is cauing problems with vllm >= v 0.10.0
+                    "disable_log_requests": True,  # Is it possible to remove this parameter? it is causing problems with vllm >= v 0.10.0.
                     "disable_async_output_proc": True,  # This parameter forces vLLM to use v0, which is currently what we want to do.
                     **(engine_opts or {}),
                 }
 
-            engine = AsyncLLMEngine.from_engine_args(  # Set up the engine
+            engine = AsyncLLMEngine.from_engine_args(  # Set up the engine.
                 AsyncEngineArgs(model=model_name, tokenizer=model_name, **engine_opts)
             )
 
-            # reset  the environmental variable, so that it does not interfere with other instances
+            # Reset the environmental variable, so that it does not interfere with other instances.
             if original_v1_env is not None:
                 os.environ["VLLM_USE_V1"] = original_v1_env
             else:
@@ -223,11 +223,15 @@ else:
             """Request log probabilities of next token asynchronously with output caching.
 
             Args:
-                token_ids_list (list[int]): A list of token IDs, representing a prompt to the language model.
+                token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
 
             Returns:
                 result (torch.Tensor): Normalized log probability tensor.
             """
+
+            assert isinstance(token_ids, list) and all(
+                isinstance(i, int) for i in token_ids
+            ), "token_ids must be a list of token IDs."
 
             key = tuple(token_ids)
 
@@ -248,19 +252,15 @@ else:
             """Request log probabilities of next token asynchronously.
 
             Args:
-                token_ids_list (list[int]): A list of token IDs, representing a prompt to the language model.
+                token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
 
             Returns:
                 (torch.Tensor): Normalized log probability tensor.
             """
             req_id = str(next(self.request_counter))
 
-            # For v1, use string prompt directly instead of TokensPrompt
-            if isinstance(token_ids, str):  # pragma: no cover
-                prompt = token_ids
-            else:  # pragma: no cover
-                # Convert token IDs to string for v1 compatibility
-                prompt = self.tokenizer.decode(token_ids)  # pragma: no cover
+            # Convert token IDs to string for v1 compatibility. # pragma: no cover
+            prompt = self.tokenizer.decode(token_ids)  # pragma: no cover
 
             outputs = []
             async for output in self.async_llm_engine.generate(
@@ -306,7 +306,7 @@ else:
             """Request log probabilities of next token asynchronously.
 
             Args:
-                token_ids_list (list[int]): A list of token IDs, representing a prompt to the language model.
+                token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
 
             Returns:
                 (torch.Tensor): Normalized log probability tensor.
@@ -340,7 +340,7 @@ else:
             Returns:
                 (torch.Tensor): Normalized log probability tensor.
             """
-            assert not self.v1  # Currently implemented only for V0
+            assert not self.v1  # Currently implemented only for V0.
             return self.batch_next_token_logprobs_sync([token_ids])[0]
 
         def batch_next_token_logprobs_sync(self, token_ids_list):
@@ -353,7 +353,7 @@ else:
             Returns:
                 (torch.Tensor): A tensor of normalized log probability tensors, one for each prompt in the input list.
             """
-            assert not self.v1  # Currently implemented only for V0
+            assert not self.v1  # Currently implemented only for V0.
             req_ids = []
             req_id2processors = {}
             for token_ids in token_ids_list:
@@ -393,7 +393,9 @@ else:
         def _cleanup_engine(self):
             """Clean up the vLLM engine and associated resources."""
             if async_engine := getattr(self, "async_llm_engine", None):
-                if self.v1:  # pragma: no cover
+                if (
+                    self.v1
+                ):  # The shutdown method is different in V1 and V0. # pragma: no cover
                     async_engine.shutdown()  # pragma: no cover
                 else:
                     async_engine.shutdown_background_loop()
