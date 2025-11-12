@@ -87,7 +87,7 @@ else:
             batch_size=5,
             timeout=0.001,
             prefill_step_size=2048,
-            max_kv_size=400,
+            cache_size=400,
         ):
             """Initialize an `AsyncMlxLM` instance.
 
@@ -100,7 +100,7 @@ else:
                     before processing a batch, even if batch_size is not met.
                 prefill_step_size (int, optional): Number of tokens to process
                     per step during prompt prefilling.
-                max_kv_size (int, optional): Maximum number of KV cache entries
+                cache_size (int, optional): Maximum number of KV cache entries
                     to keep in memory.
             """
             self.mlx_lm_model = mlx_lm_model
@@ -115,14 +115,8 @@ else:
             self.timeout = timeout
             self.timer = None
             self.prefill_step_size = prefill_step_size
-            self.max_kv_size = max_kv_size
+            self.cache_size = cache_size
             super().__init__(tokenizer=self.tokenizer)
-            print(
-                "Model is cachable: ",
-                self.kv_cachable,
-                "model is batchable: ",
-                self._batchable(self.mlx_lm_model),
-            )
 
         @staticmethod
         def _to_torch(logprobs):
@@ -173,7 +167,7 @@ else:
                 model_name (str): Name of the model to load. Can be a Hugging Face
                     model identifier or local path.
                 **kwargs: Additional arguments passed to `AsyncMlxLM` constructor,
-                    such as `batch_size`, `timeout`, `prefill_step_size`, `max_kv_size`.
+                    such as `batch_size`, `timeout`, `prefill_step_size`, `cache_size`.
 
             Returns:
                 AsyncMlxLM: An `AsyncMlxLM` instance with the loaded model and tokenizer.
@@ -273,7 +267,7 @@ else:
                 else:
                     node.extend_cache(next_token_index, token_ids, logprobs[i])
 
-            self.cache.evict_lru_kv(self.max_kv_size)
+            self.cache.evict_lru_kv(self.cache_size)
 
         def _process_kv(self, left_paddings, prompt_cache, pasts=None, step_size=256):
             """Process and integrate past KV cache states into prompt cache.
@@ -299,17 +293,14 @@ else:
             """
             if pasts is None or all(past is None for past in pasts):
                 return prompt_cache, 0
-            print("IM HERE")
-            max_match_lengths = [past.shape[3] for past in pasts]
+            max_match_lengths = [0 if past is None else past.shape[3] for past in pasts]
             min_pos_cached = min(
                 ml + lp for ml, lp in zip(max_match_lengths, left_paddings)
             )
             cache_grabs = [max(min_pos_cached - lp, 0) for lp in left_paddings]
-
             non_zero_index = next(
                 (i for i, grab in enumerate(cache_grabs) if grab), None
             )
-
             if non_zero_index is None:
                 return prompt_cache, 0
             _, num_layers, N, _, D = pasts[non_zero_index].shape
@@ -328,7 +319,6 @@ else:
                     )
 
             padded_pasts = mx.stack(padded_pasts, axis=2)
-
             for i, cache in enumerate(prompt_cache):
                 cache.keys = padded_pasts[0, i]
                 cache.values = padded_pasts[1, i]
@@ -340,7 +330,6 @@ else:
             """Process a batch of prompts and compute next-token log probabilities."""
             inputs = [q.prompt for q in queries]
             pasts = [q.past for q in queries]
-            print("PASTS")
             lengths = [len(p) for p in inputs]
             max_length = max(lengths)
             left_padding = [max_length - length for length in lengths]

@@ -7,14 +7,14 @@ from genlm.backend.llm.mlx import Query
 
 
 TOLERANCES = {
-    "yujiepan/mamba2-tiny-random": 1e-1,
+    "yujiepan/mamba2-tiny-random": 5e-2,
     "openai-community/gpt2": 1e-3,
 }
 
 
 @pytest.fixture(
     scope="module",
-    params=["yujiepan/mamba2-tiny-random", "openai-community/gpt2"],
+    params=["openai-community/gpt2", "yujiepan/mamba2-tiny-random"],
 )
 def model_name(request):
     return request.param
@@ -22,7 +22,10 @@ def model_name(request):
 
 @pytest.fixture(scope="module")
 def async_llm(model_name):
-    llm_opts = {"batch_size": 5 if model_name == "openai-community/gpt2" else 1}
+    llm_opts = {
+        "batch_size": 3 if model_name == "openai-community/gpt2" else 1,
+        "cache_size": 4,
+    }
     return load_model_by_name(model_name, backend="mlx", llm_opts=llm_opts)
 
 
@@ -243,13 +246,14 @@ def test_caching(async_llm):
     assert torch.allclose(have, want)
 
 
-def test_mlx_prefix_caching(async_llm, model_name, token_ids_list):
+@pytest.mark.asyncio
+async def test_mlx_prefix_caching(async_llm, model_name, token_ids_list):
     if model_name == "yujiepan/mamba2-tiny-random":
         pytest.skip("This model does not support prefix caching")
     want = async_llm.batch_next_token_logprobs_sync(token_ids_list)
     async_llm.clear_cache()
-    async_llm.cache_kv(token_ids_list[0])
+    async_llm.cache_kv(token_ids_list[0][:4])
     _, _, _, _, kv_next_token_index = async_llm.walk_cache(token_ids_list[0])
-    assert kv_next_token_index == len(token_ids_list[0]) - 1
-    have = asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list))
+    assert kv_next_token_index == 4
+    have = await async_llm.batch_next_token_logprobs(token_ids_list)
     assert torch.allclose(have, want)
