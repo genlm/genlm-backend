@@ -117,17 +117,19 @@ else:
             self.prefill_step_size = prefill_step_size
             self.max_kv_size = max_kv_size
             super().__init__(tokenizer=self.tokenizer)
+            print(
+                "Model is cachable: ",
+                self.kv_cachable,
+                "model is batchable: ",
+                self._batchable(self.mlx_lm_model),
+            )
 
         @staticmethod
         def _to_torch(logprobs):
             """Convert MLX arrays into PyTorch tensors."""
-            if isinstance(logprobs, mx.array):
-                if logprobs.dtype in [mx.bfloat16]:
-                    logprobs = logprobs.astype(mx.float16)
-                return torch.tensor(logprobs)
-            elif isinstance(logprobs, (list, tuple)):
-                return [AsyncMlxLM._to_torch(lp) for lp in logprobs]
-            return logprobs
+            if logprobs.dtype in [mx.bfloat16]:
+                logprobs = logprobs.astype(mx.float16)
+            return torch.tensor(logprobs)
 
         @staticmethod
         def _batchable(mlx_lm_model):
@@ -297,6 +299,7 @@ else:
             """
             if pasts is None or all(past is None for past in pasts):
                 return prompt_cache, 0
+            print("IM HERE")
             max_match_lengths = [past.shape[3] for past in pasts]
             min_pos_cached = min(
                 ml + lp for ml, lp in zip(max_match_lengths, left_paddings)
@@ -337,6 +340,7 @@ else:
             """Process a batch of prompts and compute next-token log probabilities."""
             inputs = [q.prompt for q in queries]
             pasts = [q.past for q in queries]
+            print("PASTS")
             lengths = [len(p) for p in inputs]
             max_length = max(lengths)
             left_padding = [max_length - length for length in lengths]

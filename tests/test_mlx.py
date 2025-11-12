@@ -243,11 +243,13 @@ def test_caching(async_llm):
     assert torch.allclose(have, want)
 
 
-def test_mlx_prefix_caching(async_llm, model_name):
+def test_mlx_prefix_caching(async_llm, model_name, token_ids_list):
     if model_name == "yujiepan/mamba2-tiny-random":
         pytest.skip("This model does not support prefix caching")
+    want = async_llm.batch_next_token_logprobs_sync(token_ids_list)
     async_llm.clear_cache()
-    test_prompt = async_llm.tokenizer.encode("Test prefix caching")
-    async_llm.cache_kv(test_prompt)
-    _, _, _, _, kv_next_token_index = async_llm.walk_cache(test_prompt)
-    assert kv_next_token_index == len(test_prompt) - 1
+    async_llm.cache_kv(token_ids_list[0])
+    _, _, _, _, kv_next_token_index = async_llm.walk_cache(token_ids_list[0])
+    assert kv_next_token_index == len(token_ids_list[0]) - 1
+    have = asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list))
+    assert torch.allclose(have, want)
