@@ -131,7 +131,7 @@ class DynamicTokenTrie(TokenTrie):
         return self.children[token_id]
 
     def store_kv(self, past_key_values):
-        """Store KV states on this node. KV should be list[(K, V), ...] without batch dimension."""
+        """Store KV states on this node."""
         if self.past_key_values is not None or past_key_values is None:
             return
         self.past_key_values = past_key_values

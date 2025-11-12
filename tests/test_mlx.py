@@ -46,7 +46,7 @@ def reference_llm(model_name):
 @pytest.fixture(scope="module")
 def token_ids_list(async_llm):
     test_prompts = [
-        "There might be something wrong",
+        "There might be something wrong, it may be because ",
         "with the language model code",
         "It's probably this or that",
         "with the language model code",  # Check duplicate query logic
@@ -246,14 +246,17 @@ def test_caching(async_llm):
     assert torch.allclose(have, want)
 
 
-@pytest.mark.asyncio
-async def test_mlx_prefix_caching(async_llm, model_name, token_ids_list):
+def test_mlx_prefix_caching(async_llm, model_name, token_ids_list):
     if model_name == "yujiepan/mamba2-tiny-random":
         pytest.skip("This model does not support prefix caching")
-    want = async_llm.batch_next_token_logprobs_sync(token_ids_list)
+    want_1 = async_llm.batch_next_token_logprobs_sync(token_ids_list)
+    token_ids_list_modified = [token_ids + [100] for token_ids in token_ids_list]
+    want_2 = async_llm.batch_next_token_logprobs_sync(token_ids_list_modified)
     async_llm.clear_cache()
     async_llm.cache_kv(token_ids_list[0][:4])
     _, _, _, _, kv_next_token_index = async_llm.walk_cache(token_ids_list[0])
     assert kv_next_token_index == 4
-    have = await async_llm.batch_next_token_logprobs(token_ids_list)
-    assert torch.allclose(have, want)
+    have_1 = asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list))
+    assert torch.allclose(have_1, want_1)
+    have_2 = asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list_modified))
+    assert torch.allclose(have_2, want_2)
