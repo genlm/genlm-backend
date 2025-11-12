@@ -232,8 +232,7 @@ else:
 
         def cache_kv(self, token_ids):
             """Pre-compute and cache KV states for a given token sequence."""
-            future = asyncio.get_running_loop().create_future()
-            query = Query(token_ids, future, None, self.cache, 0)
+            query = Query(token_ids, None, None, self.cache, 0)
             self._batch_logits_custom([query])
 
         def reset_async_queries(self):

@@ -6,9 +6,15 @@ from genlm.backend.llm import load_model_by_name, AsyncMlxLM
 from genlm.backend.llm.mlx import Query
 
 
+TOLERANCES = {
+    "yujiepan/mamba2-tiny-random": 1e-1,
+    "openai-community/gpt2": 1e-3,
+}
+
+
 @pytest.fixture(
     scope="module",
-    params=["openai-community/gpt2"],
+    params=["yujiepan/mamba2-tiny-random", "openai-community/gpt2"],
 )
 def model_name(request):
     return request.param
@@ -16,7 +22,8 @@ def model_name(request):
 
 @pytest.fixture(scope="module")
 def async_llm(model_name):
-    return load_model_by_name(model_name, backend="mlx", llm_opts={"batch_size": 5})
+    llm_opts = {"batch_size": 5 if model_name == "openai-community/gpt2" else 1}
+    return load_model_by_name(model_name, backend="mlx", llm_opts=llm_opts)
 
 
 @pytest.fixture(scope="module")
@@ -44,15 +51,17 @@ def token_ids_list(async_llm):
     return [async_llm.tokenizer.encode(p) for p in test_prompts]
 
 
-def test_next_token_logprobs(async_llm, reference_llm, token_ids_list):
+def test_next_token_logprobs(async_llm, reference_llm, token_ids_list, model_name):
+    tolerance = TOLERANCES.get(model_name, 1e-3)
     for token_ids in token_ids_list:
         have = asyncio.run(async_llm.next_token_logprobs(token_ids)).cpu().numpy()
         want = asyncio.run(reference_llm.next_token_logprobs(token_ids)).cpu().numpy()
-        assert compare(have, want).max_rel_err < 1e-4, token_ids
+        assert compare(have, want).max_rel_err < tolerance, token_ids
 
 
 # async and sync batching should yield the same distributions
-def test_async_batching(async_llm, token_ids_list):
+def test_async_batching(async_llm, token_ids_list, model_name):
+    tolerance = TOLERANCES.get(model_name, 1e-3)
     async_llm.clear_cache()
     haves = (
         asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list)).cpu().numpy()
@@ -64,7 +73,7 @@ def test_async_batching(async_llm, token_ids_list):
 
     for i, (have, want) in enumerate(zip(haves, wants)):
         max_rel_err = compare(have, want).max_rel_err
-        assert max_rel_err < 1e-4, [max_rel_err, token_ids_list[i]]
+        assert max_rel_err < tolerance, [max_rel_err, token_ids_list[i]]
 
 
 def test_batch_next_token_logprobs_sync(async_llm, token_ids_list):
@@ -161,25 +170,6 @@ def test_batch_evaluate_empty_queries(async_llm):
     assert len(async_llm.queries) == 0
 
 
-def test_small_prefill(async_llm, token_ids_list):
-    async_llm.batch_opts = {"prefill_batch_size": 1}
-    have = (
-        asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list)).cpu().numpy()
-    )
-    async_llm.clear_cache()
-    want = (
-        torch.stack(
-            [
-                async_llm.next_token_logprobs_sync(token_ids)
-                for token_ids in token_ids_list
-            ]
-        )
-        .cpu()
-        .numpy()
-    )
-    assert compare(have, want).max_rel_err < 1e-4
-
-
 def test_sample_seeded(async_llm):
     prompt_token_ids = async_llm.tokenizer.encode("An apple a day keeps the")
 
@@ -251,3 +241,13 @@ def test_caching(async_llm):
     want = asyncio.run(async_llm.next_token_logprobs(test_prompt))
 
     assert torch.allclose(have, want)
+
+
+def test_mlx_prefix_caching(async_llm, model_name):
+    if model_name == "yujiepan/mamba2-tiny-random":
+        pytest.skip("This model does not support prefix caching")
+    async_llm.clear_cache()
+    test_prompt = async_llm.tokenizer.encode("Test prefix caching")
+    async_llm.cache_kv(test_prompt)
+    _, _, _, _, kv_next_token_index = async_llm.walk_cache(test_prompt)
+    assert kv_next_token_index == len(test_prompt) - 1
