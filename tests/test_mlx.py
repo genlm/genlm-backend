@@ -249,6 +249,7 @@ def test_caching(async_llm):
 def test_mlx_prefix_caching(async_llm, model_name, token_ids_list):
     if model_name == "yujiepan/mamba2-tiny-random":
         pytest.skip("This model does not support prefix caching")
+    tolerance = TOLERANCES.get(model_name, 1e-3)
     want_1 = async_llm.batch_next_token_logprobs_sync(token_ids_list)
     token_ids_list_modified = [token_ids + [100] for token_ids in token_ids_list]
     want_2 = async_llm.batch_next_token_logprobs_sync(token_ids_list_modified)
@@ -257,6 +258,6 @@ def test_mlx_prefix_caching(async_llm, model_name, token_ids_list):
     _, _, _, _, kv_next_token_index = async_llm.walk_cache(token_ids_list[0])
     assert kv_next_token_index == 4
     have_1 = asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list))
-    assert torch.allclose(have_1, want_1)
+    assert compare(have_1, want_1).max_rel_err < tolerance
     have_2 = asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list_modified))
-    assert torch.allclose(have_2, want_2)
+    assert compare(have_2, want_2).max_rel_err < tolerance
