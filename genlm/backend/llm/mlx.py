@@ -306,7 +306,7 @@ else:
             _, num_layers, N, _, D = pasts[non_zero_index].shape
             cache_size = (step_size + min_pos_cached - 1) // step_size * step_size
             right_paddings = [
-                cache_size - lp - max_len
+                max(cache_size - lp - max_len, 0)
                 for lp, max_len in zip(left_paddings, max_match_lengths)
             ]
             padded_pasts = []
@@ -315,7 +315,10 @@ else:
                     padded_pasts.append(mx.zeros((2, num_layers, N, cache_size, D)))
                 else:
                     padded_pasts.append(
-                        mx.pad(past, ((0, 0), (0, 0), (0, 0), (lp, rp), (0, 0)))
+                        mx.pad(
+                            past[:, :, :, : cache_size - lp, :],
+                            ((0, 0), (0, 0), (0, 0), (lp, rp), (0, 0)),
+                        )
                     )
 
             padded_pasts = mx.stack(padded_pasts, axis=2)

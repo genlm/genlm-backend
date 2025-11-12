@@ -31,6 +31,7 @@ def load_model(model, batch_size=None):
     "model",
     [
         "mlx",
+        "hf",
     ],
 )
 def test_await_next_token_logprobs(benchmark, model):
@@ -43,6 +44,7 @@ def test_await_next_token_logprobs(benchmark, model):
     "model",
     [
         "mlx",
+        "hf",
     ],
 )
 def test_await_batch_next_token_logprobs(benchmark, model, batch_size=5):
