@@ -9,7 +9,7 @@ authors = [
 ]
 dependencies = [
     "torch",
-    "transformers",
+    "transformers>=4.36.0",
     "sentencepiece",
     "protobuf",
     "accelerate",

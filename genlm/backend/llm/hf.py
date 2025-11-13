@@ -5,6 +5,7 @@ import torch
 from transformers import AutoModelForCausalLM
 from transformers import AutoTokenizer
 from transformers import BitsAndBytesConfig
+from transformers import DynamicCache
 
 from genlm.backend.cache import TokenTrie
 from genlm.backend.llm.base import AsyncLM
@@ -232,6 +233,8 @@ class AsyncTransformer(AsyncLM):
             ]
         else:
             pasts = None
+
+        pasts = DynamicCache.from_legacy_cache(pasts)
 
         results = self.model(
             input_ids,

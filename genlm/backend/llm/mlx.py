@@ -1,8 +1,10 @@
 import asyncio
+import warnings
 from genlm.backend.llm.base import AsyncLM
 from genlm.backend.cache import DynamicTokenTrie
 from collections import defaultdict
 import torch
+from dataclasses import dataclass
 
 
 try:
@@ -47,6 +49,7 @@ if not HAS_MLX:
 
 else:
 
+    @dataclass
     class Query:
         """A query to a language model, waiting to be batched.
 
@@ -56,18 +59,17 @@ else:
                 the query is processed.
             past (mx.array, optional): Past key-value cache states from
                 previous computations. Defaults to None.
-            node (CacheNode, optional): The cache node where this query
+            node (DynamicTokenTrie, optional): The cache node where this query
                 should be stored. Defaults to None.
             next_token_index (int, optional): The index in the prompt where
                 new tokens start (after cached prefix). Defaults to None.
         """
 
-        def __init__(self, prompt, future, past=None, node=None, next_token_index=None):
-            self.prompt = prompt
-            self.future = future
-            self.past = past
-            self.node = node
-            self.next_token_index = next_token_index
+        prompt: list[int]
+        future: asyncio.Future
+        past: mx.array | None = None
+        node: DynamicTokenTrie | None = None
+        next_token_index: int | None = None
 
     class AsyncMlxLM(AsyncLM):
         """Asynchronous MLX-based language model wrapper.
@@ -108,20 +110,51 @@ else:
             self.cache = DynamicTokenTrie()
             self.generation_stream = mx.new_stream(mx.default_device())
             self.queries = []
-            self.batch_size = (
-                1 if not self._batchable(self.mlx_lm_model) else batch_size
-            )
-            self.kv_cachable = self._kv_cachable(self.mlx_lm_model)
             self.timeout = timeout
             self.timer = None
             self.prefill_step_size = prefill_step_size
             self.cache_size = cache_size
+
+            batchable = self._batchable(self.mlx_lm_model)
+            self.batch_size = 1 if not batchable else batch_size
+            self.kv_cachable = self._kv_cachable(self.mlx_lm_model)
+            if not batchable:
+                warnings.warn(
+                    f"Model {type(self.mlx_lm_model).__name__} is not batchable; "
+                    f"falling back to batch_size = 1.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            if not self.kv_cachable:
+                warnings.warn(
+                    f"Model {type(self.mlx_lm_model).__name__} does not support KV caching; "
+                    f"prefix caching will be disabled.",
+                    UserWarning,
+                    stacklevel=2,
+                )
             super().__init__(tokenizer=self.tokenizer)
+
+        @classmethod
+        def from_name(cls, model_name, **kwargs):
+            """Create an `AsyncMlxLM` instance from a model name.
+
+            Args:
+                model_name (str): Name of the model to load. Can be a Hugging Face
+                    model identifier or local path.
+                **kwargs: Additional arguments passed to `AsyncMlxLM` constructor,
+                    such as `batch_size`, `timeout`, `prefill_step_size`, `cache_size`.
+
+            Returns:
+                AsyncMlxLM: An `AsyncMlxLM` instance with the loaded model and tokenizer.
+            """
+
+            model, tokenizer = mlx_lm.load(model_name)
+            return cls(model, tokenizer, **kwargs)
 
         @staticmethod
         def _to_torch(logprobs):
             """Convert MLX arrays into PyTorch tensors."""
-            if logprobs.dtype in [mx.bfloat16]:
+            if logprobs.dtype is mx.bfloat16:
                 logprobs = logprobs.astype(mx.float16)
             return torch.tensor(logprobs)
 
@@ -158,23 +191,6 @@ else:
                 or (isinstance(c, RotatingKVCache) and c.keep == 0)
                 for c in cache
             )
-
-        @classmethod
-        def from_name(cls, model_name, **kwargs):
-            """Create an `AsyncMlxLM` instance from a model name.
-
-            Args:
-                model_name (str): Name of the model to load. Can be a Hugging Face
-                    model identifier or local path.
-                **kwargs: Additional arguments passed to `AsyncMlxLM` constructor,
-                    such as `batch_size`, `timeout`, `prefill_step_size`, `cache_size`.
-
-            Returns:
-                AsyncMlxLM: An `AsyncMlxLM` instance with the loaded model and tokenizer.
-            """
-
-            model, tokenizer = mlx_lm.load(model_name)
-            return cls(model, tokenizer, **kwargs)
 
         def clear_cache(self):
             """Clear the output cache and MLX device cache.
