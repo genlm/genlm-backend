@@ -144,7 +144,7 @@ else:
         @staticmethod
         def _to_torch(logprobs):
             """Convert MLX arrays into PyTorch tensors."""
-            if logprobs.dtype is mx.bfloat16:
+            if logprobs.dtype == mx.bfloat16:
                 logprobs = logprobs.astype(mx.float16)
             return torch.tensor(logprobs)
 
