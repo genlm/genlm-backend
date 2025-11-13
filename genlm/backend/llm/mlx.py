@@ -18,8 +18,6 @@ try:
     import mlx.core as mx
     from mlx_lm.sample_utils import make_sampler
     from mlx_lm.models.cache import (
-        ArraysCache,
-        CacheList,
         KVCache,
         RotatingKVCache,
     )
@@ -115,16 +113,8 @@ else:
             self.prefill_step_size = prefill_step_size
             self.cache_size = cache_size
 
-            batchable = self._batchable(self.mlx_lm_model)
-            self.batch_size = 1 if not batchable else batch_size
+            self.batch_size = batch_size
             self.kv_cachable = self._kv_cachable(self.mlx_lm_model)
-            if not batchable:
-                warnings.warn(
-                    f"Model {type(self.mlx_lm_model).__name__} is not batchable; "
-                    f"falling back to batch_size = 1.",
-                    UserWarning,
-                    stacklevel=2,
-                )
             if not self.kv_cachable:
                 warnings.warn(
                     f"Model {type(self.mlx_lm_model).__name__} does not support KV caching; "
@@ -157,24 +147,6 @@ else:
             if logprobs.dtype is mx.bfloat16:
                 logprobs = logprobs.astype(mx.float16)
             return torch.tensor(logprobs)
-
-        @staticmethod
-        def _batchable(mlx_lm_model):
-            """Check if an MLX model supports batching.
-
-            A model is batchable if all its cache layers are of types that support
-            batching (CacheList, KVCache, ArraysCache) or are RotatingKVCache with
-            keep=0.
-            """
-            if not hasattr(mlx_lm_model, "make_cache"):
-                return True
-            cache = mlx_lm_model.make_cache()
-            batchable = (CacheList, KVCache, ArraysCache)
-            return all(
-                isinstance(c, batchable)
-                or (isinstance(c, RotatingKVCache) and c.keep == 0)
-                for c in cache
-            )
 
         @staticmethod
         def _kv_cachable(mlx_lm_model):
