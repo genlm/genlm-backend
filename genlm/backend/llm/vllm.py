@@ -128,7 +128,7 @@ else:
         def underlying_model(self):
             return self.async_llm_engine.engine.model_executor.driver_worker.model_runner.model
 
-        async def next_token_logprobs(self, token_ids):
+        async def next_token_logprobs(self, token_ids, lora_request=None):
             """Request log probabilities of next token asynchronously with output caching.
 
             Args:
@@ -146,14 +146,14 @@ else:
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
 
-            result = await self._next_token_logprobs(key)
+            result = await self._next_token_logprobs(key, lora_request)
 
             if self.cache is not None:
                 self.cache[key] = result
 
             return result
 
-        async def _next_token_logprobs(self, token_ids):
+        async def _next_token_logprobs(self, token_ids, lora_request=None):
             """Request log probabilities of next token asynchronously.
 
             Args:
@@ -172,6 +172,7 @@ else:
                 sampling_params=SamplingParams(
                     **self.default_params, logits_processors=[processor]
                 ),
+                lora_request=lora_request,
                 request_id=req_id,
             ):
                 if output.finished:
@@ -182,7 +183,7 @@ else:
             )
             return processor.log_probs
 
-        def next_token_logprobs_sync(self, token_ids):
+        def next_token_logprobs_sync(self, token_ids, lora_request=None):
             """Request log probabilities of next token synchronously.
 
             Args:
@@ -191,9 +192,9 @@ else:
             Returns:
                 (torch.Tensor): Normalized log probability tensor.
             """
-            return self.batch_next_token_logprobs_sync([token_ids])[0]
+            return self.batch_next_token_logprobs_sync([token_ids],lora_request)[0]
 
-        def batch_next_token_logprobs_sync(self, token_ids_list):
+        def batch_next_token_logprobs_sync(self, token_ids_list, lora_request=None):
             """
             Request log probabilities of next tokens in a batch synchronously.
 
@@ -215,6 +216,7 @@ else:
                     params=SamplingParams(
                         **self.default_params, logits_processors=[processor]
                     ),
+                    lora_request=lora_request,
                     request_id=req_id,
                 )
 
@@ -253,6 +255,7 @@ else:
             eos_token_ids,
             temperature=1.0,
             seed=None,
+            lora_request=None,
         ):
             """Sample from the language model.
 
@@ -275,6 +278,7 @@ else:
                     seed=seed,
                     stop=[self.byte_vocab[i].decode() for i in eos_token_ids],
                 ),
+                lora_request=lora_request,
                 request_id=str(next(self.request_counter)),
             ):
                 if output.finished:

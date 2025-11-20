@@ -158,11 +158,12 @@ class ReferenceVirtualLM:
         llm = LLM(model=model_name, tokenizer=model_name, **llm_opts)
         return cls(llm)
 
-    def next_token_logprobs_sync(self, token_ids):
+    def next_token_logprobs_sync(self, token_ids, lora_request=None):
         outputs = self.llm.generate(
             prompts=TokensPrompt(prompt_token_ids=token_ids),
             sampling_params=self.DEFAULT_SAMPLING_PARAMS,
             use_tqdm=False,
+            lora_request=lora_request
         )
         logprobs = np.array(
             [
@@ -172,11 +173,11 @@ class ReferenceVirtualLM:
         )
         return logprobs
 
-    async def next_token_logprobs(self, token_ids):
+    async def next_token_logprobs(self, token_ids, lora_request=None):
         # Note: async method only to support protocol, actual implementation is synchronous
-        return self.next_token_logprobs_sync(token_ids)
+        return self.next_token_logprobs_sync(token_ids, lora_request)
 
-    async def batch_next_token_logprobs(self, token_ids_list):
+    async def batch_next_token_logprobs(self, token_ids_list, lora_request=None):
         # Note: async method only to support protocol, actual implementation is synchronous
         prompts = [
             TokensPrompt(prompt_token_ids=token_ids) for token_ids in token_ids_list
@@ -185,6 +186,7 @@ class ReferenceVirtualLM:
             prompts=prompts,
             sampling_params=self.DEFAULT_SAMPLING_PARAMS,
             use_tqdm=False,
+            lora_request=lora_request
         )
         logprobs = np.array(
             [
