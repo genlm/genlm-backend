@@ -7,6 +7,11 @@ from genlm.backend.llm import load_model_by_name, MockAsyncLM, AsyncVirtualLM
 import numpy as np
 from vllm.lora.request import LoRARequest
 
+# TODO change hf backend
+# TODO: pass the lora path in vllm instead of full lora request by the user?
+# TODO: sometimed the tests are failing because of precision issues 
+# (the finetuned model with lora was trained with bfloat16) --> what should I do with that?
+
 @pytest.fixture(scope="module")
 def model_name():
     return "meta-llama/Llama-3.2-1B"
@@ -59,13 +64,15 @@ def test_next_token_logprobs(async_llm, reference_llm, token_ids_list, enable_lo
         lora_request = LoRARequest("sql_adapter", 1, '../../lora_adapter_toy')
         for token_ids in token_ids_list:
             logits_async = asyncio.run(async_llm.next_token_logprobs(token_ids, lora_request)).cpu().numpy()
+            # logits_async = logits_async.astype(np.float32)
+
             logits_ref = asyncio.run(reference_llm.next_token_logprobs(token_ids, lora_request))
        
             async_vocab = logits_async.shape[0]
             ref_vocab = logits_ref.shape[0]
         
             assert async_vocab == ref_vocab + 256, [
-                "Unexpected vocab mismatch. Async has 256 more tokens.",
+                "Unexpected vocab mismatch. Async must have 256 more tokens.",
                 async_vocab,
                 ref_vocab,
             ]
@@ -90,13 +97,15 @@ def test_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list, enab
         lora_request = LoRARequest("sql_adapter", 1, '../../lora_adapter_toy')
         for token_ids in token_ids_list:
             logits_async = asyncio.run(async_llm.next_token_logprobs(token_ids, lora_request)).cpu().numpy()
+            # logits_async = logits_async.astype(np.float32)
+
             logits_ref = asyncio.run(reference_llm.next_token_logprobs(token_ids, lora_request))
        
             async_vocab = logits_async.shape[0]
             ref_vocab = logits_ref.shape[0]
         
             assert async_vocab == ref_vocab + 256, [
-                "Unexpected vocab mismatch. Async has 256 more tokens because lora_extra_vocab_size=256.",
+                "Unexpected vocab mismatch. Async must have 256 more tokens because lora_extra_vocab_size=256.",
                 async_vocab,
                 ref_vocab,
             ]
@@ -115,39 +124,78 @@ def test_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list, enab
             want = asyncio.run(reference_llm.next_token_logprobs(token_ids))
             assert compare(have, want).max_rel_err < 1e-3, token_ids
 
-# @cuda_only
-# def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list):
-#     # Test 1: Regular sync context
-#     if enable_lora:
-#         lora_request = LoRARequest("sql_adapter", 1, '../../lora_adapter_toy')
-#         logits_async = (asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list, lora_request)).cpu().numpy())
-#         logits_ref = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list, lora_request))
-#         print(logits_async.shape)
-#         print(logits_ref.shape)
-#         async_vocab = logits_async.shape[0]
-#         ref_vocab = logits_ref.shape[0]
+@cuda_only
+def test_batch_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list, enable_lora):
+    # Test 1: Regular sync context
+    if enable_lora:
+        lora_request = LoRARequest("sql_adapter", 1, '../../lora_adapter_toy')
+        logits_async = async_llm.batch_next_token_logprobs_sync(token_ids_list, lora_request).cpu().numpy()
+        # logits_async = logits_async.astype(np.float32)
+
+        logits_ref = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list, lora_request))
+
+        async_vocab = logits_async.shape[1]
+        ref_vocab = logits_ref.shape[1]
         
-#         assert async_vocab == ref_vocab + 256, [
-#             "Unexpected vocab mismatch. Async has 256 more tokens.",
-#             async_vocab,
-#             ref_vocab,
-#         ]
-#         extra_logits = logits_async[-256:]
-#         assert np.all(np.isneginf(extra_logits)), (
-#             "Async extra logits are all -inf",
-#             extra_logits,
-#         )
-#         trimmed_async = logits_async[:ref_vocab]
-#         assert trimmed_async.shape == logits_ref.shape
+        assert async_vocab == ref_vocab + 256, [
+            "Unexpected vocab mismatch. Async must have 256 more tokens.",
+            async_vocab,
+            ref_vocab,
+        ]
+    
+        for logits in logits_async:
+            extra_logits = logits[-256:]
+            assert np.all(np.isneginf(extra_logits)), (
+                "Async extra logits are all -inf",
+                extra_logits,
+            )
+        trimmed_async = logits_async[:,:ref_vocab]
+        assert trimmed_async.shape == logits_ref.shape
+        for i, (logit_async, logit_ref) in enumerate(zip(trimmed_async, logits_ref)):
+            assert compare(logit_async, logit_ref).max_rel_err < 1e-3, token_ids_list[i]
+    else:
+        haves = async_llm.batch_next_token_logprobs_sync(token_ids_list).cpu().numpy()
+        wants = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
+        for i, (have, want) in enumerate(zip(haves, wants)):
+            assert compare(have, want).max_rel_err < 1e-3, token_ids_list[i]
 
-#         assert compare(trimmed_async, logits_ref).max_rel_err < 1e-3, token_ids
-#     else:
-#         haves = async_llm.batch_next_token_logprobs_sync(token_ids_list).cpu().numpy()
-#         wants = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
-#         for have, want in zip(haves, wants):
-#             assert compare(have, want).max_rel_err < 1e-3, "Sync context"
+@cuda_only
+def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list, enable_lora):
+    if enable_lora:
+        lora_request = LoRARequest("sql_adapter", 1, '../../lora_adapter_toy')
+        logits_async = (
+            asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list, lora_request)).cpu().numpy()
+        )
+        # logits_async = logits_async.astype(np.float32)
 
-# TODO: add check for batched
+        logits_ref = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list, lora_request))
+
+        async_vocab = logits_async.shape[1]
+        ref_vocab = logits_ref.shape[1]
+        
+        assert async_vocab == ref_vocab + 256, [
+            "Unexpected vocab mismatch. Async must have 256 more tokens.",
+            async_vocab,
+            ref_vocab,
+        ]
+        for logits in logits_async:
+            extra_logits = logits[-256:]
+            assert np.all(np.isneginf(extra_logits)), (
+                "Async extra logits are all -inf",
+                extra_logits,
+            )
+        trimmed_async = logits_async[:,:ref_vocab]
+        assert trimmed_async.shape == logits_ref.shape
+        for i, (logit_async, logit_ref) in enumerate(zip(trimmed_async, logits_ref)):
+            assert compare(logit_async, logit_ref).max_rel_err < 1e-3, token_ids_list[i]
+    else:
+        haves = logits_async = (
+            asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list)).cpu().numpy()
+        )
+        wants = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
+        for i, (have, want) in enumerate(zip(haves, wants)):
+            assert compare(have, want).max_rel_err < 1e-3, token_ids_list[i]
+
 @cuda_only
 def test_async_llm_lora_vs_nolora_enable_no_request(model_name, token_ids_list, enable_lora):
     if enable_lora:
@@ -172,13 +220,13 @@ def test_async_llm_lora_vs_nolora_enable_no_request(model_name, token_ids_list, 
             lora_vocab = logits_lora.shape[0]
         
             assert lora_vocab == nolora_vocab + 256, [
-                "Unexpected vocab mismatch. Async has 256 more tokens.",
+                "Unexpected vocab mismatch. Lora enabled must have 256 more tokens.",
                 nolora_vocab,
                 lora_vocab,
             ]
             extra_logits = logits_lora[-256:]
             assert np.all(np.isneginf(extra_logits)), (
-                "Async extra logits are all -inf",
+                "Lora enabled extra logits are all -inf",
                 extra_logits,
             )
             trimmed_lora = logits_lora[:nolora_vocab]
@@ -194,17 +242,65 @@ def test_async_llm_lora_vs_nolora_enable_no_request(model_name, token_ids_list, 
             lora_vocab = logits_lora.shape[0]
         
             assert lora_vocab == nolora_vocab + 256, [
-                "Unexpected vocab mismatch. Async has 256 more tokens.",
+                "Unexpected vocab mismatch. Lora enabled must have 256 more tokens.",
                 nolora_vocab,
                 lora_vocab,
             ]
             extra_logits = logits_lora[-256:]
             assert np.all(np.isneginf(extra_logits)), (
-                "Async extra logits are all -inf",
+                "Lora enabled extra logits are all -inf",
                 extra_logits,
             )
             trimmed_lora = logits_lora[:nolora_vocab]
             assert trimmed_lora.shape == logits_nolora.shape
             assert compare(logits_nolora, trimmed_lora).max_rel_err < 1e-3, token_ids
+
+        logits_nolora = async_nolora.batch_next_token_logprobs_sync(token_ids_list).cpu().numpy()
+        logits_lora = async_lora.batch_next_token_logprobs_sync(token_ids_list).cpu().numpy()
+
+        nolora_vocab = logits_nolora.shape[1]
+        lora_vocab = logits_lora.shape[1]
         
-# TODO check with transformers (hugging face)
+        assert lora_vocab == nolora_vocab + 256, [
+            "Unexpected vocab mismatch. Async must have 256 more tokens.",
+            nolora_vocab,
+            lora_vocab,
+        ]
+    
+        for logits in logits_lora:
+            extra_logits = logits[-256:]
+            assert np.all(np.isneginf(extra_logits)), (
+                "Lora enabled extra logits are all -inf",
+                extra_logits,
+            )
+        trimmed_lora = logits_lora[:,:nolora_vocab]
+        assert trimmed_lora.shape == logits_nolora.shape
+        for i, (logit_lora, logit_nolora) in enumerate(zip(trimmed_async, logits_nolora)):
+            assert compare(logit_lora, logit_nolora).max_rel_err < 1e-3, token_ids_list[i]
+        
+        logits_lora = (
+            asyncio.run(async_nolora.batch_next_token_logprobs(token_ids_list, lora_request)).cpu().numpy()
+        )
+        logits_nolora = (
+            asyncio.run(async_lora.batch_next_token_logprobs(token_ids_list, lora_request)).cpu().numpy()
+        )
+
+        lora_vocab = logits_lora.shape[1]
+        nolora_vocab = logits_nolora.shape[1]
+        
+        assert lora_vocab == nolora_vocab + 256, [
+            "Unexpected vocab mismatch. Async must have 256 more tokens.",
+            lora_vocab,
+            nolora_vocab,
+        ]
+        for logits in logits_lora:
+            extra_logits = logits[-256:]
+            assert np.all(np.isneginf(extra_logits)), (
+                "Lora extra logits are all -inf",
+                extra_logits,
+            )
+        trimmed_lora = logits_lora[:,:nolora_vocab]
+        assert trimmed_lora.shape == logits_nolora.shape
+        for i, (logit_lora, logit_nolora) in enumerate(zip(trimmed_lora, logits_nolora)):
+            assert compare(logit_lora, logit_nolora).max_rel_err < 1e-3, token_ids_list[i]
+        
