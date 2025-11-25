@@ -9,30 +9,6 @@ from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import AutoTokenizer
 
-# model_id = "meta-llama/Llama-3.2-1B"
-# bnb_config = None
-# _hf_opts = {
-#     "device_map": "auto",
-#     "torch_dtype": "auto",
-#     }
-
-# hf_opts={"torch_dtype": torch.float32}
-# if hf_opts:
-#     _hf_opts.update(hf_opts)
-
-# tok = AutoTokenizer.from_pretrained(model_id)
-# mod = AutoModelForCausalLM.from_pretrained(
-#     model_id, quantization_config=bnb_config, **_hf_opts
-#     )
-# model = PeftModel.from_pretrained(
-#     mod,
-#     "../../lora_adapter_toy",
-# )
-# model = model.merge_and_unload()
-# model.save_pretrained("../../merged_model")
-# tok.save_pretrained("../../merged_model")
-
-
 @pytest.fixture(scope="module")
 def model_name():
     return "meta-llama/Llama-3.2-1B"
@@ -129,7 +105,6 @@ def test_batch_token_logprobs_lora_sync(transformer_llm, transformer_merged_llm,
 
 @cuda_only 
 def test_set_disable_swap(transformer_llm, token_ids_list, transformer_llm_nolora):
-    # swap between enabling and disabling lora
     lora_logprobs_noswapped = []
     nolora_logprobs_noswapped = []
     for token_ids in token_ids_list:
@@ -151,7 +126,6 @@ def test_set_disable_swap(transformer_llm, token_ids_list, transformer_llm_nolor
 
 @cuda_only 
 def test_set_disable_swap_unchached(transformer_llm, token_ids_list, transformer_llm_nolora):
-    # swap between enabling and disabling lora
     lora_logprobs_noswapped = []
     nolora_logprobs_noswapped = []
     for token_ids in token_ids_list:
@@ -174,7 +148,6 @@ def test_set_disable_swap_unchached(transformer_llm, token_ids_list, transformer
 
 @cuda_only 
 def test_set_disable_swap_sync(transformer_llm, token_ids_list, transformer_llm_nolora):
-    # swap between enabling and disabling lora
     lora_logprobs_noswapped = [transformer_llm.next_token_logprobs_sync(token_ids).cpu().numpy() for token_ids in token_ids_list]
     nolora_logprobs_noswapped = [transformer_llm_nolora.next_token_logprobs_sync(token_ids).cpu().numpy() for token_ids in token_ids_list]
         
@@ -194,7 +167,6 @@ def test_set_disable_swap_sync(transformer_llm, token_ids_list, transformer_llm_
 
 @cuda_only 
 def test_set_disable_swap_batch(transformer_llm, token_ids_list, transformer_llm_nolora):
-    # swap between enabling and disabling lora
     lora_logprobs_noswapped = (
         asyncio.run(transformer_llm.batch_next_token_logprobs(token_ids_list)).cpu().numpy()
         )
@@ -219,7 +191,6 @@ def test_set_disable_swap_batch(transformer_llm, token_ids_list, transformer_llm
 
 @cuda_only 
 def test_set_disable_swap_batch_sync(transformer_llm, token_ids_list, transformer_llm_nolora):
-    # swap between enabling and disabling lora
     lora_logprobs_noswapped = transformer_llm.batch_next_token_logprobs_sync(token_ids_list).cpu().numpy()
     nolora_logprobs_noswapped = transformer_llm_nolora.batch_next_token_logprobs_sync(token_ids_list).cpu().numpy()
     
