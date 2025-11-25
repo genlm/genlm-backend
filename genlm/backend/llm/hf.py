@@ -9,7 +9,6 @@ from transformers import DynamicCache
 
 from genlm.backend.cache import TokenTrie
 from genlm.backend.llm.base import AsyncLM
-from peft import PeftModel
 
 
 class Query:
