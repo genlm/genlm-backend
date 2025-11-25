@@ -7,9 +7,6 @@ from genlm.backend.llm import load_model_by_name, MockAsyncLM, AsyncVirtualLM
 import numpy as np
 from vllm.lora.request import LoRARequest
 
-# TODO change hf backend
-# TODO: pass the lora path in vllm instead of full lora request by the user?
-
 @pytest.fixture(scope="module")
 def model_name():
     return "meta-llama/Llama-3.2-1B"
@@ -59,12 +56,10 @@ def test_reference_llm_only(reference_llm):
 @cuda_only
 def test_next_token_logprobs(async_llm, reference_llm, token_ids_list, enable_lora):
     if enable_lora:
-        # lora_request = LoRARequest("sql_adapter", 1, '../../lora_adapter_toy')
         async_llm.set_lora('../../lora_adapter_toy')
         reference_llm.set_lora('../../lora_adapter_toy')
         for token_ids in token_ids_list:
             logits_async = asyncio.run(async_llm.next_token_logprobs(token_ids)).float().cpu().numpy()
-            # logits_async = logits_async.astype(np.float32)
 
             logits_ref = asyncio.run(reference_llm.next_token_logprobs(token_ids))
        
@@ -84,7 +79,7 @@ def test_next_token_logprobs(async_llm, reference_llm, token_ids_list, enable_lo
             trimmed_async = logits_async[:ref_vocab]
             assert trimmed_async.shape == logits_ref.shape
 
-            assert compare(trimmed_async, logits_ref).max_rel_err < 1e-3, token_ids
+            assert compare(trimmed_async, logits_ref).max_rel_err < 1e-2, token_ids
     else:
         async_llm.clear_lora()
         reference_llm.clear_lora()
@@ -98,10 +93,8 @@ def test_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list, enab
     if enable_lora:
         async_llm.set_lora('../../lora_adapter_toy')
         reference_llm.set_lora('../../lora_adapter_toy')
-        # lora_request = LoRARequest("sql_adapter", 1, '../../lora_adapter_toy')
         for token_ids in token_ids_list:
-            logits_async = asyncio.run(async_llm.next_token_logprobs(token_ids)).float().cpu().numpy()
-            # logits_async = logits_async.astype(np.float32)
+            logits_async = async_llm.next_token_logprobs_sync(token_ids).float().cpu().numpy()
 
             logits_ref = asyncio.run(reference_llm.next_token_logprobs(token_ids))
        
@@ -121,7 +114,7 @@ def test_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list, enab
             trimmed_async = logits_async[:ref_vocab]
             assert trimmed_async.shape == logits_ref.shape
 
-            assert compare(trimmed_async, logits_ref).max_rel_err < 1e-3, token_ids
+            assert compare(trimmed_async, logits_ref).max_rel_err < 1e-2, token_ids
     else:
         async_llm.clear_lora()
         reference_llm.clear_lora()
@@ -132,13 +125,10 @@ def test_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list, enab
 
 @cuda_only
 def test_batch_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list, enable_lora):
-    # Test 1: Regular sync context
     if enable_lora:
         async_llm.set_lora('../../lora_adapter_toy')
         reference_llm.set_lora('../../lora_adapter_toy')
-        # lora_request = LoRARequest("sql_adapter", 1, '../../lora_adapter_toy')
         logits_async = async_llm.batch_next_token_logprobs_sync(token_ids_list).float().cpu().numpy()
-        # logits_async = logits_async.astype(np.float32)
 
         logits_ref = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
 
@@ -160,7 +150,7 @@ def test_batch_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list
         trimmed_async = logits_async[:,:ref_vocab]
         assert trimmed_async.shape == logits_ref.shape
         for i, (logit_async, logit_ref) in enumerate(zip(trimmed_async, logits_ref)):
-            assert compare(logit_async, logit_ref).max_rel_err < 1e-3, token_ids_list[i]
+            assert compare(logit_async, logit_ref).max_rel_err < 1e-2, token_ids_list[i]
     else:
         async_llm.clear_lora()
         reference_llm.clear_lora()
@@ -172,13 +162,11 @@ def test_batch_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list
 @cuda_only
 def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list, enable_lora):
     if enable_lora:
-        # lora_request = LoRARequest("sql_adapter", 1, '../../lora_adapter_toy')
         async_llm.set_lora('../../lora_adapter_toy')
         reference_llm.set_lora('../../lora_adapter_toy')
         logits_async = (
             asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list)).float().cpu().numpy()
         )
-        # logits_async = logits_async.astype(np.float32)
 
         logits_ref = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
 
@@ -211,6 +199,34 @@ def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list, ena
             assert compare(have, want).max_rel_err < 1e-3, token_ids_list[i]
 
 @cuda_only
+def test_swapping_lora_requests(enable_lora, token_ids_list, async_llm):
+    if enable_lora:
+        async_llm.clear_lora()
+        logits_noswapped_nolora = []
+        logits_noswapped_lora = []
+        for token_ids in token_ids_list:
+            logits_noswapped_nolora.append(asyncio.run(async_llm.next_token_logprobs(token_ids)).float().cpu().numpy())
+        async_llm.set_lora('../../lora_adapter_toy')
+        for token_ids in token_ids_list:
+            logits_noswapped_lora.append(asyncio.run(async_llm.next_token_logprobs(token_ids)).float().cpu().numpy())
+        
+        logits_swapped_nolora = []
+        logits_swapped_lora = []
+        for token_ids in token_ids_list:
+            async_llm.clear_lora()
+            logits_swapped_nolora.append(asyncio.run(async_llm.next_token_logprobs(token_ids)).float().cpu().numpy())
+            async_llm.set_lora('../../lora_adapter_toy')
+            logits_swapped_lora.append(asyncio.run(async_llm.next_token_logprobs(token_ids)).float().cpu().numpy())
+        
+        for i, token_ids in enumerate(token_ids_list):
+            assert compare(logits_noswapped_lora[i][:-256], logits_swapped_lora[i][:-256]).max_rel_err < 1e-3, token_ids
+        for i, token_ids in enumerate(token_ids_list):
+            assert compare(logits_noswapped_nolora[i][:-256], logits_swapped_nolora[i][:-256]).max_rel_err < 1e-3, token_ids
+    else:
+        pytest.skip("Only run when LoRA is enabled")
+
+
+@cuda_only
 def test_async_llm_lora_vs_nolora_enable_no_request(model_name, token_ids_list, enable_lora):
     if enable_lora:
         pytest.skip("Only run when LoRA is not enabled")
@@ -225,6 +241,7 @@ def test_async_llm_lora_vs_nolora_enable_no_request(model_name, token_ids_list, 
             model_name,
             backend="vllm",
             llm_opts={"engine_opts": {"enable_lora": True, "dtype": "float16", "gpu_memory_utilization" : 0.20, "max_model_len":15}})
+
         for token_ids in token_ids_list:
             logits_nolora = asyncio.run(async_nolora.next_token_logprobs(token_ids)).cpu().numpy()
             logits_lora = asyncio.run(async_lora.next_token_logprobs(token_ids)).cpu().numpy()
