@@ -9,6 +9,7 @@ from transformers import DynamicCache
 
 from genlm.backend.cache import TokenTrie
 from genlm.backend.llm.base import AsyncLM
+from peft import PeftModel
 
 
 class Query:
@@ -162,6 +163,24 @@ class AsyncTransformer(AsyncLM):
         result = self.model(torch.tensor([prompt_tokens]).to(self.device))
         node = self.cache.extend_cache(0, prompt_tokens, result.logits[0], 0)
         node.past_key_values = result.past_key_values
+    
+    def load_lora(self, lora_path, lora_name='lora_1'):
+        if lora_path is None:
+            raise ImportError(
+                "You should set your lora directory path to load lora."
+            )
+        else:
+            self.model.load_adapter(lora_path, lora_name)
+    
+    def set_lora(self, lora_name='lora_1'):
+        self.clear_kv_cache()
+        self.clear_cache()
+        self.model.set_adapter(lora_name)
+
+    def clear_lora(self):
+        self.clear_kv_cache()
+        self.clear_cache()
+        self.model.set_adapter([])
 
     @torch.no_grad()
     def batch_evaluate_queries(self):
