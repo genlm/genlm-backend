@@ -202,21 +202,6 @@ else:
                 (torch.Tensor): Normalized log probability tensor.
             """
             return self.batch_next_token_logprobs_sync([token_ids])[0]
-        
-        async def batch_next_token_logprobs(self, token_ids_list):
-            """Request log probabilities of next tokens in a batch asynchronously.
-
-            Args:
-                token_ids_list (list[list[int]]): A list of token IDs, representing a prompt to the language model.
-
-            Returns:
-                (torch.Tensor): A tensor of normalized log probability tensors, one for each prompt in the input list.
-            """
-            logprobs = await asyncio.gather(
-                *[self.next_token_logprobs(token_ids) for token_ids in token_ids_list]
-            )
-            return torch.stack(logprobs)
-
 
         def batch_next_token_logprobs_sync(self, token_ids_list):
             """
