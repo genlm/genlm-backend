@@ -132,9 +132,19 @@ else:
             return self.async_llm_engine.engine.model_executor.driver_worker.model_runner.model
 
         def clear_lora(self):
+            """
+            Disable any active LoRA adapter for the vLLM engine.
+            """
             self.lora_request = None
         
         def set_lora(self, lora_path, lora_name="current_lora", lora_id=1):
+            """Configure a LoRA adapter request for the vLLM engine.
+
+            Args:
+                lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
+                lora_name (str): Identifier name to associate with this LoRA adapter within vLLM.
+                lora_id (int): Globally unique ID for the adapter.
+            """
             self.lora_request = LoRARequest(lora_name, lora_id, lora_path)
         
         async def next_token_logprobs(self, token_ids):
@@ -230,7 +240,7 @@ else:
                 )
 
             while self.async_llm_engine.engine.has_unfinished_requests():
-                output = self.async_llm_engine.engine.step()
+                output = self.async_llm_engine.engine.step() 
                 for out in output:
                     if out.finished:
                         assert out.request_id in req_id2processors, (

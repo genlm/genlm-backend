@@ -164,6 +164,15 @@ class AsyncTransformer(AsyncLM):
         node.past_key_values = result.past_key_values
     
     def load_lora(self, lora_path, lora_name='lora_1'):
+        """Load a LoRA adapter into the base model.
+
+        Args:
+            lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
+            lora_name (str): Name to assign to the loaded adapter.
+
+        Notes:
+            This does not activate the adapter immediately. Call `set_lora()` to enable the adapter.
+        """
         if lora_path is None:
             raise ImportError(
                 "You should set your lora directory path to load lora."
@@ -172,11 +181,20 @@ class AsyncTransformer(AsyncLM):
             self.model.load_adapter(lora_path, lora_name)
     
     def set_lora(self, lora_name='lora_1'):
+        """Activate a previously loaded LoRA adapter.
+
+        Args:
+            lora_name (str): Name of the LoRA adapter to activate.
+        
+        """
         self.clear_kv_cache()
         self.clear_cache()
         self.model.set_adapter(lora_name)
 
     def clear_lora(self):
+        """
+        Deactivate all LoRA adapters.
+        """
         self.clear_kv_cache()
         self.clear_cache()
         self.model.set_adapter([])
@@ -346,6 +364,7 @@ class AsyncTransformer(AsyncLM):
 
         # Create a future with the prompt
         future = asyncio.get_running_loop().create_future()
+        # add the query to the batch queue
         self.add_query(token_ids[base:], future, past)
         logits = await future
 
