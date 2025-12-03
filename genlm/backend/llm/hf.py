@@ -364,7 +364,6 @@ class AsyncTransformer(AsyncLM):
 
         # Create a future with the prompt
         future = asyncio.get_running_loop().create_future()
-        # add the query to the batch queue
         self.add_query(token_ids[base:], future, past)
         logits = await future
 
