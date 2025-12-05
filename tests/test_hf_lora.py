@@ -15,11 +15,11 @@ def model_name():
 
 @pytest.fixture(scope="module")
 def adapter_path():
-    return "../../merged_model"
+    return "vxef/lora_adapter_merged_model"
 
 @pytest.fixture(scope="module")
 def lora_path():
-    return "../../lora_adapter_toy"
+    return "vxef/lora_adapter_toy"
 
 @pytest.fixture(scope="module")
 def transformer_merged_llm(adapter_path):
