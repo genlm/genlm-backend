@@ -3,11 +3,7 @@ import asyncio
 import torch
 from conftest import cuda_only
 from arsenal.maths import compare
-from genlm.backend.llm import load_model_by_name, AsyncTransformer
-from unittest.mock import patch
-from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers import AutoTokenizer
+from genlm.backend.llm import load_model_by_name
 
 @pytest.fixture(scope="module")
 def model_name():

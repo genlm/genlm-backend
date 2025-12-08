@@ -1,7 +1,6 @@
 import torch
 import logging
 import warnings
-import asyncio
 
 from genlm.backend.llm.base import AsyncLM
 from genlm.backend.cache import OutputCache

@@ -3,9 +3,8 @@ import pytest
 import asyncio
 from conftest import cuda_only, ReferenceVirtualLM
 from arsenal.maths import compare
-from genlm.backend.llm import load_model_by_name, MockAsyncLM, AsyncVirtualLM
+from genlm.backend.llm import load_model_by_name
 import numpy as np
-from vllm.lora.request import LoRARequest
 
 @pytest.fixture(scope="module")
 def model_name():
@@ -359,7 +358,6 @@ def test_next_token_logprobs_agreement(transformer_llm, async_llm, token_ids_lis
             have = transformer_llm.next_token_logprobs_uncached(token_ids).cpu().numpy()
             want = asyncio.run(async_llm.next_token_logprobs(token_ids)).cpu().numpy()
             
-            async_vocab = want.shape[0]
             hf_vocab = have.shape[0]
             
             want_trimmed = want[:hf_vocab]
