@@ -35,6 +35,11 @@ Or to install with MLX support, run:
 pip install genlm-backend[mlx]
 ```
 
+Or to install with LoRA support, run:
+
+```bash
+pip install genlm-backend[lora]
+```
 
 ## 🧪 Example: Autobatched Sequential Importance Sampling with LLMs
 
