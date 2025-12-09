@@ -8,7 +8,7 @@ import numpy as np
 
 @pytest.fixture(scope="module")
 def model_name():
-    return "TinyLlama/TinyLlama_v1.1" #meta-llama/Llama-3.2-1B
+    return "HuggingFaceTB/SmolLM-135M" 
 
 @pytest.fixture(scope="module", params=[False, True], ids=["nolora", "lora"])
 def enable_lora(request):
@@ -19,13 +19,13 @@ def async_llm(model_name, enable_lora):
     return load_model_by_name(
         model_name,
         backend="vllm",
-        llm_opts={"engine_opts": {"enable_lora": enable_lora, "dtype": "float16", "gpu_memory_utilization" : 0.20, "max_model_len":15}},
+        llm_opts={"engine_opts": {"enable_lora": enable_lora, "dtype": "float16", "gpu_memory_utilization" : 0.10, "max_model_len":15}},
     )
 
 @pytest.fixture(scope="module")
 def reference_llm(model_name, enable_lora):
     return ReferenceVirtualLM.from_name(
-        model_name, llm_opts={"enable_lora": enable_lora, "dtype": "float16","gpu_memory_utilization" : 0.20, "max_model_len":15}
+        model_name, llm_opts={"enable_lora": enable_lora, "dtype": "float16","gpu_memory_utilization" : 0.10, "max_model_len":15}
     )
 
 @pytest.fixture(scope="module")
@@ -42,7 +42,7 @@ def load_lora(transformer_llm, lora_path):
 
 @pytest.fixture(scope="module")
 def lora_path():
-    return "vxef/tinyllama_lora_toy"
+    return "vxef/smol_lora_toy"
 
 @pytest.fixture(scope="module")
 def token_ids_list(async_llm):
@@ -249,13 +249,13 @@ def test_async_llm_lora_vs_nolora_enable_no_request(model_name, token_ids_list, 
         async_nolora = load_model_by_name(
             model_name,
             backend="vllm",
-            llm_opts={"engine_opts": {"enable_lora": False, "dtype": "float16", "gpu_memory_utilization" : 0.20, "max_model_len":15}},
+            llm_opts={"engine_opts": {"enable_lora": False, "dtype": "float16", "gpu_memory_utilization" : 0.10, "max_model_len":15}},
         )
         
         async_lora = load_model_by_name(
             model_name,
             backend="vllm",
-            llm_opts={"engine_opts": {"enable_lora": True, "dtype": "float16", "gpu_memory_utilization" : 0.20, "max_model_len":15}})
+            llm_opts={"engine_opts": {"enable_lora": True, "dtype": "float16", "gpu_memory_utilization" : 0.10, "max_model_len":15}})
 
         for token_ids in token_ids_list:
             logits_nolora = asyncio.run(async_nolora.next_token_logprobs(token_ids)).cpu().numpy()

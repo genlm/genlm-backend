@@ -7,15 +7,15 @@ from genlm.backend.llm import load_model_by_name
 
 @pytest.fixture(scope="module")
 def model_name():
-    return "TinyLlama/TinyLlama_v1.1"
+    return "HuggingFaceTB/SmolLM-135M"
 
 @pytest.fixture(scope="module")
 def merged_path():
-    return 'vxef/tinyllama_merged_toy'
+    return 'vxef/smol_merged_toy'
 
 @pytest.fixture(scope="module")
 def lora_path():
-    return "vxef/tinyllama_lora_toy"
+    return "vxef/smol_lora_toy"
 
 @pytest.fixture(scope="module")
 def transformer_merged_llm(merged_path):
