@@ -27,6 +27,6 @@ jobs:
         run: |
           python -m venv venv
           source venv/bin/activate
-          pip install -e .[test,lora]
+          pip install -e .[test]
           pip install -r requirements-dev.txt
           python -m pytest tests --ignore=tests/test_mlx.py
