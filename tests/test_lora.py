@@ -8,7 +8,7 @@ import numpy as np
 
 @pytest.fixture(scope="module")
 def model_name():
-    return "meta-llama/Llama-3.2-1B"
+    return "TinyLlama/TinyLlama_v1.1" #meta-llama/Llama-3.2-1B
 
 @pytest.fixture(scope="module", params=[False, True], ids=["nolora", "lora"])
 def enable_lora(request):
@@ -42,7 +42,7 @@ def load_lora(transformer_llm, lora_path):
 
 @pytest.fixture(scope="module")
 def lora_path():
-    return "vxef/lora_adapter_toy"
+    return "vxef/tinyllama_lora_toy"
 
 @pytest.fixture(scope="module")
 def token_ids_list(async_llm):
