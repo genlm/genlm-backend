@@ -29,20 +29,20 @@ def reference_llm(model_name, enable_lora):
     )
 
 @pytest.fixture(scope="module")
-def transformer_llm(model_name):
+def transformer_llm_base(model_name):
     return load_model_by_name(
         model_name, backend="hf", llm_opts={"hf_opts": {"torch_dtype": torch.float16}}
     )
 
-@pytest.fixture(scope="module", autouse=True)
-def load_lora(transformer_llm, lora_path):
-    transformer_llm.load_lora(lora_path, 'lora_1')
-    transformer_llm.set_lora(lora_name='lora_1')
-
-
 @pytest.fixture(scope="module")
 def lora_path():
     return "vxef/smol_lora_toy"
+
+@pytest.fixture(scope="module")
+def transformer_llm(transformer_llm_base, lora_path):
+    transformer_llm_base.load_lora(lora_path, 'lora_1')
+    transformer_llm_base.set_lora(lora_name='lora_1')
+    return transformer_llm_base
 
 @pytest.fixture(scope="module")
 def token_ids_list(async_llm):
