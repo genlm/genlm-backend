@@ -16,7 +16,7 @@ def model_name():
 @pytest.fixture(scope="module")
 def reference_llm(model_name):
     return ReferenceVirtualLM.from_name(
-        model_name, llm_opts={"gpu_memory_utilization": 0.2, "dtype": "float16"}
+        model_name, llm_opts={"gpu_memory_utilization": 0.1, "dtype": "float16"}
     )
 
 
@@ -25,7 +25,7 @@ def async_llm(model_name):
     return load_model_by_name(
         model_name,
         backend="vllm",
-        llm_opts={"engine_opts": {"gpu_memory_utilization": 0.2, "dtype": "float16"}},
+        llm_opts={"engine_opts": {"gpu_memory_utilization": 0.1, "dtype": "float16"}},
     )
 
 
