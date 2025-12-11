@@ -12,6 +12,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-22.04
+    resource_class: gpu.nvidia.l4
 
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +23,16 @@ jobs:
         with:
           python-version: 3.11.5
           cache: 'pip'
+      
+      - name: Check GPU
+        run: |
+          echo "Checking GPU..."
+          nvidia-smi || echo "NO GPU FOUND"
+          python3 - << 'EOF'
+          import torch
+          print("CUDA available:", torch.cuda.is_available())
+          print("CUDA device count:", torch.cuda.device_count())
+          EOF
 
       - name: Run Tests
         run: |
