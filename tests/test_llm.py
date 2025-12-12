@@ -10,7 +10,7 @@ from genlm.backend.llm import load_model_by_name, MockAsyncLM, AsyncVirtualLM
 
 @pytest.fixture(scope="module")
 def model_name():
-    return "gpt2"
+    return "HuggingFaceTB/SmolLM-135M" #gpt2
 
 
 @pytest.fixture(scope="module")
