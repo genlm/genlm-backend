@@ -173,12 +173,7 @@ class AsyncTransformer(AsyncLM):
         Notes:
             This does not activate the adapter immediately. Call `set_lora()` to enable the adapter.
         """
-        if lora_path is None:
-            raise ValueError(
-                "You should provide a local path or HuggingFace model ID for LoRA adapters."
-            )
-        else:
-            self.model.load_adapter(lora_path, lora_name)
+        self.model.load_adapter(lora_path, lora_name)
     
     def set_lora(self, lora_name='lora_1'):
         """Activate a previously loaded LoRA adapter.

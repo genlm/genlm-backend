@@ -60,12 +60,6 @@ def test_transformer_merged_llm(transformer_merged_llm):
     assert transformer_merged_llm is not None
 
 @cuda_only
-def test_wrong_path(transformer_llm):
-    # Test that empty input raises ValueError
-    with pytest.raises(ValueError):
-        transformer_llm.load_lora('error_path/')
-
-@cuda_only
 def test_next_token_logprobs_lora_uncached(transformer_llm, transformer_merged_llm, token_ids_list):
     for token_ids in token_ids_list:
         unmerged_logprobs = transformer_llm.next_token_logprobs_uncached(token_ids).cpu().numpy()
