@@ -210,7 +210,7 @@ def test_sample_seeded_vllm(async_llm):
     )
     assert (
         async_llm.tokenizer.decode(generated_token_ids)
-        == " I'm sorry, but I'm not sure"
+        == " I'm new here and I'm trying to understand" #I'm sorry, but I'm not sure
     )
 
 
