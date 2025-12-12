@@ -26,7 +26,7 @@ jobs:
         run: |
           python -m venv venv
           source venv/bin/activate
-          pip install -e .[test]
+          pip install -e .[lora]
           pip install -r requirements-dev.txt
 
       - name: Run tests
