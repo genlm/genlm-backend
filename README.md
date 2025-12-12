@@ -35,6 +35,12 @@ Or to install with MLX support, run:
 pip install genlm-backend[mlx]
 ```
 
+Or to install with LoRA support, run:
+
+```bash
+pip install genlm-backend[lora]
+```
+
 ## 🧪 Example: Autobatched Sequential Importance Sampling with LLMs
 
 This example demonstrates how `genlm-backend` enables concise, scalable probabilistic inference with language models. It implements a Sequential Importance Sampling (SIS) algorithm that makes asynchronous log-probabality requests which get automatically batched by the language model.
