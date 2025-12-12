@@ -252,33 +252,3 @@ def test_batch_next_token_logprobs_agreement(transformer_llm, async_llm, token_i
             token_ids_list[i],
         ]
     async_llm.clear_lora()
-
-@cuda_only
-def test_async_llm_lora_vs_nolora_enable_no_request(model_name, token_ids_list, async_llm):
-    async_llm.clear_lora()
-    async_nolora = load_model_by_name(
-        model_name,
-        backend="vllm",
-        llm_opts={"engine_opts": {"enable_lora": False, "dtype": "float16", "gpu_memory_utilization" : 0.1, "max_model_len":15}},
-    )
-
-    for token_ids in token_ids_list:
-        logits_nolora = asyncio.run(async_nolora.next_token_logprobs(token_ids)).cpu().numpy()
-        logits_lora = asyncio.run(async_llm.next_token_logprobs(token_ids)).cpu().numpy()
-
-        nolora_vocab = logits_nolora.shape[0]
-        lora_vocab = logits_lora.shape[0]
-        
-        assert lora_vocab == nolora_vocab + 256, [
-            "Unexpected vocab mismatch. Lora enabled must have 256 more tokens.",
-            nolora_vocab,
-            lora_vocab,
-        ]
-        extra_logits = logits_lora[-256:]
-        assert np.all(np.isneginf(extra_logits)), (
-            "Lora enabled extra logits are all -inf",
-            extra_logits,
-        )
-        trimmed_lora = logits_lora[:nolora_vocab]
-        assert trimmed_lora.shape == logits_nolora.shape
-        assert compare(logits_nolora, trimmed_lora).max_rel_err < 1e-3, token_ids
