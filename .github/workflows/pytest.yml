@@ -38,5 +38,6 @@ jobs:
           python -m venv venv
           source venv/bin/activate
           pip install -e .[lora]
+          pip install --force-reinstall 'triton==3.2.0'
           pip install -r requirements-dev.txt
           python -m pytest tests --ignore=tests/test_mlx.py
