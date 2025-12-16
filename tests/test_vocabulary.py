@@ -81,9 +81,26 @@ def test_deepseek_r1_unsloth(text, is_fast):
 def test_byte2str_fallbacks():
     tokenizer = load_tokenizer("gpt2", False)
 
-    decode_vocab(tokenizer, byte2str_fallback="latin1")
-    decode_vocab(tokenizer, byte2str_fallback="tokenizer")
-    decode_vocab(tokenizer, byte2str_fallback="replace")
+    byte_vocab1, str_vocab1 = decode_vocab(tokenizer, byte2str_fallback="latin1")
+    assert all(
+        hasattr(token, "token_id") and hasattr(token, "byte_string")
+        for token in byte_vocab1
+    )
+    assert isinstance(str_vocab1, list)
+
+    byte_vocab2, str_vocab2 = decode_vocab(tokenizer, byte2str_fallback="tokenizer")
+    assert all(
+        hasattr(token, "token_id") and hasattr(token, "byte_string")
+        for token in byte_vocab2
+    )
+    assert isinstance(str_vocab2, list)
+
+    byte_vocab3, str_vocab3 = decode_vocab(tokenizer, byte2str_fallback="replace")
+    assert all(
+        hasattr(token, "token_id") and hasattr(token, "byte_string")
+        for token in byte_vocab3
+    )
+    assert isinstance(str_vocab3, list)
 
     with pytest.raises(ValueError):
         decode_vocab(tokenizer, byte2str_fallback="invalid")

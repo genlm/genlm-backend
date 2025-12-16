@@ -2,6 +2,7 @@ import torch
 import numba
 import numpy as np
 from numba.typed import List
+from genlm.backend.tokenization import Token
 
 
 class TokenCharacterTrie:
@@ -11,8 +12,8 @@ class TokenCharacterTrie:
         """Initialize a `TokenCharacterTrie`.
 
         Args:
-            decode (list): List representing the token vocabulary.
-                Each element of the list must be iterable.
+            decode (list[Token]): List of Token objects representing the token vocabulary.
+                Each Token must have both token_id and byte_string attributes.
         """
         self.decode = decode
         self.word2leaf = {}
@@ -20,7 +21,17 @@ class TokenCharacterTrie:
         self.root = 0
         self.token_id_to_leaf = []
 
-        for token_id, word in enumerate(self.decode):
+        for token in self.decode:
+            # Require Token objects
+            if not isinstance(token, Token):
+                raise TypeError(
+                    f"TokenCharacterTrie requires Token objects, got {type(token).__name__}. "
+                    f"Use decode_vocab() to get Token objects from a tokenizer."
+                )
+
+            token_id = token.token_id
+            word = token.byte_string
+
             curr = self.root
             for letter in word:
                 if letter not in self.children[curr]:
@@ -28,12 +39,14 @@ class TokenCharacterTrie:
                     self.children.append({})
                 curr = self.children[curr][letter]
 
-            self.children[curr][None] = last = len(self.children)
+            # Each token gets its own leaf, even if multiple tokens have the same byte_string
+            # We use (None, token_id) as the edge key to allow multiple tokens with same bytes
+            word_bytes = token.byte_string
+            leaf_edge_key = (None, token_id)
+
+            self.children[curr][leaf_edge_key] = last = len(self.children)
             self.children.append({})
-            assert word not in self.word2leaf, (
-                "Can't have duplicate words in vocabulary"
-            )
-            self.word2leaf[word] = last
+            self.word2leaf[(word_bytes, token_id)] = last
 
             self.token_id_to_leaf.append((token_id, last))
 
@@ -55,7 +68,8 @@ class TokenCharacterTrie:
         node2prefix = {self.root: []}
         for x in reversed(range(len(self.children))):
             for letter, y in self.children[x].items():
-                if letter is None:
+                # Check if letter is a leaf edge (None or (None, token_id))
+                if letter is None or (isinstance(letter, tuple) and letter[0] is None):
                     node2prefix[y] = node2prefix[x]
                 else:
                     node2prefix[y] = node2prefix[x] + [letter]
@@ -191,7 +205,8 @@ class TokenCharacterTrie:
             int: Node indices in topological order
         """
         for a in self.children[node]:
-            if a is None:
+            # Skip leaf edges (None or (None, token_id))
+            if a is None or (isinstance(a, tuple) and a[0] is None):
                 pass
             else:
                 yield from self._order(self.children[node][a])
@@ -296,10 +311,14 @@ class TokenCharacterTrie:
 
         for node_id, children in enumerate(self.children):
             for char, child_id in children.items():
-                if char is not None:
-                    edge_label = str(char)
+                if char is None or (isinstance(char, tuple) and char[0] is None):
+                    # Leaf edge
+                    if isinstance(char, tuple) and char[0] is None:
+                        edge_label = f"End-of-Token (ID: {char[1]})"
+                    else:
+                        edge_label = "End-of-Token"
                 else:
-                    edge_label = "End-of-Token"
+                    edge_label = str(char)
 
                 dot.edge(str(node_id), str(child_id), label=edge_label)
 
