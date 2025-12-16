@@ -68,8 +68,8 @@ class TokenCharacterTrie:
         node2prefix = {self.root: []}
         for x in reversed(range(len(self.children))):
             for letter, y in self.children[x].items():
-                # Check if letter is a leaf edge (None or (None, token_id))
-                if letter is None or (isinstance(letter, tuple) and letter[0] is None):
+                # Leaf edges are tuples of (None, token_id)
+                if isinstance(letter, tuple) and letter[0] is None:
                     node2prefix[y] = node2prefix[x]
                 else:
                     node2prefix[y] = node2prefix[x] + [letter]
@@ -205,8 +205,8 @@ class TokenCharacterTrie:
             int: Node indices in topological order
         """
         for a in self.children[node]:
-            # Skip leaf edges (None or (None, token_id))
-            if a is None or (isinstance(a, tuple) and a[0] is None):
+            # Skip leaf edges (tuples of (None, token_id))
+            if isinstance(a, tuple) and a[0] is None:
                 pass
             else:
                 yield from self._order(self.children[node][a])
@@ -311,12 +311,9 @@ class TokenCharacterTrie:
 
         for node_id, children in enumerate(self.children):
             for char, child_id in children.items():
-                if char is None or (isinstance(char, tuple) and char[0] is None):
-                    # Leaf edge
-                    if isinstance(char, tuple) and char[0] is None:
-                        edge_label = f"End-of-Token (ID: {char[1]})"
-                    else:
-                        edge_label = "End-of-Token"
+                # Leaf edges are tuples of (None, token_id)
+                if isinstance(char, tuple) and char[0] is None:
+                    edge_label = f"End-of-Token (ID: {char[1]})"
                 else:
                     edge_label = str(char)
 

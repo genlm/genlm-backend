@@ -118,3 +118,32 @@ def test_byte_decoder_error_handling():
     incomplete_byte_decoder = {}
     with pytest.raises(ByteDecoderError):
         check_byte_decoder(tokenizer, incomplete_byte_decoder)
+
+
+def test_decode_vocab_failure_both_tokenizers():
+    """Test that decode_vocab raises ValueError when both slow and fast tokenizers fail."""
+    from unittest.mock import patch, MagicMock
+    from genlm.backend.tokenization.bytes import ByteVocabError
+
+    # Create a mock tokenizer
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.is_fast = False
+    mock_tokenizer.name_or_path = "test-model"
+
+    # Mock AutoTokenizer.from_pretrained to return our mock
+    with patch(
+        "genlm.backend.tokenization.vocab.AutoTokenizer.from_pretrained"
+    ) as mock_from_pretrained:
+        mock_from_pretrained.return_value = mock_tokenizer
+
+        # Mock get_byte_vocab to always raise ByteVocabError
+        with patch(
+            "genlm.backend.tokenization.vocab.get_byte_vocab"
+        ) as mock_get_byte_vocab:
+            mock_get_byte_vocab.side_effect = ByteVocabError("Cannot decode vocabulary")
+
+            # This should raise ValueError after both slow and fast tokenizers fail
+            with pytest.raises(
+                ValueError, match="Could not decode byte representation"
+            ):
+                decode_vocab(mock_tokenizer)
