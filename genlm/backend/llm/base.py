@@ -80,7 +80,7 @@ class AsyncLM(ABC):
             lora_name (str): Name to assign to the loaded adapter.
 
         """
-        pass
+        pass # pragma: no cover
     
     def set_lora(self, lora_name):
         """Activate a previously loaded LoRA adapter.
@@ -91,7 +91,7 @@ class AsyncLM(ABC):
         """
         raise NotImplementedError(
             "set_lora must be implemented by subclasses"
-        )
+        ) # pragma: no cover
     
     def clear_lora(self):
         """
@@ -99,7 +99,7 @@ class AsyncLM(ABC):
         """
         raise NotImplementedError(
             "clear_lora must be implemented by subclasses"
-        )
+        ) # pragma: no cover
 
     def clear_cache(self):
         """Clear any caches used by the language model. No-op in base class."""
