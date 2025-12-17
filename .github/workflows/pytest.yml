@@ -48,5 +48,4 @@ jobs:
           "vllm>=0.6.6,<=0.10.0" \
           "triton==3.2.0"
           pip install -r requirements-dev.txt
-          pip install triton==3.2.0
           python -m pytest tests --ignore=tests/test_mlx.py
