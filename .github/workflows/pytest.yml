@@ -37,11 +37,16 @@ jobs:
         run: |
           python -m venv venv
           source venv/bin/activate
-          pip install -e .[lora]
+          pip install \
+          torch \
+          "transformers>=4.36.0" \
+          sentencepiece \
+          protobuf \
+          accelerate \
+          bitsandbytes \
+          numba \
+          "vllm>=0.6.6,<=0.10.0" \
+          "triton==3.2.0"
           pip install -r requirements-dev.txt
-          pip uninstall triton -y
-          rm -rf ~/.cache/pip
-          rm -rf ~/.cache/triton
-          rm -rf ~/.triton
           pip install triton==3.2.0
           python -m pytest tests --ignore=tests/test_mlx.py
