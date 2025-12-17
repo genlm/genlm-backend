@@ -40,5 +40,8 @@ jobs:
           pip install -e .[lora]
           pip install -r requirements-dev.txt
           pip uninstall triton -y
+          rm -rf ~/.cache/pip
+          rm -rf ~/.cache/triton
+          rm -rf ~/.triton
           pip install triton==3.2.0
           python -m pytest tests --ignore=tests/test_mlx.py
