@@ -26,7 +26,8 @@ jobs:
         run: |
           python -m venv venv
           source venv/bin/activate
-          pip install -e .[test]
+          pip install -e .[lora]
+          pip install --force-reinstall 'triton==3.2.0'
           pip install -r requirements-dev.txt
 
       - name: Run tests

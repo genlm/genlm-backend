@@ -1,12 +1,14 @@
 import torch
 import logging
 import warnings
+import hashlib
 
 from genlm.backend.llm.base import AsyncLM
 from genlm.backend.cache import OutputCache
 
 try:
     from vllm import AsyncLLMEngine, SamplingParams, AsyncEngineArgs
+    from vllm.lora.request import LoRARequest
     from vllm.utils import Counter
     from vllm.inputs import TokensPrompt
 
@@ -81,6 +83,8 @@ else:
                 if cache_size > 0
                 else None
             )
+            self.lora_request = None
+            self.lora_name_to_ids = {}
 
             async_llm_engine.engine.log_stats = False
 
@@ -128,6 +132,48 @@ else:
         def underlying_model(self):
             return self.async_llm_engine.engine.model_executor.driver_worker.model_runner.model
 
+        def clear_lora(self):
+            """
+            Disable any active LoRA adapter for the vLLM engine.
+            """
+            self.lora_request = None
+
+        def add_new_lora(self, lora_path, lora_name='lora_1'):
+            """Load a LoRA adapter into the base model by creating a unique id for it.
+            
+            Args:
+                lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
+                lora_name (str): Name to assign to the loaded adapter.
+            
+            Notes:
+                This does not activate the adapter immediately. Call `set_lora()` to enable the adapter.
+            """
+            self.lora_name_to_ids[lora_name] = self.hash_to_int(lora_name)
+        
+        def hash_to_int(self, value):
+            """Generates a deterministic unique id for a LoRA adapter from its name.
+            
+            Args:
+                value (str): The name of the LoRA adapter to hash.
+
+            Returns:
+                An integer ID corresponding to the LoRA adapter, in the range 0–255.
+            """
+            hash_bytes = hashlib.shake_128(value.encode("utf-8")).digest(1)
+            return int.from_bytes(hash_bytes, "big")
+
+        def set_lora(self, lora_path, lora_name='lora_1'):
+            """Configure a LoRA adapter request for the vLLM engine.
+
+            Args:
+                lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
+                lora_name (str): Identifier name to associate with this LoRA adapter within vLLM.
+                lora_id (int): Globally unique ID for the adapter.
+            """
+            if lora_name not in self.lora_name_to_ids.keys():
+                raise ValueError(f"A LoRA adapter named '{lora_name}' has not been loaded yet. Please call add_new_lora() first to load and name your LoRA adapters.")
+            self.lora_request = LoRARequest(lora_name, self.lora_name_to_ids[lora_name], lora_path)
+        
         async def next_token_logprobs(self, token_ids):
             """Request log probabilities of next token asynchronously with output caching.
 
@@ -172,6 +218,7 @@ else:
                 sampling_params=SamplingParams(
                     **self.default_params, logits_processors=[processor]
                 ),
+                lora_request=self.lora_request,
                 request_id=req_id,
             ):
                 if output.finished:
@@ -215,11 +262,12 @@ else:
                     params=SamplingParams(
                         **self.default_params, logits_processors=[processor]
                     ),
+                    lora_request=self.lora_request,
                     request_id=req_id,
                 )
 
             while self.async_llm_engine.engine.has_unfinished_requests():
-                output = self.async_llm_engine.engine.step()
+                output = self.async_llm_engine.engine.step() 
                 for out in output:
                     if out.finished:
                         assert out.request_id in req_id2processors, (
@@ -275,6 +323,7 @@ else:
                     seed=seed,
                     stop=[self.byte_vocab[i].decode() for i in eos_token_ids],
                 ),
+                lora_request=self.lora_request,
                 request_id=str(next(self.request_counter)),
             ):
                 if output.finished:
