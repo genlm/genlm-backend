@@ -163,7 +163,7 @@ class AsyncTransformer(AsyncLM):
         node = self.cache.extend_cache(0, prompt_tokens, result.logits[0], 0)
         node.past_key_values = result.past_key_values
     
-    def load_lora(self, lora_path, lora_name='lora_1'):
+    def add_new_lora(self, lora_path, lora_name='lora_1'):
         """Load a LoRA adapter into the base model.
 
         Args:
@@ -182,6 +182,9 @@ class AsyncTransformer(AsyncLM):
             lora_name (str): Name of the LoRA adapter to activate.
         
         """
+        if lora_name not in list(self.model.peft_config.keys()):
+            raise ValueError(f"A LoRA adapter named '{lora_name}' has not been loaded yet. Please call add_new_lora() first to load and name your LoRA adapters.")
+                
         self.clear_kv_cache()
         self.clear_cache()
         self.model.set_adapter(lora_name)

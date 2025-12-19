@@ -72,7 +72,7 @@ class AsyncLM(ABC):
             [self.next_token_logprobs_sync(token_ids) for token_ids in token_ids_list]
         )
 
-    def load_lora(self, lora_path, lora_name):
+    def add_new_lora(self, lora_path, lora_name):
         """Load a LoRA adapter into the base model.
 
         Args:
@@ -80,7 +80,9 @@ class AsyncLM(ABC):
             lora_name (str): Name to assign to the loaded adapter.
 
         """
-        pass # pragma: no cover
+        raise NotImplementedError(
+            "add_new_lora must be implemented by subclasses"
+        ) # pragma: no cover
     
     def set_lora(self, lora_name):
         """Activate a previously loaded LoRA adapter.

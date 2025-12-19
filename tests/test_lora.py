@@ -34,7 +34,7 @@ def transformer_llm(model_name, lora_path):
     transformer_llm_base =  load_model_by_name(
         model_name, backend="hf", llm_opts={"hf_opts": {"torch_dtype": torch.float16}}
     )
-    transformer_llm_base.load_lora(lora_path, 'lora_1')
+    transformer_llm_base.add_new_lora(lora_path, 'lora_1')
     transformer_llm_base.set_lora(lora_name='lora_1')
     return transformer_llm_base
   
@@ -59,12 +59,17 @@ def test_async_llm_only(async_llm):
 def test_reference_llm_only(reference_llm):
     assert reference_llm is not None
 
+def test_load_model_by_name_error(transformer_llm):
+    with pytest.raises(ValueError):
+        transformer_llm.set_lora('lora_2')
+
 # Note: "lora_extra_vocab_size" is 256, so async has an increased vocab size
 # "lora_extra_vocab_size" will be removed in vllm v0.12.0 (genlm-backend uses vllm v0.10.0)
 # This does not happen with the reference llm since the vocab size is set using the hf tokenizer (decode)
 # and then logprobs=vocab_length is set in SamplingParameters in vllm
 @cuda_only
 def test_next_token_logprobs(async_llm, reference_llm, token_ids_list, lora_path):
+    async_llm.add_new_lora(lora_path)
     async_llm.set_lora(lora_path)
     reference_llm.set_lora(lora_path)
     for token_ids in token_ids_list:
@@ -94,6 +99,7 @@ def test_next_token_logprobs(async_llm, reference_llm, token_ids_list, lora_path
 
 @cuda_only
 def test_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list,lora_path):
+    async_llm.add_new_lora(lora_path)
     async_llm.set_lora(lora_path)
     reference_llm.set_lora(lora_path)
     for token_ids in token_ids_list:
@@ -121,6 +127,7 @@ def test_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list,lora_
 
 @cuda_only
 def test_batch_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list,lora_path):
+    async_llm.add_new_lora(lora_path)
     async_llm.set_lora(lora_path)
     reference_llm.set_lora(lora_path)
     logits_async = async_llm.batch_next_token_logprobs_sync(token_ids_list).float().cpu().numpy()
@@ -151,6 +158,7 @@ def test_batch_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list
 
 @cuda_only
 def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list,lora_path):
+    async_llm.add_new_lora(lora_path)
     async_llm.set_lora(lora_path)
     reference_llm.set_lora(lora_path)
     logits_async = (
@@ -188,6 +196,7 @@ def test_swapping_lora_requests(token_ids_list, async_llm,lora_path):
     logits_noswapped_lora = []
     for token_ids in token_ids_list:
         logits_noswapped_nolora.append(asyncio.run(async_llm.next_token_logprobs(token_ids)).float().cpu().numpy())
+    async_llm.add_new_lora(lora_path)
     async_llm.set_lora(lora_path)
     for token_ids in token_ids_list:
         logits_noswapped_lora.append(asyncio.run(async_llm.next_token_logprobs(token_ids)).float().cpu().numpy())
@@ -197,6 +206,7 @@ def test_swapping_lora_requests(token_ids_list, async_llm,lora_path):
     for token_ids in token_ids_list:
         async_llm.clear_lora()
         logits_swapped_nolora.append(asyncio.run(async_llm.next_token_logprobs(token_ids)).float().cpu().numpy())
+        async_llm.add_new_lora(lora_path)
         async_llm.set_lora(lora_path)
         logits_swapped_lora.append(asyncio.run(async_llm.next_token_logprobs(token_ids)).float().cpu().numpy())
         
@@ -209,6 +219,7 @@ def test_swapping_lora_requests(token_ids_list, async_llm,lora_path):
 
 @cuda_only
 def test_next_token_logprobs_agreement(transformer_llm, async_llm, token_ids_list,lora_path):
+    async_llm.add_new_lora(lora_path)
     async_llm.set_lora(lora_path)
     for token_ids in token_ids_list:
         have = transformer_llm.next_token_logprobs_uncached(token_ids).cpu().numpy()
@@ -228,6 +239,7 @@ def test_next_token_logprobs_agreement(transformer_llm, async_llm, token_ids_lis
 
 @cuda_only
 def test_batch_next_token_logprobs_agreement(transformer_llm, async_llm, token_ids_list,lora_path):
+    async_llm.add_new_lora(lora_path)
     async_llm.set_lora(lora_path)
     haves = (
         asyncio.run(transformer_llm.batch_next_token_logprobs(token_ids_list))
