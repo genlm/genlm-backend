@@ -54,15 +54,15 @@ else:
 
         def __init__(self, device):
             self.device = device
-            self.captured = {}  # batch_index -> logprobs tensor
+            self._captured_batch = None  # [batch_size, vocab_size] tensor
             self._lock = threading.Lock()
 
         def apply(self, logits: torch.Tensor) -> torch.Tensor:
             """Capture logprobs and pass through logits unchanged."""
             logprobs = torch.log_softmax(logits, dim=-1, dtype=logits.dtype)
             with self._lock:
-                for i in range(logits.shape[0]):
-                    self.captured[i] = logprobs[i].clone()
+                # Single clone of entire batch - O(1) instead of O(batch_size)
+                self._captured_batch = logprobs.clone()
             return logits
 
         def is_argmax_invariant(self) -> bool:
@@ -74,14 +74,25 @@ else:
             pass
 
         def get_logprobs(self, batch_index=0):
-            """Get and remove captured logprobs for a batch index."""
+            """Get captured logprobs for a batch index."""
             with self._lock:
-                return self.captured.pop(batch_index, None)
+                if self._captured_batch is None:
+                    return None
+                if batch_index >= self._captured_batch.shape[0]:
+                    return None
+                return self._captured_batch[batch_index].clone()
+
+        def get_all_logprobs(self):
+            """Get all captured logprobs as a batch tensor."""
+            with self._lock:
+                if self._captured_batch is None:
+                    return None
+                return self._captured_batch.clone()
 
         def clear(self):
-            """Clear all captured logprobs."""
+            """Clear captured logprobs."""
             with self._lock:
-                self.captured.clear()
+                self._captured_batch = None
 
     class AsyncVirtualLM(AsyncLM):
         """Async language model using vLLM v1 with global logits processor.
@@ -147,6 +158,7 @@ else:
             engine_opts = {
                 "enable_prefix_caching": True,
                 "disable_log_stats": True,
+                "gpu_memory_utilization": 0.5,
                 **(engine_opts or {}),
             }
 
@@ -197,6 +209,8 @@ else:
 
         def _next_token_logprobs_impl(self, token_ids):
             """Internal implementation for getting next token logprobs."""
+            if self.logprobs_capture is None:
+                raise RuntimeError("Cannot use model after cleanup() has been called")
             # Clear any stale captured logprobs
             self.logprobs_capture.clear()
 
@@ -244,6 +258,8 @@ else:
             Returns:
                 (torch.Tensor): A tensor of normalized log probability tensors, one for each prompt in the input list.
             """
+            if self.logprobs_capture is None:
+                raise RuntimeError("Cannot use model after cleanup() has been called")
             # Clear any stale captured logprobs
             self.logprobs_capture.clear()
 
@@ -260,19 +276,37 @@ else:
                 use_tqdm=False,
             )
 
-            # Collect captured logprobs in order
-            results = []
-            for i in range(len(token_ids_list)):
-                logprobs = self.logprobs_capture.get_logprobs(batch_index=i)
-                assert logprobs is not None, f"Logprobs should be captured for batch index {i}"
-                results.append(logprobs)
+            # Get all captured logprobs at once (optimized - single clone)
+            all_logprobs = self.logprobs_capture.get_all_logprobs()
+            assert all_logprobs is not None, "Logprobs should be captured"
+            assert all_logprobs.shape[0] == len(token_ids_list), (
+                f"Expected {len(token_ids_list)} logprobs, got {all_logprobs.shape[0]}"
+            )
 
-            return torch.stack(results)
+            return all_logprobs
 
         def clear_cache(self):
             """Clear output cache."""
             if self.cache:
                 self.cache.clear()
+
+        def cleanup(self):
+            """Explicitly clean up GPU resources. Call this when done with the model."""
+            self._cleanup_engine()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            self.cleanup()
+            return False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            self.cleanup()
+            return False
 
         def __del__(self):
             """Clean up resources on deletion."""
@@ -280,7 +314,27 @@ else:
 
         def _cleanup_engine(self):
             """Clean up the vLLM engine and associated resources."""
+            import gc
             try:
+                # Clear our references
+                if hasattr(self, 'logprobs_capture'):
+                    self.logprobs_capture.clear()
+                    self.logprobs_capture = None
+                
+                # Delete the engine to free GPU memory
+                if hasattr(self, 'llm_engine') and self.llm_engine is not None:
+                    del self.llm_engine
+                    self.llm_engine = None
+                
+                # Force garbage collection
+                gc.collect()
+                
+                # Clear CUDA cache
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                
+                # Clean up distributed state
                 destroy_model_parallel()
                 destroy_distributed_environment()
             except Exception:
