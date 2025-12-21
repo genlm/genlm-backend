@@ -256,10 +256,15 @@ def test_concurrent_logprobs_and_sample(async_llm):
 
 @cuda_only
 @pytest.mark.asyncio
-async def test_other(async_llm):
-    async_llm_with_cache = AsyncVirtualLM(
-        async_llm.async_llm_engine,
-        cache_size=2,
+async def test_cache(model_name):
+    """Test output caching functionality."""
+    async_llm_with_cache = load_model_by_name(
+        model_name,
+        backend="vllm",
+        llm_opts={
+            "engine_opts": {"gpu_memory_utilization": 0.2},
+            "cache_size": 2,
+        },
     )
 
     logprobs1 = await async_llm_with_cache.next_token_logprobs([0])

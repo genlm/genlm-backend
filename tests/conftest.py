@@ -130,10 +130,10 @@ class ReferenceVirtualLM:
 
     def __init__(self, llm):
         self.llm = llm
-        self.tokenizer = llm.llm_engine.get_tokenizer()
+        self.tokenizer = llm.get_tokenizer()
         self.byte_vocab, self.str_vocab = decode_vocab(self.tokenizer)
         self.vocab_length = len(self.byte_vocab)
-        self.llm.llm_engine.get_model_config().max_logprobs = self.vocab_length
+        self.llm.llm_engine.model_config.max_logprobs = self.vocab_length
         self.DEFAULT_SAMPLING_PARAMS = SamplingParams(
             max_tokens=1,
             n=1,
@@ -142,8 +142,6 @@ class ReferenceVirtualLM:
             stop=None,
             ignore_eos=True,
         )
-
-        self.llm.llm_engine.log_stats = False
 
     @classmethod
     def from_name(cls, model_name, llm_opts=None):
