@@ -280,8 +280,6 @@ def test_visualize(decode):
 
 
 def test_parallel_invalid_device():
-    from genlm.backend.tokenization import Token
-
     vocab = [Token(0, b"a"), Token(1, b"b"), Token(2, b"c")]
     with pytest.raises(ValueError):
         ParallelTokenCharacterTrie(decode=vocab, device="invalid")
