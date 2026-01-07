@@ -6,6 +6,7 @@ on:
     branches:
       - main
 
+  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
 jobs:
@@ -20,21 +21,11 @@ jobs:
       - uses: actions/setup-python@v4
         with:
           python-version: 3.11.5
-          cache: 'pip'
-      - name: Check pip cache size
-        run: |
-          du -sh ~/.cache/pip 2>/dev/null || true
-          du -sh ~/.cache 2>/dev/null || true
-          
+
       - name: Run Tests
         run: |
           python -m venv venv
           source venv/bin/activate
           pip install -e .[test]
           pip install -r requirements-dev.txt
-      
-      - name: Check pip cache size (after install)
-        run: |
-          du -sh ~/.cache/pip 2>/dev/null || true
-          python -m pip cache info || true
-      
+          python -m pytest tests --ignore=tests/test_mlx.py
