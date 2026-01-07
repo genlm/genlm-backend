@@ -17,60 +17,6 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Targeted runner storage diagnosis (add-on)
-        run: |
-          set -euo pipefail
-          
-          echo "===== HUGGING FACE CACHE DIAG ====="
-          
-          # Where HF thinks its home/cache is
-          echo
-          echo "HF env vars:"
-          env | grep -E '^HF_|^TRANSFORMERS_|^HUGGINGFACE_' || echo "(no HF env vars set)"
-          
-          # Resolve cache location
-          HF_HOME_RESOLVED="${HF_HOME:-$HOME/.cache/huggingface}"
-          
-          echo
-          echo "Resolved HF_HOME: $HF_HOME_RESOLVED"
-          
-          if [ ! -d "$HF_HOME_RESOLVED" ]; then
-            echo "HF cache directory does not exist."
-            exit 0
-          fi
-          
-          # Total size
-          echo
-          echo "Total HF cache size:"
-          du -sh "$HF_HOME_RESOLVED"
-          
-          # Breakdown by common subdirs
-          echo
-          echo "Breakdown:"
-          for d in \
-            "$HF_HOME_RESOLVED/hub" \
-            "$HF_HOME_RESOLVED/datasets" \
-            "$HF_HOME_RESOLVED/models" \
-            "$HF_HOME_RESOLVED/transformers" \
-            "$HF_HOME_RESOLVED/tokenizers" \
-          ; do
-            if [ -d "$d" ]; then
-              du -sh "$d"
-            fi
-          done
-          
-          # Largest files (models!)
-          echo
-          echo "Largest files (>100MB):"
-          find "$HF_HOME_RESOLVED" -type f -size +100M -printf '%s\t%p\n' 2>/dev/null \
-            | sort -nr \
-            | head -n 30 \
-            | awk '{printf "%.2f MB\t%s\n", $1/1024/1024, $2}'
-          
-          echo
-          echo "===== DONE ====="
-          
-
       - uses: actions/setup-python@v4
         with:
           python-version: 3.11.5
@@ -82,4 +28,21 @@ jobs:
           source venv/bin/activate
           pip install -e .[test]
           pip install -r requirements-dev.txt
-          python -m pytest tests --ignore=tests/test_mlx.py
+
+      - name: Check Hugging Face cache
+        run: |
+          set -euo pipefail
+      
+          HF_HOME_RESOLVED="${HF_HOME:-$HOME/.cache/huggingface}"
+      
+          echo "HF_HOME=$HF_HOME_RESOLVED"
+          du -sh "$HF_HOME_RESOLVED" 2>/dev/null || echo "No HF cache"
+      
+          if [ -d "$HF_HOME_RESOLVED" ]; then
+            du -sh "$HF_HOME_RESOLVED"/hub "$HF_HOME_RESOLVED"/datasets 2>/dev/null || true
+      
+            find "$HF_HOME_RESOLVED" -type f -size +100M -printf '%s\t%p\n' 2>/dev/null \
+              | sort -nr | head -n 20 \
+              | awk '{printf "%.2f MB\t%s\n", $1/1024/1024, $2}'
+          fi
+      
