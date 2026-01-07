@@ -17,59 +17,6 @@ jobs:
         with:
           fetch-depth: 1
 
-      # ONE-TIME: print disk usage info to diagnose what's filling the runner
-      - name: Full disk usage diagnosis (one-time)
-        run: |
-          set -euxo pipefail
-
-          echo "===== DISK SUMMARY ====="
-          df -h
-
-          echo
-          echo "===== INODE USAGE ====="
-          df -ih
-
-          echo
-          echo "===== TOP-LEVEL USAGE: / ====="
-          sudo du -xh / --max-depth=1 | sort -hr
-
-          echo
-          echo "===== /home USAGE ====="
-          du -xh /home --max-depth=2 | sort -hr
-
-          echo
-          echo "===== WORKSPACE USAGE ====="
-          du -xh "$GITHUB_WORKSPACE" --max-depth=3 | sort -hr || true
-
-          echo
-          echo "===== COMMON CACHE DIRS ====="
-          for d in \
-            ~/.cache \
-            ~/.cache/pip \
-            ~/.cache/torch \
-            ~/.cache/huggingface \
-            ~/.npm \
-            ~/.conda \
-            ~/.local \
-            /usr/local \
-            /usr/share \
-            /opt \
-            "$AGENT_TOOLSDIRECTORY" \
-            /var/lib/docker \
-          ; do
-            if [ -d "$d" ]; then
-              echo "--- $d ---"
-              du -sh "$d"
-            fi
-          done
-
-          echo
-          echo "===== LARGE FILES (>500MB) ====="
-          sudo find / -type f -size +500M -exec ls -lh {} \; 2>/dev/null | sort -k5 -hr | head -n 50
-
-          echo
-          echo "===== DONE ====="
-
       - name: Targeted runner storage diagnosis (add-on)
         run: |
           set -euxo pipefail
@@ -93,7 +40,16 @@ jobs:
           sudo find /home/runner/actions-runner/cached -type f -printf "%s\t%p\n" 2>/dev/null \
             | sort -nr | head -n 50 \
             | awk '{printf "%.2f MB\t%s\n", $1/1024/1024, $2}' || true
+
+
+            
+      - name: Check runner diag size
+        run: |
+          set -euxo pipefail
+          sudo du -sh /home/runner/actions-runner/cached/_diag 2>/dev/null || true
+          sudo ls -lhS /home/runner/actions-runner/cached/_diag 2>/dev/null | head -n 50 || true
       
+            
 
       - uses: actions/setup-python@v4
         with:
