@@ -19,37 +19,57 @@ jobs:
 
       - name: Targeted runner storage diagnosis (add-on)
         run: |
-          set -euxo pipefail
-      
-          echo "===== FILESYSTEM FOR FAILING PATH ====="
-          df -hT /home/runner/actions-runner/cached || true
-          df -ih /home/runner/actions-runner/cached || true
-      
+          set -euo pipefail
+          
+          echo "===== HUGGING FACE CACHE DIAG ====="
+          
+          # Where HF thinks its home/cache is
           echo
-          echo "===== SIZE OF RUNNER CACHE + DIAG ====="
-          sudo du -sh /home/runner/actions-runner/cached || true
-          sudo du -sh /home/runner/actions-runner/cached/_diag || true
-          sudo du -xh /home/runner/actions-runner/cached --max-depth=2 2>/dev/null | sort -hr | head -n 80 || true
-      
+          echo "HF env vars:"
+          env | grep -E '^HF_|^TRANSFORMERS_|^HUGGINGFACE_' || echo "(no HF env vars set)"
+          
+          # Resolve cache location
+          HF_HOME_RESOLVED="${HF_HOME:-$HOME/.cache/huggingface}"
+          
           echo
-          echo "===== BIGGEST DIAG LOGS ====="
-          sudo ls -lhS /home/runner/actions-runner/cached/_diag 2>/dev/null | head -n 50 || true
-      
+          echo "Resolved HF_HOME: $HF_HOME_RESOLVED"
+          
+          if [ ! -d "$HF_HOME_RESOLVED" ]; then
+            echo "HF cache directory does not exist."
+            exit 0
+          fi
+          
+          # Total size
           echo
-          echo "===== BIGGEST FILES UNDER RUNNER CACHE (top 50) ====="
-          sudo find /home/runner/actions-runner/cached -type f -printf "%s\t%p\n" 2>/dev/null \
-            | sort -nr | head -n 50 \
-            | awk '{printf "%.2f MB\t%s\n", $1/1024/1024, $2}' || true
-
-
-            
-      - name: Check runner diag size
-        run: |
-          set -euxo pipefail
-          sudo du -sh /home/runner/actions-runner/cached/_diag 2>/dev/null || true
-          sudo ls -lhS /home/runner/actions-runner/cached/_diag 2>/dev/null | head -n 50 || true
-      
-            
+          echo "Total HF cache size:"
+          du -sh "$HF_HOME_RESOLVED"
+          
+          # Breakdown by common subdirs
+          echo
+          echo "Breakdown:"
+          for d in \
+            "$HF_HOME_RESOLVED/hub" \
+            "$HF_HOME_RESOLVED/datasets" \
+            "$HF_HOME_RESOLVED/models" \
+            "$HF_HOME_RESOLVED/transformers" \
+            "$HF_HOME_RESOLVED/tokenizers" \
+          ; do
+            if [ -d "$d" ]; then
+              du -sh "$d"
+            fi
+          done
+          
+          # Largest files (models!)
+          echo
+          echo "Largest files (>100MB):"
+          find "$HF_HOME_RESOLVED" -type f -size +100M -printf '%s\t%p\n' 2>/dev/null \
+            | sort -nr \
+            | head -n 30 \
+            | awk '{printf "%.2f MB\t%s\n", $1/1024/1024, $2}'
+          
+          echo
+          echo "===== DONE ====="
+          
 
       - uses: actions/setup-python@v4
         with:
