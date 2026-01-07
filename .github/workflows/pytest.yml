@@ -6,7 +6,6 @@ on:
     branches:
       - main
 
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
 jobs:
@@ -17,6 +16,59 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      # ONE-TIME: print disk usage info to diagnose what's filling the runner
+      - name: Full disk usage diagnosis (one-time)
+        run: |
+          set -euxo pipefail
+
+          echo "===== DISK SUMMARY ====="
+          df -h
+
+          echo
+          echo "===== INODE USAGE ====="
+          df -ih
+
+          echo
+          echo "===== TOP-LEVEL USAGE: / ====="
+          sudo du -xh / --max-depth=1 | sort -hr
+
+          echo
+          echo "===== /home USAGE ====="
+          du -xh /home --max-depth=2 | sort -hr
+
+          echo
+          echo "===== WORKSPACE USAGE ====="
+          du -xh "$GITHUB_WORKSPACE" --max-depth=3 | sort -hr || true
+
+          echo
+          echo "===== COMMON CACHE DIRS ====="
+          for d in \
+            ~/.cache \
+            ~/.cache/pip \
+            ~/.cache/torch \
+            ~/.cache/huggingface \
+            ~/.npm \
+            ~/.conda \
+            ~/.local \
+            /usr/local \
+            /usr/share \
+            /opt \
+            "$AGENT_TOOLSDIRECTORY" \
+            /var/lib/docker \
+          ; do
+            if [ -d "$d" ]; then
+              echo "--- $d ---"
+              du -sh "$d"
+            fi
+          done
+
+          echo
+          echo "===== LARGE FILES (>500MB) ====="
+          sudo find / -type f -size +500M -exec ls -lh {} \; 2>/dev/null | sort -k5 -hr | head -n 50
+
+          echo
+          echo "===== DONE ====="
 
       - uses: actions/setup-python@v4
         with:
