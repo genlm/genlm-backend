@@ -231,10 +231,9 @@ class AsyncTransformer(AsyncLM):
                 ]
                 for layer in range(len(past_example))
             ]
+            pasts = DynamicCache.from_legacy_cache(pasts)
         else:
             pasts = None
-
-        pasts = DynamicCache.from_legacy_cache(pasts)
 
         results = self.model(
             input_ids,
