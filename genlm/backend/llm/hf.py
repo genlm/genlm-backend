@@ -236,6 +236,8 @@ class AsyncTransformer(AsyncLM):
         else:
             pasts = None
 
+        pasts = DynamicCache.from_legacy_cache(pasts)
+
         results = self.model(
             input_ids,
             attention_mask=attn_masks,
