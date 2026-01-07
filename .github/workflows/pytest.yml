@@ -32,4 +32,9 @@ jobs:
           source venv/bin/activate
           pip install -e .[test]
           pip install -r requirements-dev.txt
-
+      
+      - name: Check pip cache size (after install)
+        run: |
+          du -sh ~/.cache/pip 2>/dev/null || true
+          python -m pip cache info || true
+      
