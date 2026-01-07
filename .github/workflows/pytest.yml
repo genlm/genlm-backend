@@ -21,7 +21,11 @@ jobs:
         with:
           python-version: 3.11.5
           cache: 'pip'
-
+      - name: Check pip cache size
+        run: |
+          du -sh ~/.cache/pip 2>/dev/null || true
+          du -sh ~/.cache 2>/dev/null || true
+          
       - name: Run Tests
         run: |
           python -m venv venv
@@ -29,20 +33,3 @@ jobs:
           pip install -e .[test]
           pip install -r requirements-dev.txt
 
-      - name: Check Hugging Face cache
-        run: |
-          set -euo pipefail
-      
-          HF_HOME_RESOLVED="${HF_HOME:-$HOME/.cache/huggingface}"
-      
-          echo "HF_HOME=$HF_HOME_RESOLVED"
-          du -sh "$HF_HOME_RESOLVED" 2>/dev/null || echo "No HF cache"
-      
-          if [ -d "$HF_HOME_RESOLVED" ]; then
-            du -sh "$HF_HOME_RESOLVED"/hub "$HF_HOME_RESOLVED"/datasets 2>/dev/null || true
-      
-            find "$HF_HOME_RESOLVED" -type f -size +100M -printf '%s\t%p\n' 2>/dev/null \
-              | sort -nr | head -n 20 \
-              | awk '{printf "%.2f MB\t%s\n", $1/1024/1024, $2}'
-          fi
-      
