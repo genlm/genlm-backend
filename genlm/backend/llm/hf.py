@@ -209,30 +209,28 @@ class AsyncTransformer(AsyncLM):
             [q.position_ids(max_past_length, max_query_length) for q in unique_queries]
         ).to(self.device)
         if past_example:
-            pasts = DynamicCache.from_legacy_cache(
+            pasts = [
                 [
-                    [
-                        torch.cat(
-                            (
-                                *(
-                                    q.past_padded(
-                                        layer,
-                                        j,
-                                        max_past_length,
-                                        past_example[0][0].dtype,
-                                        self.device,
-                                        past_example[0][0].shape,
-                                    )
-                                    for q in unique_queries
-                                ),
+                    torch.cat(
+                        (
+                            *(
+                                q.past_padded(
+                                    layer,
+                                    j,
+                                    max_past_length,
+                                    past_example[0][0].dtype,
+                                    self.device,
+                                    past_example[0][0].shape,
+                                )
+                                for q in unique_queries
                             ),
-                            dim=0,
-                        )
-                        for j in range(2)
-                    ]
-                    for layer in range(len(past_example))
+                        ),
+                        dim=0,
+                    )
+                    for j in range(2)
                 ]
-            )
+                for layer in range(len(past_example))
+            ]
         else:
             pasts = None
 
