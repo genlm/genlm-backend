@@ -70,6 +70,31 @@ jobs:
           echo
           echo "===== DONE ====="
 
+      - name: Targeted runner storage diagnosis (add-on)
+        run: |
+          set -euxo pipefail
+      
+          echo "===== FILESYSTEM FOR FAILING PATH ====="
+          df -hT /home/runner/actions-runner/cached || true
+          df -ih /home/runner/actions-runner/cached || true
+      
+          echo
+          echo "===== SIZE OF RUNNER CACHE + DIAG ====="
+          sudo du -sh /home/runner/actions-runner/cached || true
+          sudo du -sh /home/runner/actions-runner/cached/_diag || true
+          sudo du -xh /home/runner/actions-runner/cached --max-depth=2 2>/dev/null | sort -hr | head -n 80 || true
+      
+          echo
+          echo "===== BIGGEST DIAG LOGS ====="
+          sudo ls -lhS /home/runner/actions-runner/cached/_diag 2>/dev/null | head -n 50 || true
+      
+          echo
+          echo "===== BIGGEST FILES UNDER RUNNER CACHE (top 50) ====="
+          sudo find /home/runner/actions-runner/cached -type f -printf "%s\t%p\n" 2>/dev/null \
+            | sort -nr | head -n 50 \
+            | awk '{printf "%.2f MB\t%s\n", $1/1024/1024, $2}' || true
+      
+
       - uses: actions/setup-python@v4
         with:
           python-version: 3.11.5
