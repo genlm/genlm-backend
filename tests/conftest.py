@@ -90,7 +90,11 @@ def assert_roundtrip(test_case, tokenizer, vocab, vocab_type):
         if vocab_type == "str":
             have = "".join([vocab[i] for i in encd])
         elif vocab_type == "byte":
-            have = b"".join([vocab[i] for i in encd]).decode("utf-8")
+            byte_parts = []
+            for i in encd:
+                item = vocab[i]
+                byte_parts.append(item.byte_string)
+            have = b"".join(byte_parts).decode("utf-8")
         else:
             raise ValueError(
                 f"Invalid vocab_type: {vocab_type}. Must be 'str' or 'byte'."

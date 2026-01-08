@@ -81,9 +81,26 @@ def test_deepseek_r1_unsloth(text, is_fast):
 def test_byte2str_fallbacks():
     tokenizer = load_tokenizer("gpt2", False)
 
-    decode_vocab(tokenizer, byte2str_fallback="latin1")
-    decode_vocab(tokenizer, byte2str_fallback="tokenizer")
-    decode_vocab(tokenizer, byte2str_fallback="replace")
+    byte_vocab1, str_vocab1 = decode_vocab(tokenizer, byte2str_fallback="latin1")
+    assert all(
+        hasattr(token, "token_id") and hasattr(token, "byte_string")
+        for token in byte_vocab1
+    )
+    assert isinstance(str_vocab1, list)
+
+    byte_vocab2, str_vocab2 = decode_vocab(tokenizer, byte2str_fallback="tokenizer")
+    assert all(
+        hasattr(token, "token_id") and hasattr(token, "byte_string")
+        for token in byte_vocab2
+    )
+    assert isinstance(str_vocab2, list)
+
+    byte_vocab3, str_vocab3 = decode_vocab(tokenizer, byte2str_fallback="replace")
+    assert all(
+        hasattr(token, "token_id") and hasattr(token, "byte_string")
+        for token in byte_vocab3
+    )
+    assert isinstance(str_vocab3, list)
 
     with pytest.raises(ValueError):
         decode_vocab(tokenizer, byte2str_fallback="invalid")
@@ -101,3 +118,32 @@ def test_byte_decoder_error_handling():
     incomplete_byte_decoder = {}
     with pytest.raises(ByteDecoderError):
         check_byte_decoder(tokenizer, incomplete_byte_decoder)
+
+
+def test_decode_vocab_failure_both_tokenizers():
+    """Test that decode_vocab raises ValueError when both slow and fast tokenizers fail."""
+    from unittest.mock import patch, MagicMock
+    from genlm.backend.tokenization.bytes import ByteVocabError
+
+    # Create a mock tokenizer
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.is_fast = False
+    mock_tokenizer.name_or_path = "test-model"
+
+    # Mock AutoTokenizer.from_pretrained to return our mock
+    with patch(
+        "genlm.backend.tokenization.vocab.AutoTokenizer.from_pretrained"
+    ) as mock_from_pretrained:
+        mock_from_pretrained.return_value = mock_tokenizer
+
+        # Mock get_byte_vocab to always raise ByteVocabError
+        with patch(
+            "genlm.backend.tokenization.vocab.get_byte_vocab"
+        ) as mock_get_byte_vocab:
+            mock_get_byte_vocab.side_effect = ByteVocabError("Cannot decode vocabulary")
+
+            # This should raise ValueError after both slow and fast tokenizers fail
+            with pytest.raises(
+                ValueError, match="Could not decode byte representation"
+            ):
+                decode_vocab(mock_tokenizer)

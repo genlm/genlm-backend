@@ -3,14 +3,16 @@
 from transformers import AutoTokenizer
 
 from genlm.backend.tokenization.bytes import ByteVocabError, get_byte_vocab
+from genlm.backend.tokenization.token import Token
 
 
 def decode_vocab(tokenizer, byte2str_fallback="tokenizer"):
     """Convert tokenizer vocabulary into byte and string representations.
 
     Warning:
-        The byte representation is the canonical form. The string representation is provided for
-        convenience but may not decode properly for all tokens, especially those containing invalid UTF-8 sequences.
+        The byte representation is the canonical form. Each element in byte_vocab is a Token object that 
+        contains both the token_id and byte_string. The string representation is provided for convenience 
+        but may not decode properly for all tokens, especially those containing invalid UTF-8 sequences.
 
     Args:
         tokenizer: A Hugging Face tokenizer instance
@@ -20,7 +22,8 @@ def decode_vocab(tokenizer, byte2str_fallback="tokenizer"):
             - 'replace': Use Unicode replacement character '�'
 
     Returns:
-        (tuple): (byte_vocab, str_vocab)
+        (tuple): (byte_vocab, str_vocab) where byte_vocab is a list of Token objects
+            and str_vocab is a list of strings
     """
     if byte2str_fallback not in ["latin1", "tokenizer", "replace"]:
         raise ValueError(f"Unknown byte2str_fallback strategy: {byte2str_fallback}")
@@ -32,20 +35,25 @@ def decode_vocab(tokenizer, byte2str_fallback="tokenizer"):
 
     # Try slow tokenizer.
     try:
-        byte_vocab = get_byte_vocab(tokenizer)
+        raw_byte_vocab = get_byte_vocab(tokenizer)
     except ByteVocabError:
         # warnings.warn("Could not decode vocabulary from slow tokenizer. Trying using fast tokenizer.")
 
         # Try fast tokenizer.
         tokenizer = AutoTokenizer.from_pretrained(tokenizer.name_or_path, use_fast=True)
         try:
-            byte_vocab = get_byte_vocab(tokenizer)
+            raw_byte_vocab = get_byte_vocab(tokenizer)
         except ByteVocabError as e:
             raise ValueError(
                 f"Could not decode byte representation of token vocabuary from tokenizer {tokenizer.name_or_path}"
             ) from e
 
-    str_vocab = bytes_to_strs(tokenizer, byte_vocab, byte2str_fallback)
+    # Create Token objects for byte_vocab
+    byte_vocab = [
+        Token(token_id=i, byte_string=raw_byte_vocab[i])
+        for i in range(len(raw_byte_vocab))
+    ]
+    str_vocab = bytes_to_strs(tokenizer, raw_byte_vocab, byte2str_fallback)
 
     return byte_vocab, str_vocab
 

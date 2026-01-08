@@ -5,6 +5,7 @@ import numpy as np
 from transformers import AutoTokenizer
 
 from genlm.backend.llm import MockAsyncLM
+from genlm.backend.tokenization import Token
 from genlm.backend.trie import (
     TokenCharacterTrie,
     ParallelTokenCharacterTrie,
@@ -14,7 +15,7 @@ from genlm.backend.trie import (
 
 @pytest.fixture()
 def decode():
-    return [b"a", b"b", b"ab", b"<eos>"]
+    return [Token(0, b"a"), Token(1, b"b"), Token(2, b"ab"), Token(3, b"<eos>")]
 
 
 @pytest.fixture(scope="module")
@@ -279,5 +280,6 @@ def test_visualize(decode):
 
 
 def test_parallel_invalid_device():
+    vocab = [Token(0, b"a"), Token(1, b"b"), Token(2, b"c")]
     with pytest.raises(ValueError):
-        ParallelTokenCharacterTrie(decode=["a", "b", "c"], device="invalid")
+        ParallelTokenCharacterTrie(decode=vocab, device="invalid")
