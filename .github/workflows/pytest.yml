@@ -23,6 +23,17 @@ jobs:
           python-version: 3.11.5
           cache: 'pip'
 
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
       - name: Install dependencies
         run: |
           python -m pip install -U pip
