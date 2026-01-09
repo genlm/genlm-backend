@@ -17,6 +17,7 @@ def async_llm(model_name):
         "cache_size": 100,
         "engine_opts": {
             "disable_cuda_graph": True,
+            "attention_backend": "torch_native",
         },
     }
     return load_model_by_name(model_name, backend="sgl", llm_opts=llm_opts)
