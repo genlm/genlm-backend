@@ -18,6 +18,7 @@ def async_llm(model_name):
         "engine_opts": {
             "disable_cuda_graph": True,
             "attention_backend": "torch_native",
+            "chunked_prefill_size": 200,
         },
     }
     return load_model_by_name(model_name, backend="sgl", llm_opts=llm_opts)
@@ -48,6 +49,15 @@ def token_ids_list(async_llm):
     return [async_llm.tokenizer.encode(p) for p in test_prompts]
 
 
+@pytest.fixture(scope="module")
+def long_token_ids_list(async_llm):
+    test_prompts = [
+        "Cat goes " + "meow " * 200,
+        "Dog goes " + "woof " * 200,
+    ]
+    return [async_llm.tokenizer.encode(p) for p in test_prompts]
+
+
 @cuda_only
 def test_next_token_logprobs(async_llm, reference_llm, token_ids_list):
     for token_ids in token_ids_list:
@@ -55,6 +65,15 @@ def test_next_token_logprobs(async_llm, reference_llm, token_ids_list):
         want = asyncio.run(reference_llm.next_token_logprobs(token_ids)).cpu().numpy()
         max_rel_err = compare(have, want).max_rel_err
         # Allow a higher tolerance for different backends
+        assert max_rel_err < 2e-2, token_ids
+
+
+@cuda_only
+def test_chunked_prefill(async_llm, reference_llm, long_token_ids_list):
+    for token_ids in long_token_ids_list:
+        have = asyncio.run(async_llm.next_token_logprobs(token_ids)).cpu().numpy()
+        want = asyncio.run(reference_llm.next_token_logprobs(token_ids)).cpu().numpy()
+        max_rel_err = compare(have, want).max_rel_err
         assert max_rel_err < 2e-2, token_ids
 
 
@@ -117,3 +136,21 @@ def test_caching(async_llm):
     want = asyncio.run(async_llm.next_token_logprobs(test_prompt))
 
     assert torch.allclose(have, want)
+
+
+@cuda_only
+def test_clear_kv_cache(async_llm):
+    ret = async_llm.clear_kv_cache()
+    assert ret
+
+
+@cuda_only
+def test_reset_async_queries(async_llm):
+    async_llm.reset_async_queries()
+    assert async_llm._pending == {}
+    assert async_llm._inflight == {}
+
+
+@cuda_only
+def test_other(async_llm):
+    del async_llm
