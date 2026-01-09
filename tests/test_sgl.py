@@ -15,6 +15,9 @@ def model_name():
 def async_llm(model_name):
     llm_opts = {
         "cache_size": 100,
+        "engine_opts": {
+            "disable_cuda_graph": True,
+        },
     }
     return load_model_by_name(model_name, backend="sgl", llm_opts=llm_opts)
 
