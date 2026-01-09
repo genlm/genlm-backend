@@ -33,6 +33,7 @@ docs = [
     "mkdocs-section-index",
 ]
 sgl = [
+    "torch>=2.9.1",
     "sglang",
     "sgl-kernel",
 ]
