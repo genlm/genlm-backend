@@ -27,7 +27,6 @@ jobs:
           python -m pip install -U pip
           pip install -e .[sgl]
           pip install -r requirements-dev.txt
-          pip install --force-reinstall torch>=2.9.1
 
       - name: Run tests
         run: |
