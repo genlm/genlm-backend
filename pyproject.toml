@@ -34,6 +34,7 @@ docs = [
 ]
 sgl = [
     "sglang",
+    "sgl-kernel",
 ]
 
 [tool.setuptools.packages.find]
