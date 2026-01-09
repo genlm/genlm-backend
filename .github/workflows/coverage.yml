@@ -63,7 +63,7 @@ jobs:
 
       - name: Run tests
         run: |
-          coverage run --source=genlm/backend -m pytest --benchmark-disable --ignore=tests/test_mlx.py tests/test_sgl.py
+          coverage run --source=genlm/backend -m pytest tests/test_sgl.py
           coverage json --omit "*/test*"
           coverage report --omit "*/test*"
 
