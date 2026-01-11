@@ -5,7 +5,6 @@ from collections import deque
 
 import torch
 
-from torch.distributed import destroy_process_group
 
 from genlm.backend.cache import OutputCache
 from genlm.backend.llm.base import AsyncLM
@@ -64,6 +63,8 @@ else:
 
             self._rid_to_token_ids: Dict[str, Tuple[int, ...]] = {}
 
+            self._engine_paused: bool = False
+
             super().__init__(tokenizer=self.tokenizer)
 
         @classmethod
@@ -92,39 +93,33 @@ else:
         def clear_kv_cache(self):
             return self.model.flush_cache()
 
-        def reset_async_queries(self, *, exc: Optional[BaseException] = None):
-            if self._task and not self._task.done():
-                self._task.cancel()
+        def _pause_engine(self):
+            self._engine_paused = True
+
+        def _resume_engine(self):
+            self._engine_paused = False
+
+        def reset_async_queries(self):
+            # pause engine
+            self._pause_engine()
 
             for waiters in self._pending.values():
                 for fut in waiters:
-                    if fut.done():
-                        continue
-                    if exc is not None:
-                        fut.set_exception(exc)
-                    else:
-                        fut.cancel()
+                    fut.cancel()
 
             self._pending.clear()
             self._inflight.clear()
+            self._rid_to_token_ids.clear()
 
             if self._queue:
                 while not self._queue.empty():
                     try:
                         _, fut = self._queue.get_nowait()
-                        if not fut.done():
-                            if exc is not None:
-                                fut.set_exception(exc)
-                            else:
-                                fut.cancel()
+                        fut.cancel()
                     except asyncio.QueueEmpty:
                         break
 
-            self._queue = None
-            self._task = None
-            self._loop = None
-            self._loop_thread_id = None
-            self._rid_to_token_ids.clear()
+            self._resume_engine()
 
         def _start(self):
             if not self._task or self._task.done():
@@ -164,18 +159,7 @@ else:
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
 
-            # If background loop is already running on some event loop, use it.
-            if self._loop is not None and self._loop.is_running():
-                if threading.get_ident() == self._loop_thread_id:
-                    raise RuntimeError(
-                        "next_token_logprobs_sync called on event-loop thread; use await"
-                    )
-                cfut = asyncio.run_coroutine_threadsafe(
-                    self.next_token_logprobs(list(key)), self._loop
-                )
-                out = cfut.result()
-            else:
-                out = asyncio.run(self.next_token_logprobs(list(key)))
+            out = asyncio.run(self.next_token_logprobs(token_ids))
 
             if self.cache is not None:
                 self.cache[key] = out
@@ -208,40 +192,39 @@ else:
             self._inflight[token_ids] = req
             return req
 
-        def _process_queue(
-            self,
-            first_item: Tuple[Tuple[int, ...], asyncio.Future],
-        ) -> List[Request]:
+        async def _drain_queue(self) -> List[Request]:
+            """Wait for at least one item, then drain all available items from the queue."""
             assert self._queue is not None
 
-            to_submit: List[Request] = []
+            requests: List[Request] = []
 
-            token_ids, fut = first_item
+            # Wait for at least one item
+            token_ids, fut = await self._queue.get()
             req = self._register(token_ids, fut)
             if req is not None:
-                to_submit.append(req)
+                requests.append(req)
 
             while True:
                 try:
                     token_ids, fut = self._queue.get_nowait()
+                    req = self._register(token_ids, fut)
+                    if req is not None:
+                        requests.append(req)
                 except asyncio.QueueEmpty:
                     break
-                req = self._register(token_ids, fut)
-                if req is not None:
-                    to_submit.append(req)
 
-            return to_submit
+            return requests
 
         async def _background_loop(self) -> None:
             assert self._queue is not None
             try:
                 while True:
-                    first_item = await self._queue.get()
+                    requests = await self._drain_queue()
+                    self.model.process_input_requests(requests)
 
-                    to_submit = self._process_queue(first_item)
-                    if to_submit:
-                        self.model.process_input_requests(to_submit)
-
+                    if self._engine_paused:
+                        await asyncio.sleep(0.01)
+                        continue
                     while batch := self.model.get_next_batch_to_run():
                         with torch.inference_mode():
                             batch_result = self.model.run_batch(batch)
@@ -250,28 +233,25 @@ else:
                             for i, req in enumerate(batch.reqs):
                                 if req.finished():
                                     token_ids = self._rid_to_token_ids.pop(req.rid)
-                                    print("just finished", token_ids)
 
                                     logits = (
                                         batch_result.logits_output.next_token_logits[i]
                                     )
-                                    out = torch.log_softmax(logits, dim=-1).to("cpu")
-
+                                    out = torch.log_softmax(logits, dim=-1).to(
+                                        "cpu", non_blocking=True
+                                    )
                                     waiters = self._pending.pop(token_ids, [])
                                     self._inflight.pop(token_ids, None)
 
                                     for f in waiters:
-                                        if not f.done() and not f.cancelled():
-                                            f.set_result(out)
+                                        f.set_result(out)
 
             except asyncio.CancelledError:
                 raise
-            except Exception as e:  # pragma: no cover
-                # Never hang: fail everybody.
+            except Exception as e:
                 for waiters in self._pending.values():
                     for f in waiters:
-                        if not f.done() and not f.cancelled():
-                            f.set_exception(e)
+                        f.set_exception(e)
                 self._pending.clear()
                 self._inflight.clear()
                 self._rid_to_token_ids.clear()
@@ -282,6 +262,5 @@ else:
             self._cleanup_engine()
 
         def _cleanup_engine(self):
-            destroy_process_group()
             destroy_model_parallel()
             destroy_distributed_environment()

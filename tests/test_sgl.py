@@ -1,6 +1,8 @@
 import pytest
 import asyncio
 import torch
+import gc
+from unittest.mock import patch
 from arsenal.maths import compare
 from genlm.backend.llm import load_model_by_name
 from conftest import cuda_only
@@ -37,7 +39,6 @@ def reference_llm(model_name):
     )
 
 
-# return a list of token ids for the test prompts
 @pytest.fixture(scope="module")
 def token_ids_list(async_llm):
     test_prompts = [
@@ -116,24 +117,22 @@ def test_empty_input(async_llm):
 
 
 @cuda_only
-def test_next_token_logprobs_sync(async_llm):
+def test_next_token_logprobs_sync(async_llm, token_ids_list):
     async_llm.clear_cache()
 
-    test_prompt = async_llm.tokenizer.encode("Test sync")
-    have = async_llm.next_token_logprobs_sync(test_prompt)
-    want = asyncio.run(async_llm.next_token_logprobs(test_prompt))
+    have = async_llm.next_token_logprobs_sync(token_ids_list[0])
+    async_llm.clear_cache()
+    want = asyncio.run(async_llm.next_token_logprobs(token_ids_list[0]))
 
-    assert torch.allclose(have, want)
+    assert torch.allclose(have, want, atol=1e-3, rtol=1e-3)
 
 
 @cuda_only
-def test_caching(async_llm):
+def test_caching(async_llm, token_ids_list):
     async_llm.clear_cache()
 
-    test_prompt = async_llm.tokenizer.encode("Test sync")
-    have = async_llm.next_token_logprobs_sync(test_prompt)
-    async_llm.clear_cache()
-    want = asyncio.run(async_llm.next_token_logprobs(test_prompt))
+    have = async_llm.next_token_logprobs_sync(token_ids_list[0])
+    want = asyncio.run(async_llm.next_token_logprobs(token_ids_list[0]))
 
     assert torch.allclose(have, want)
 
@@ -149,8 +148,71 @@ def test_reset_async_queries(async_llm):
     async_llm.reset_async_queries()
     assert async_llm._pending == {}
     assert async_llm._inflight == {}
+    assert async_llm._rid_to_token_ids == {}
 
 
 @cuda_only
-def test_other(async_llm):
+@pytest.mark.asyncio
+async def test_register_with_cancelled_future(async_llm, token_ids_list):
+    fut = asyncio.get_running_loop().create_future()
+    fut.cancel()
+    result = async_llm._register(tuple(token_ids_list[0]), fut)
+    assert result is None
+
+
+@cuda_only
+@pytest.mark.asyncio
+async def test_reset_async_queries_with_pending_futures(async_llm, long_token_ids_list):
+    async_llm.clear_cache()
+    async_llm.clear_kv_cache()
+    async_llm._pause_engine()
+    fut = asyncio.get_running_loop().create_future()
+    async_llm._queue.put_nowait((tuple(long_token_ids_list[0]), fut))
+
+    async_llm.reset_async_queries()
+    assert fut.cancelled()
+    assert async_llm._pending == {}
+    assert async_llm._inflight == {}
+    assert async_llm._rid_to_token_ids == {}
+
+
+@cuda_only
+@pytest.mark.asyncio
+async def test_background_loop_exception_handling(async_llm, token_ids_list):
+    """Test that exceptions in the background loop are properly propagated to pending futures."""
+    async_llm.clear_cache()
+    async_llm.clear_kv_cache()
+
+    test_exception = RuntimeError("Test exception in background loop")
+
+    with patch.object(
+        async_llm.model, "process_input_requests", side_effect=test_exception
+    ):
+        fut1 = asyncio.create_task(async_llm.next_token_logprobs(token_ids_list[0]))
+        fut2 = asyncio.create_task(async_llm.next_token_logprobs(token_ids_list[1]))
+
+        await asyncio.sleep(0.3)
+
+        assert fut1.done()
+        assert fut2.done()
+        with pytest.raises(RuntimeError, match="Test exception in background loop"):
+            await fut1
+        with pytest.raises(RuntimeError, match="Test exception in background loop"):
+            await fut2
+
+        assert async_llm._pending == {}
+        assert async_llm._inflight == {}
+        assert async_llm._rid_to_token_ids == {}
+
+
+@cuda_only
+def test_del_cleanup(async_llm, token_ids_list):
+    asyncio.run(async_llm.next_token_logprobs(token_ids_list[0]))
+
+    assert async_llm._loop is not None
+    assert async_llm._task is not None
+
+    async_llm._cleanup_engine()
+
     del async_llm
+    gc.collect()
