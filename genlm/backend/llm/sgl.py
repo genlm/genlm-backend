@@ -25,23 +25,42 @@ except ImportError:  # pragma: no cover
 
 if not HAS_SGL:
 
-    class AsyncSGLTransformer(AsyncLM):
+    class AsyncSGLTransformer:  # pragma: no cover
+        """Placeholder class when SGLang is not installed."""
+
         def __init__(self, *args, **kwargs):  # pragma: no cover
             raise ImportError(
-                "sglang is not installed. Please install it with 'pip install sglang'"
+                "SGLang is not installed. Please install it with 'pip install sglang'"
             )
 
         @classmethod
         def from_name(cls, *args, **kwargs):  # pragma: no cover
             raise ImportError(
-                "sglang is not installed. Please install it with 'pip install sglang'"
+                "SGLang is not installed. Please install it with 'pip install sglang'"
             )
 
 else:
     SP = SamplingParams(max_new_tokens=0)
 
     class AsyncSGLTransformer(AsyncLM):
+        """Asynchronous wrapper around a SGLang inference engine.
+
+        This class provides an asynchronous interface to SGLang inference engine with
+        automatic batching and caching. It extends AsyncLM to provide efficient
+        batched inference.
+
+        The model automatically batches concurrent requests and uses a cache to store
+        computed log probabilities for reuse.
+        """
+
         def __init__(self, sgl_model, cache_size=0, cache_opts=None):
+            """Initialize an `AsyncSGLTransformer` instance.
+
+            Args:
+                sgl_model: The SGLang inference engine instance.
+                cache_size (int, optional): Maximum number of log probabilities to keep in memory.
+                cache_opts (dict, optional): Additional configuration options for the cache.
+            """
             self.model = sgl_model
             self.tokenizer = sgl_model.tokenizer
 
@@ -69,6 +88,17 @@ else:
 
         @classmethod
         def from_name(cls, model_id, engine_opts=None, gpu_id=0, **kwargs):
+            """Create an `AsyncSGLTransformer` instance from a model name.
+
+            Args:
+                model_id (str): The name of the model to load.
+                engine_opts (dict, optional): Additional configuration options for the SGLang inference engine.
+                gpu_id (int, optional): The GPU ID to use for the inference engine.
+                **kwargs: Additional arguments passed to the `AsyncSGLTransformer` constructor.
+
+            Returns:
+                (AsyncSGLTransformer): An initialized `AsyncSGLTransformer` instance.
+            """
             _engine_opts = {
                 "sampling_backend": "pytorch",
                 "skip_tokenizer_init": False,
@@ -87,19 +117,25 @@ else:
             return cls(mod, **kwargs)
 
         def clear_cache(self):
+            """Clear the logprobs output cache."""
             if self.cache:
                 self.cache.clear()
 
         def clear_kv_cache(self):
+            """Clear the SGLang cache."""
             return self.model.flush_cache()
 
         def _pause_engine(self):
+            """Pause the SGLang inference engine."""
             self._engine_paused = True
 
         def _resume_engine(self):
+            """Resume the SGLang inference engine."""
             self._engine_paused = False
 
         def reset_async_queries(self):
+            """Clear any pending language model queries from the queue. Use this method when an exception prevented an inference algorithm from executing
+            to completion."""
             self._pause_engine()
 
             for waiters in self._pending.values():
@@ -121,20 +157,37 @@ else:
             self._resume_engine()
 
         def _start(self):
+            """Start the background loop if it is not already running."""
             if not self._task or self._task.done():
                 self._queue = asyncio.Queue()
                 self._loop = asyncio.get_running_loop()
                 self._loop_thread_id = threading.get_ident()
                 self._task = asyncio.create_task(self._background_loop())
 
-        def _queue_request(self, key: Tuple[int, ...]) -> asyncio.Future:
+        def _queue_request(self, token_ids):
+            """Queue a request to the SGLang inference engine.
+
+            Args:
+                token_ids (List[int]): The token IDs of the request.
+
+            Returns:
+                (asyncio.Future): A future that will be set with the result of the request.
+            """
             if not self._task or self._task.done():
                 self._start()
             fut = asyncio.get_running_loop().create_future()
-            self._queue.put_nowait((key, fut))
+            self._queue.put_nowait((token_ids, fut))
             return fut
 
-        async def next_token_logprobs(self, token_ids: List[int]) -> torch.Tensor:
+        async def next_token_logprobs(self, token_ids: List[int]):
+            """Request log probabilities of next token. This version is asynchronous because it automatically batches concurrent requests; use with `await`.
+
+            Args:
+                token_ids (list[int]): a list of token ids, representing a prompt to the language model.
+
+            Returns:
+                logprobs (torch.Tensor): a tensor of with the language model's log (normalized) probabilities for the next token following the prompt.
+            """
             if not token_ids:
                 raise ValueError("Token ids must not be empty")
 
@@ -150,7 +203,15 @@ else:
 
             return out
 
-        def next_token_logprobs_sync(self, token_ids: List[int]) -> torch.Tensor:
+        def next_token_logprobs_sync(self, token_ids: List[int]):
+            """Request log probabilities of next token synchronously.
+
+            Args:
+                token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
+
+            Returns:
+                (torch.Tensor): Normalized log probability tensor.
+            """
             if not token_ids:
                 raise ValueError("Token ids must not be empty")
 
@@ -164,15 +225,24 @@ else:
                 self.cache[key] = out
             return out
 
-        def _register(
-            self, token_ids: Tuple[int, ...], fut: asyncio.Future
-        ) -> Optional[Request]:
-            if fut.cancelled():
+        def _register(self, token_ids, future):
+            """Register a request with the SGLang inference engine.
+
+            Args:
+                token_ids (List[int]): The token IDs of the request.
+                future (asyncio.Future): A future that will be set with the result of the request.
+
+            Returns:
+                (Request | None): The Request object that was registered, or None if the request future was cancelled.
+            """
+            if future.cancelled():
                 return None
 
-            self._pending.setdefault(token_ids, []).append(fut)
+            key = tuple(token_ids)
 
-            if token_ids in self._inflight:
+            self._pending.setdefault(key, []).append(future)
+
+            if key in self._inflight:
                 return None
 
             req = Request(
@@ -187,26 +257,26 @@ else:
                 stream=False,
             )
             req.regenerate_rid()
-            self._rid_to_token_ids[req.rid] = token_ids
-            self._inflight[token_ids] = req
+            self._rid_to_token_ids[req.rid] = key
+            self._inflight[key] = req
             return req
 
         async def _drain_queue(self) -> List[Request]:
             """Wait for at least one item, then drain all available items from the queue."""
             assert self._queue is not None
 
-            requests: List[Request] = []
+            requests = []
 
             # Wait for at least one item
-            token_ids, fut = await self._queue.get()
-            req = self._register(token_ids, fut)
+            token_ids, future = await self._queue.get()
+            req = self._register(token_ids, future)
             if req is not None:
                 requests.append(req)
 
             while True:
                 try:
-                    token_ids, fut = self._queue.get_nowait()
-                    req = self._register(token_ids, fut)
+                    token_ids, future = self._queue.get_nowait()
+                    req = self._register(token_ids, future)
                     if req is not None:
                         requests.append(req)
                 except asyncio.QueueEmpty:
@@ -214,7 +284,8 @@ else:
 
             return requests
 
-        async def _background_loop(self) -> None:
+        async def _background_loop(self):
+            """Background task that processes queued requests from the queue."""
             assert self._queue is not None
             try:
                 while True:
@@ -253,9 +324,11 @@ else:
                 raise
 
         def _cleanup_engine(self):
+            """Clean up the SGLang inference engine and distributed environment."""
+            self.reset_async_queries()
             destroy_model_parallel()
             destroy_distributed_environment()
 
         def __del__(self):  # pragma: no cover
-            self.reset_async_queries()
+            """Clean up the SGLang inference engine when the instance is deleted."""
             self._cleanup_engine()
