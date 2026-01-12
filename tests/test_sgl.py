@@ -144,14 +144,6 @@ def test_clear_kv_cache(async_llm):
 
 
 @cuda_only
-def test_reset_async_queries(async_llm):
-    async_llm.reset_async_queries()
-    assert async_llm._pending == {}
-    assert async_llm._inflight == {}
-    assert async_llm._rid_to_token_ids == {}
-
-
-@cuda_only
 @pytest.mark.asyncio
 async def test_register_with_cancelled_future(async_llm, token_ids_list):
     fut = asyncio.get_running_loop().create_future()
@@ -161,19 +153,28 @@ async def test_register_with_cancelled_future(async_llm, token_ids_list):
 
 
 @cuda_only
+def test_reset_async_queries(async_llm):
+    async_llm.reset_async_queries()
+    assert async_llm._pending == {}
+    assert async_llm._inflight == {}
+    assert async_llm._rid_to_token_ids == {}
+
+
+@cuda_only
 @pytest.mark.asyncio
 async def test_reset_async_queries_with_pending_futures(async_llm, long_token_ids_list):
     async_llm.clear_cache()
     async_llm.clear_kv_cache()
     async_llm._pause_engine()
     fut = asyncio.get_running_loop().create_future()
-    async_llm._queue.put_nowait((tuple(long_token_ids_list[0]), fut))
-
+    async_llm._register(tuple(long_token_ids_list[0]), fut)
+    assert async_llm._pending != {}
     async_llm.reset_async_queries()
     assert fut.cancelled()
     assert async_llm._pending == {}
     assert async_llm._inflight == {}
     assert async_llm._rid_to_token_ids == {}
+    async_llm._resume_engine()
 
 
 @cuda_only

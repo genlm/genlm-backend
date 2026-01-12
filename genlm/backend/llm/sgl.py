@@ -100,7 +100,6 @@ else:
             self._engine_paused = False
 
         def reset_async_queries(self):
-            # pause engine
             self._pause_engine()
 
             for waiters in self._pending.values():
@@ -112,7 +111,7 @@ else:
             self._rid_to_token_ids.clear()
 
             if self._queue:
-                while not self._queue.empty():
+                while True:
                     try:
                         _, fut = self._queue.get_nowait()
                         fut.cancel()
@@ -229,22 +228,18 @@ else:
                         with torch.inference_mode():
                             batch_result = self.model.run_batch(batch)
                             self.model.process_batch_result(batch, batch_result)
+                            logprobs = torch.log_softmax(
+                                batch_result.logits_output.next_token_logits, dim=-1
+                            ).to("cpu", non_blocking=True)
 
                             for i, req in enumerate(batch.reqs):
                                 if req.finished():
                                     token_ids = self._rid_to_token_ids.pop(req.rid)
-
-                                    logits = (
-                                        batch_result.logits_output.next_token_logits[i]
-                                    )
-                                    out = torch.log_softmax(logits, dim=-1).to(
-                                        "cpu", non_blocking=True
-                                    )
                                     waiters = self._pending.pop(token_ids, [])
                                     self._inflight.pop(token_ids, None)
 
                                     for f in waiters:
-                                        f.set_result(out)
+                                        f.set_result(logprobs[i])
 
             except asyncio.CancelledError:
                 raise
@@ -257,10 +252,10 @@ else:
                 self._rid_to_token_ids.clear()
                 raise
 
-        def __del__(self):
-            self.reset_async_queries()
-            self._cleanup_engine()
-
         def _cleanup_engine(self):
             destroy_model_parallel()
             destroy_distributed_environment()
+
+        def __del__(self):  # pragma: no cover
+            self.reset_async_queries()
+            self._cleanup_engine()
