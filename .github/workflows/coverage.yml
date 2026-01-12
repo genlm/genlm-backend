@@ -24,15 +24,13 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m venv venv
-          source venv/bin/activate
+          python -m pip install -U pip
           pip install -e .[lora]
           pip install --force-reinstall 'triton==3.2.0'
           pip install -r requirements-dev.txt
 
       - name: Run tests
         run: |
-          source venv/bin/activate
           coverage run --source=genlm/backend -m pytest --benchmark-disable --ignore=tests/test_mlx.py
           coverage json --omit "*/test*"
           coverage report --omit "*/test*"
@@ -60,14 +58,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m venv venv
-          source venv/bin/activate
+          python -m pip install -U pip
           pip install -e .[mlx]
           pip install -r requirements-dev.txt
 
       - name: Run MLX tests
         run: |
-          source venv/bin/activate
           coverage run --source=genlm/backend -m pytest tests/test_mlx.py
           coverage json --omit "*/test*"
           coverage report --omit "*/test*"

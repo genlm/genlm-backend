@@ -11,7 +11,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -32,12 +32,12 @@ jobs:
         with:
           python-version: 3.11.5
           cache: 'pip'
-
-      - name: Run Tests
+      - name: Install dependencies
         run: |
-          python -m venv venv
-          source venv/bin/activate
+          python -m pip install -U pip
           pip install -e .[lora]
           pip install --force-reinstall 'triton==3.2.0'
           pip install -r requirements-dev.txt
+      - name: Run Tests
+        run: |
           python -m pytest tests --ignore=tests/test_mlx.py
