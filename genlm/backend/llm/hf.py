@@ -175,7 +175,7 @@ class AsyncTransformer(AsyncLM):
         """
         self.model.load_adapter(lora_path, lora_name)
     
-    def set_lora(self, lora_name='lora_1'):
+    def set_lora(self, lora_path=None, lora_name='lora_1'):
         """Activate a previously loaded LoRA adapter.
 
         Args:

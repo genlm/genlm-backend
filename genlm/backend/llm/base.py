@@ -84,7 +84,7 @@ class AsyncLM(ABC):
             "add_new_lora must be implemented by subclasses"
         ) # pragma: no cover
     
-    def set_lora(self, lora_name):
+    def set_lora(self, lora_path, lora_name):
         """Activate a previously loaded LoRA adapter.
 
         Args:
