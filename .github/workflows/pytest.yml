@@ -17,18 +17,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
 
       - uses: actions/setup-python@v4
         with:
           python-version: 3.11.5
           cache: 'pip'
-
       - name: Install dependencies
         run: |
           python -m pip install -U pip
-          pip install -e .
+          pip install -e .[lora]
+          pip install --force-reinstall 'triton==3.2.0'
           pip install -r requirements-dev.txt
-
       - name: Run Tests
         run: |
           python -m pytest tests --ignore=tests/test_mlx.py
