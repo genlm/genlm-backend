@@ -61,7 +61,7 @@ def test_reference_llm_only(reference_llm):
 
 def test_load_model_by_name_error(transformer_llm):
     with pytest.raises(ValueError):
-        transformer_llm.set_lora('lora_2')
+        transformer_llm.set_lora(None,'lora_2')
 
 # Note: "lora_extra_vocab_size" is 256, so async has an increased vocab size
 # "lora_extra_vocab_size" will be removed in vllm v0.12.0 (genlm-backend uses vllm v0.10.0)

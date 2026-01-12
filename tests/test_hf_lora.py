@@ -38,7 +38,7 @@ def transformer_llm_nolora(model_name):
 @pytest.fixture(scope="module", autouse=True)
 def load_lora(transformer_llm, lora_path):
     transformer_llm.add_new_lora(lora_path, 'lora_1')
-    transformer_llm.set_lora('lora_1')
+    transformer_llm.set_lora(None,'lora_1')
 
 
 @pytest.fixture(scope="module")
@@ -53,7 +53,7 @@ def token_ids_list(transformer_llm):
 
 def test_load_model_by_name_error(transformer_llm):
     with pytest.raises(ValueError):
-        transformer_llm.set_lora('lora_2')
+        transformer_llm.set_lora(None,'lora_2')
 
 @cuda_only
 def test_transformer_llm(transformer_llm):
@@ -117,7 +117,7 @@ def test_set_disable_swap(transformer_llm, token_ids_list, transformer_llm_nolor
         lora_logprobs_swapped.append(asyncio.run(transformer_llm.next_token_logprobs(token_ids)).cpu().numpy())
         transformer_llm.clear_lora()
         nolora_logprobs_swapped.append(asyncio.run(transformer_llm.next_token_logprobs(token_ids)).cpu().numpy())
-        transformer_llm.set_lora('lora_1')
+        transformer_llm.set_lora(None,'lora_1')
         
     for i, (noswapped, swapped) in enumerate(zip(lora_logprobs_noswapped, lora_logprobs_swapped)):
         assert compare(noswapped, swapped).max_rel_err < 1e-3, token_ids_list[i]
@@ -138,7 +138,7 @@ def test_set_disable_swap_unchached(transformer_llm, token_ids_list, transformer
         lora_logprobs_swapped.append(transformer_llm.next_token_logprobs_uncached(token_ids).cpu().numpy())
         transformer_llm.clear_lora()
         nolora_logprobs_swapped.append(transformer_llm.next_token_logprobs_uncached(token_ids).cpu().numpy())
-        transformer_llm.set_lora('lora_1')
+        transformer_llm.set_lora(None,'lora_1')
         
     for i, (noswapped, swapped) in enumerate(zip(lora_logprobs_noswapped, lora_logprobs_swapped)):
         assert compare(noswapped, swapped).max_rel_err < 1e-3, token_ids_list[i]
@@ -157,7 +157,7 @@ def test_set_disable_swap_sync(transformer_llm, token_ids_list, transformer_llm_
         lora_logprobs_swapped.append(transformer_llm.next_token_logprobs_sync(token_ids).cpu().numpy())
         transformer_llm.clear_lora()
         nolora_logprobs_swapped.append(transformer_llm.next_token_logprobs_sync(token_ids).cpu().numpy())
-        transformer_llm.set_lora('lora_1')
+        transformer_llm.set_lora(None,'lora_1')
         
     for i, (noswapped, swapped) in enumerate(zip(lora_logprobs_noswapped, lora_logprobs_swapped)):
         assert compare(noswapped, swapped).max_rel_err < 1e-3, token_ids_list[i]
@@ -182,7 +182,7 @@ def test_set_disable_swap_batch(transformer_llm, token_ids_list, transformer_llm
         lora_logprobs_swapped.extend(asyncio.run(transformer_llm.batch_next_token_logprobs(token_ids)).cpu().numpy())
         transformer_llm.clear_lora()
         nolora_logprobs_swapped.extend(asyncio.run(transformer_llm.batch_next_token_logprobs(token_ids)).cpu().numpy())
-        transformer_llm.set_lora('lora_1')
+        transformer_llm.set_lora(None,'lora_1')
         
     for i, (noswapped, swapped) in enumerate(zip(lora_logprobs_noswapped, lora_logprobs_swapped)):
         assert compare(noswapped, swapped).max_rel_err < 1e-3, token_ids_list[i]
@@ -202,7 +202,7 @@ def test_set_disable_swap_batch_sync(transformer_llm, token_ids_list, transforme
         lora_logprobs_swapped.extend(transformer_llm.batch_next_token_logprobs_sync(token_ids).cpu().numpy())
         transformer_llm.clear_lora()
         nolora_logprobs_swapped.extend(transformer_llm.batch_next_token_logprobs_sync(token_ids).cpu().numpy())
-        transformer_llm.set_lora('lora_1')
+        transformer_llm.set_lora(None,'lora_1')
         
     for i, (noswapped, swapped) in enumerate(zip(lora_logprobs_noswapped, lora_logprobs_swapped)):
         assert compare(noswapped, swapped).max_rel_err < 1e-3, token_ids_list[i]
