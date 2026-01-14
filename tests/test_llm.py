@@ -32,7 +32,7 @@ def async_llm(model_name):
 @pytest.fixture(scope="module")
 def transformer_llm(model_name):
     return load_model_by_name(
-        model_name, backend="hf", llm_opts={"hf_opts": {"torch_dtype": torch.float16}}
+        model_name, backend="hf", llm_opts={"hf_opts": {"dtype": torch.float16}}
     )
 
 
