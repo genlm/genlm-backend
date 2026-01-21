@@ -1,3 +1,4 @@
+import asyncio
 import torch
 import logging
 import warnings
@@ -7,7 +8,7 @@ from genlm.backend.cache import OutputCache
 
 try:
     from vllm import AsyncLLMEngine, SamplingParams, AsyncEngineArgs
-    from vllm.utils import Counter
+    from vllm.utils.counter import Counter
     from vllm.inputs import TokensPrompt
 
     from vllm.distributed.parallel_state import (
@@ -40,27 +41,7 @@ if not HAS_VLLM:
 else:
     logging.getLogger("vllm.engine.async_llm_engine").setLevel(logging.WARNING)
 
-    class PassThroughLogitsProcessor:
-        """A logits processor that stores the logprobs and passes the logits through."""
-
-        def __init__(self):
-            self.log_probs = None
-
-        def __call__(self, past_token_ids, logits):
-            assert self.log_probs is None, (
-                "Log probs already set. This should never happen."
-            )
-            self.log_probs = torch.log_softmax(logits, dim=-1, dtype=logits.dtype)
-            return logits
-
     class AsyncVirtualLM(AsyncLM):
-        default_params = {
-            "max_tokens": 1,
-            "n": 1,
-            "detokenize": False,
-            "stop": None,
-            "ignore_eos": True,
-        }
 
         def __init__(self, async_llm_engine, cache_size=0, cache_opts={}):
             """Initialize an `AsyncVirtualLM` instance.
@@ -74,7 +55,7 @@ else:
                 The cache stores the log probabilities for previously seen token sequences to avoid redundant requests. KV caching is handled internally by the vLLM engine.
             """
             self.async_llm_engine = async_llm_engine
-            self.tokenizer = async_llm_engine.engine.get_tokenizer()
+            self.tokenizer = async_llm_engine.tokenizer
             self.request_counter = Counter()
             self.cache = (
                 OutputCache(maxsize=cache_size, **cache_opts)
@@ -82,9 +63,20 @@ else:
                 else None
             )
 
-            async_llm_engine.engine.log_stats = False
-
             super().__init__(tokenizer=self.tokenizer)
+
+            # Store vocab size for logprobs requests
+            self._vocab_size = len(self.tokenizer)
+
+            # Default sampling params for logprobs - request full vocab logprobs
+            self._logprobs_params = SamplingParams(
+                max_tokens=1,
+                n=1,
+                detokenize=False,
+                stop=None,
+                ignore_eos=True,
+                logprobs=self._vocab_size,
+            )
 
         @classmethod
         def from_name(cls, model_name, engine_opts=None, **kwargs):
@@ -93,7 +85,7 @@ else:
             Args:
                 model_name (str): Name of the model to load.
                 engine_opts (dict): Additional options to pass to the `AsyncLLMEngine`. The engine will be
-                    configured with prefix caching enabled and async output processing disabled by default.
+                    configured with prefix caching enabled by default.
                 **kwargs: Additional arguments passed to `AsyncVirtualLM` constructor.
 
             Returns:
@@ -111,10 +103,15 @@ else:
                         "custom sampling functionality."
                     )
 
+            # Get vocab size to set max_logprobs - we need to load tokenizer first
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            vocab_size = len(tokenizer)
+
             engine_opts = {
                 "enable_prefix_caching": True,
-                "disable_log_requests": True,
-                "disable_async_output_proc": True,  # This parameter forces vLLM to use v0, which is currently what we want to do.
+                "max_logprobs": vocab_size,  # Enable full vocab logprobs
                 **(engine_opts or {}),
             }
 
@@ -126,7 +123,10 @@ else:
 
         @property
         def underlying_model(self):
-            return self.async_llm_engine.engine.model_executor.driver_worker.model_runner.model
+            raise NotImplementedError(
+                "underlying_model is not available with vLLM V1 engine. "
+                "The V1 engine does not expose direct model access."
+            )
 
         async def next_token_logprobs(self, token_ids):
             """Request log probabilities of next token asynchronously with output caching.
@@ -165,22 +165,28 @@ else:
             req_id = str(next(self.request_counter))
             prompt = TokensPrompt(prompt_token_ids=token_ids)
 
-            outputs = []
-            processor = PassThroughLogitsProcessor()
             async for output in self.async_llm_engine.generate(
                 prompt=prompt,
-                sampling_params=SamplingParams(
-                    **self.default_params, logits_processors=[processor]
-                ),
+                sampling_params=self._logprobs_params,
                 request_id=req_id,
             ):
                 if output.finished:
-                    outputs.append(output)
+                    # Extract logprobs from output
+                    # output.outputs[0].logprobs is a list of dicts (one per generated token)
+                    # Each dict maps token_id -> LogProb object with .logprob attribute
+                    logprobs_dict = output.outputs[0].logprobs[0]
 
-            assert processor.log_probs is not None, (
-                "Log probs should be set by the logits processor."
-            )
-            return processor.log_probs
+                    # Convert to tensor - logprobs_dict contains LogProb objects
+                    # We need to create a full vocab tensor
+                    log_probs = torch.full(
+                        (self._vocab_size,), float("-inf"), dtype=torch.float32
+                    )
+                    for token_id, logprob_obj in logprobs_dict.items():
+                        log_probs[token_id] = logprob_obj.logprob
+
+                    return log_probs
+
+            raise RuntimeError("No output received from vLLM engine")
 
         def next_token_logprobs_sync(self, token_ids):
             """Request log probabilities of next token synchronously.
@@ -203,32 +209,28 @@ else:
             Returns:
                 (torch.Tensor): A tensor of normalized log probability tensors, one for each prompt in the input list.
             """
-            req_ids = []
-            req_id2processors = {}
-            for token_ids in token_ids_list:
-                req_id = str(next(self.request_counter))
-                req_ids.append(req_id)
-                processor = PassThroughLogitsProcessor()
-                req_id2processors[req_id] = processor
-                self.async_llm_engine.engine.add_request(
-                    prompt=TokensPrompt(prompt_token_ids=token_ids),
-                    params=SamplingParams(
-                        **self.default_params, logits_processors=[processor]
-                    ),
-                    request_id=req_id,
-                )
 
-            while self.async_llm_engine.engine.has_unfinished_requests():
-                output = self.async_llm_engine.engine.step()
-                for out in output:
-                    if out.finished:
-                        assert out.request_id in req_id2processors, (
-                            f"{out.request_id} not in requested IDs"
-                        )
+            async def _batch_async():
+                results = []
+                for token_ids in token_ids_list:
+                    result = await self._next_token_logprobs(tuple(token_ids))
+                    results.append(result)
+                return torch.stack(results)
 
-            return torch.stack(
-                [req_id2processors[req_id].log_probs for req_id in req_ids]
-            )
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop is not None:
+                # We're already in an async context, create a new task
+                import concurrent.futures
+
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, _batch_async())
+                    return future.result()
+            else:
+                return asyncio.run(_batch_async())
 
         def clear_cache(self):
             """Clear output cache."""
@@ -242,7 +244,7 @@ else:
         def _cleanup_engine(self):
             """Clean up the vLLM engine and associated resources."""
             if async_engine := getattr(self, "async_llm_engine", None):
-                async_engine.shutdown_background_loop()
+                async_engine.shutdown()
                 destroy_model_parallel()
                 destroy_distributed_environment()
 

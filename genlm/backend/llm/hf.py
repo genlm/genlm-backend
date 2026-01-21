@@ -234,7 +234,7 @@ class AsyncTransformer(AsyncLM):
         else:
             pasts = None
 
-        pasts = DynamicCache.from_legacy_cache(pasts)
+        pasts = DynamicCache(pasts) if pasts is not None else None
 
         results = self.model(
             input_ids,

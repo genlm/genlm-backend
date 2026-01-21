@@ -130,10 +130,9 @@ class ReferenceVirtualLM:
 
     def __init__(self, llm):
         self.llm = llm
-        self.tokenizer = llm.llm_engine.get_tokenizer()
+        self.tokenizer = llm.get_tokenizer()
         self.byte_vocab, self.str_vocab = decode_vocab(self.tokenizer)
         self.vocab_length = len(self.byte_vocab)
-        self.llm.llm_engine.get_model_config().max_logprobs = self.vocab_length
         self.DEFAULT_SAMPLING_PARAMS = SamplingParams(
             max_tokens=1,
             n=1,
@@ -143,16 +142,22 @@ class ReferenceVirtualLM:
             ignore_eos=True,
         )
 
-        self.llm.llm_engine.log_stats = False
-
     @classmethod
     def from_name(cls, model_name, llm_opts=None):
         if not HAS_VLLM:
             raise ImportError("vLLM not installed.")
+
+        # Get vocab size to set max_logprobs
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        vocab_size = len(tokenizer)
+
         llm_opts = {
             "enable_prefix_caching": True,
             "disable_log_stats": True,
             "dtype": "float16",
+            "max_logprobs": vocab_size,  # Enable full vocab logprobs
             **(llm_opts or {}),
         }
         llm = LLM(model=model_name, tokenizer=model_name, **llm_opts)
@@ -198,8 +203,8 @@ class ReferenceVirtualLM:
         return logprobs
 
     def __del__(self):
-        if llm_engine := getattr(self.llm, "llm_engine"):
-            if executor := getattr(llm_engine, "model_executor"):
-                destroy_model_parallel()
-                destroy_distributed_environment()
-                del executor
+        try:
+            destroy_model_parallel()
+            destroy_distributed_environment()
+        except Exception:
+            pass
