@@ -154,16 +154,6 @@ def test_parallel_trie_with_duplicates(device):
     assert np.isclose(node_weights[leaf_2], 0.7, rtol=1e-5)
 
 
-def test_trie_requires_token_objects():
-    """Test trie requires Token objects and rejects raw bytes."""
-    with pytest.raises(TypeError, match="TokenCharacterTrie requires Token objects"):
-        TokenCharacterTrie(decode=[b"a", b"b", b"c"])
-    with pytest.raises(TypeError, match="TokenCharacterTrie requires Token objects"):
-        TokenCharacterTrie(decode=["a", "b", "c"])
-    with pytest.raises(TypeError, match="TokenCharacterTrie requires Token objects"):
-        TokenCharacterTrie(decode=[Token(0, b"a"), b"b"])
-
-
 def test_token_in_trie_word2leaf_key():
     """Test that word2leaf correctly uses (bytes, token_id) as key."""
     vocab = [

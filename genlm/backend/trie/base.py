@@ -12,8 +12,9 @@ class TokenCharacterTrie:
         """Initialize a `TokenCharacterTrie`.
 
         Args:
-            decode (list[Token]): List of Token objects representing the token vocabulary.
-                Each Token must have both token_id and byte_string attributes.
+            decode (list): List representing the token vocabulary.
+                Each element must be iterable. Token objects use byte_string for iteration,
+                other iterables (bytes, EndOfSequence) are iterated directly.
         """
         self.decode = decode
         self.word2leaf = {}
@@ -22,16 +23,15 @@ class TokenCharacterTrie:
         # Maps position index in decode to leaf node: idx_to_leaf[k] = (idx, leaf_node)
         self.idx_to_leaf = []
 
-        for idx, token in enumerate(self.decode):
-            # Require Token objects
-            if not isinstance(token, Token):
-                raise TypeError(
-                    f"TokenCharacterTrie requires Token objects, got {type(token).__name__}. "
-                    f"Use decode_vocab() to get Token objects from a tokenizer."
-                )
-
-            token_id = token.token_id
-            word = token.byte_string
+        for idx, item in enumerate(self.decode):
+            # Get the word (bytes to iterate) and a unique key for word2leaf
+            if isinstance(item, Token):
+                word = item.byte_string
+                word_key = (item.byte_string, item.token_id)
+            else:
+                # For other iterables, iterate directly
+                word = item
+                word_key = item
 
             curr = self.root
             for letter in word:
@@ -40,14 +40,15 @@ class TokenCharacterTrie:
                     self.children.append({})
                 curr = self.children[curr][letter]
 
-            # Each token gets its own leaf, even if multiple tokens have the same byte_string
-            # We use (None, token_id) as the edge key to allow multiple tokens with same bytes
-            word_bytes = token.byte_string
-            leaf_edge_key = (None, token_id)
+            # Each item gets its own leaf
+            leaf_edge_key = (None, idx)  # Use position index for uniqueness
 
             self.children[curr][leaf_edge_key] = last = len(self.children)
             self.children.append({})
-            self.word2leaf[(word_bytes, token_id)] = last
+
+            if word_key in self.word2leaf:
+                raise ValueError(f"Duplicate word in vocabulary: {word_key}")
+            self.word2leaf[word_key] = last
 
             # Use position index for weight array indexing
             self.idx_to_leaf.append((idx, last))
