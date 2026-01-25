@@ -77,11 +77,11 @@ def test_trie_with_duplicate_byte_strings():
     trie = TokenCharacterTrie(decode=vocab)
 
     # Verify that both tokens got their own leaf nodes
-    assert len(trie.token_id_to_leaf) == 4
+    assert len(trie.idx_to_leaf) == 4
 
     # Get the leaf nodes for duplicate tokens
-    leaf_1 = trie.token_id_to_leaf[1][1]
-    leaf_2 = trie.token_id_to_leaf[2][1]
+    leaf_1 = trie.idx_to_leaf[1][1]
+    leaf_2 = trie.idx_to_leaf[2][1]
 
     # should have different leaf nodes
     assert leaf_1 != leaf_2, "Tokens with same byte_string should have different leaves"
@@ -108,8 +108,8 @@ def test_trie_weight_sum_with_duplicates():
     node_weights = trie.weight_sum(weights)
 
     # Get the leaf weights for the duplicate tokens
-    leaf_1 = trie.token_id_to_leaf[1][1]
-    leaf_2 = trie.token_id_to_leaf[2][1]
+    leaf_1 = trie.idx_to_leaf[1][1]
+    leaf_2 = trie.idx_to_leaf[2][1]
 
     # Each leaf should have its own weight
     assert np.isclose(node_weights[leaf_1], 0.3, rtol=1e-5)
@@ -139,16 +139,16 @@ def test_parallel_trie_with_duplicates(device):
 
     trie = ParallelTokenCharacterTrie(decode=vocab, device=device)
 
-    # Verify token_id_to_leaf mapping
-    assert len(trie.token_id_to_leaf) == 4
+    # Verify idx_to_leaf mapping
+    assert len(trie.idx_to_leaf) == 4
 
     # Test weight sum
     weights = torch.tensor([0.1, 0.2, 0.7, 0.0], device=device)
     node_weights = trie.weight_sum(weights)
 
     # Verify the duplicate tokens have independent weights
-    leaf_1 = trie.token_id_to_leaf[1][1]
-    leaf_2 = trie.token_id_to_leaf[2][1]
+    leaf_1 = trie.idx_to_leaf[1][1]
+    leaf_2 = trie.idx_to_leaf[2][1]
     assert leaf_1 != leaf_2
     assert np.isclose(node_weights[leaf_1], 0.2, rtol=1e-5)
     assert np.isclose(node_weights[leaf_2], 0.7, rtol=1e-5)

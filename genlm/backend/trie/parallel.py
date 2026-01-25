@@ -13,8 +13,9 @@ class ParallelTokenCharacterTrie(TokenCharacterTrie):
             raise ValueError(f"Invalid device: {device}. Must be 'cpu', 'cuda' or None")
 
         self._build_reachability_matrix()
-        self.token_ids = torch.tensor(
-            self.token_id_to_leaf[:, 0], dtype=torch.long, device=self.device
+        # Position indices for weight array indexing
+        self.positions = torch.tensor(
+            self.idx_to_leaf[:, 0], dtype=torch.long, device=self.device
         )
 
     def _build_parent_map(self):
@@ -36,7 +37,7 @@ class ParallelTokenCharacterTrie(TokenCharacterTrie):
         - The leaf node i itself (self-connection)
         - An ancestor of leaf node i in the trie
         """
-        leaf_indices = self.token_id_to_leaf[:, 1]
+        leaf_indices = self.idx_to_leaf[:, 1]
         parent = self._build_parent_map()
 
         rows, cols = [], []
@@ -98,7 +99,7 @@ class ParallelTokenCharacterTrie(TokenCharacterTrie):
             numpy.ndarray: Summed weights for each node in the trie, shape (batch_size × num_nodes).
         """
         ws = self._preprocess_ws(ws)
-        masses = torch.sparse.mm(ws[:, self.token_ids], self.M)
+        masses = torch.sparse.mm(ws[:, self.positions], self.M)
         return masses.cpu().numpy()
 
     def weight_max(self, ws):
@@ -127,8 +128,8 @@ class ParallelTokenCharacterTrie(TokenCharacterTrie):
         """
         ws = self._preprocess_ws(ws)
 
-        # Get leaf weights
-        leaf_weights = ws[:, self.token_ids]  # shape: (batch_size × num_leafs)
+        # Get leaf weights (indexed by position in decode)
+        leaf_weights = ws[:, self.positions]  # shape: (batch_size × num_leafs)
         batch_size = leaf_weights.shape[0]
 
         # Use scatter_reduce to propagate maximum values in parallel
