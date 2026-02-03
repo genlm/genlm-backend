@@ -1,7 +1,7 @@
 import torch
 import pytest
 import asyncio
-from conftest import cuda_only, ReferenceVirtualLM
+from conftest import cuda_only, v1_capable, ReferenceVirtualLM
 from arsenal.maths import compare
 from genlm.backend.llm import load_model_by_name
 import numpy as np
@@ -69,12 +69,12 @@ def token_ids_list(async_llm):
     return token_ids_list
 
 
-@cuda_only
+@v1_capable
 def test_async_llm_only(async_llm):
     assert async_llm is not None
 
 
-@cuda_only
+@v1_capable
 def test_reference_llm_only(reference_llm):
     assert reference_llm is not None
 
@@ -88,7 +88,7 @@ def test_load_model_by_name_error(transformer_llm):
 # "lora_extra_vocab_size" will be removed in vllm v0.12.0 (genlm-backend uses vllm v0.10.0)
 # This does not happen with the reference llm since the vocab size is set using the hf tokenizer (decode)
 # and then logprobs=vocab_length is set in SamplingParameters in vllm
-@cuda_only
+@v1_capable
 def test_next_token_logprobs(async_llm, reference_llm, token_ids_list, lora_path):
     async_llm.add_new_lora(lora_path)
     async_llm.set_lora(lora_path)
@@ -121,7 +121,7 @@ def test_next_token_logprobs(async_llm, reference_llm, token_ids_list, lora_path
     reference_llm.clear_lora()
 
 
-@cuda_only
+@v1_capable
 def test_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list, lora_path):
     async_llm.add_new_lora(lora_path)
     async_llm.set_lora(lora_path)
@@ -152,7 +152,7 @@ def test_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list, lora
     reference_llm.clear_lora()
 
 
-@cuda_only
+@v1_capable
 def test_batch_next_token_logprobs_sync(
     async_llm, reference_llm, token_ids_list, lora_path
 ):
@@ -188,7 +188,7 @@ def test_batch_next_token_logprobs_sync(
     reference_llm.clear_lora()
 
 
-@cuda_only
+@v1_capable
 def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list, lora_path):
     async_llm.add_new_lora(lora_path)
     async_llm.set_lora(lora_path)
@@ -224,7 +224,7 @@ def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list, lor
     reference_llm.clear_lora()
 
 
-@cuda_only
+@v1_capable
 def test_swapping_lora_requests(token_ids_list, async_llm, lora_path):
     async_llm.clear_lora()
     logits_noswapped_nolora = []
@@ -270,7 +270,7 @@ def test_swapping_lora_requests(token_ids_list, async_llm, lora_path):
     async_llm.clear_lora()
 
 
-@cuda_only
+@v1_capable
 def test_next_token_logprobs_agreement(
     transformer_llm, async_llm, token_ids_list, lora_path
 ):
@@ -293,7 +293,7 @@ def test_next_token_logprobs_agreement(
     async_llm.clear_lora()
 
 
-@cuda_only
+@v1_capable
 def test_batch_next_token_logprobs_agreement(
     transformer_llm, async_llm, token_ids_list, lora_path
 ):

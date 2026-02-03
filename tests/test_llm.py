@@ -1,7 +1,7 @@
 import torch
 import pytest
 import asyncio
-from conftest import cuda_only, ReferenceVirtualLM
+from conftest import cuda_only, v1_capable, ReferenceVirtualLM
 from arsenal.maths import compare
 from genlm.backend.llm import load_model_by_name, MockAsyncLM
 
@@ -49,7 +49,7 @@ def token_ids_list(async_llm):
     return token_ids_list
 
 
-@cuda_only
+@v1_capable
 # @settings(deadline=None)
 # @given(text=st.text(min_size=1, max_size=1000))
 def test_next_token_logprobs(async_llm, reference_llm, token_ids_list):
@@ -59,7 +59,7 @@ def test_next_token_logprobs(async_llm, reference_llm, token_ids_list):
         assert compare(have, want).max_rel_err < 1e-3, token_ids
 
 
-@cuda_only
+@v1_capable
 def test_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list):
     for token_ids in token_ids_list:
         have = async_llm.next_token_logprobs_sync(token_ids).cpu().numpy()
@@ -67,7 +67,7 @@ def test_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list):
         assert compare(have, want).max_rel_err < 1e-3, token_ids
 
 
-@cuda_only
+@v1_capable
 # @settings(deadline=None)
 # @given(text_list=st.lists(st.text(min_size=1, max_size=1000), min_size=1, max_size=5))
 def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list):
@@ -79,7 +79,7 @@ def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list):
         assert compare(have, want).max_rel_err < 1e-3, token_ids_list[i]
 
 
-@cuda_only
+@v1_capable
 # @settings(deadline=None)
 # @given(text_list=st.lists(st.text(min_size=1, max_size=1000), min_size=1, max_size=5))
 def test_batch_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list):
@@ -91,7 +91,7 @@ def test_batch_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list
         assert compare(have, want).max_rel_err < 1e-3, "Sync context"
 
 
-@cuda_only
+@v1_capable
 # @settings(deadline=None)
 # @given(text_list=st.lists(st.text(min_size=1, max_size=1000), min_size=1, max_size=5))
 def test_batch_next_token_logprobs_sync_in_async(
@@ -109,7 +109,7 @@ def test_batch_next_token_logprobs_sync_in_async(
         assert compare(have, want).max_rel_err < 1e-3, "Sync in async context"
 
 
-@cuda_only
+@v1_capable
 def test_next_token_logprobs_agreement(transformer_llm, async_llm, token_ids_list):
     for token_ids in token_ids_list:
         have = transformer_llm.next_token_logprobs_uncached(token_ids).cpu().numpy()
@@ -123,7 +123,7 @@ def test_next_token_logprobs_agreement(transformer_llm, async_llm, token_ids_lis
         assert comparison.pearson > 0.99, ["corr", comparison.pearson, token_ids]
 
 
-@cuda_only
+@v1_capable
 def test_batch_next_token_logprobs_agreement(
     transformer_llm, async_llm, token_ids_list
 ):
@@ -167,7 +167,7 @@ def test_load_model_by_name_error():
         load_model_by_name("gpt2", backend="invalid")
 
 
-@cuda_only
+@v1_capable
 def test_generate_agreement(async_llm, transformer_llm):
     prompt = async_llm.tokenizer.encode("Hello, world!")
     max_tokens = 10
@@ -197,7 +197,7 @@ def test_generate_agreement(async_llm, transformer_llm):
     assert generated_token_ids_vllm == generated_token_ids_hf
 
 
-@cuda_only
+@v1_capable
 def test_sample_seeded_vllm(async_llm):
     generated_token_ids = asyncio.run(
         async_llm.sample(
@@ -214,7 +214,7 @@ def test_sample_seeded_vllm(async_llm):
     )
 
 
-@cuda_only
+@v1_capable
 def test_batch_sample(async_llm):
     prompts = [
         async_llm.tokenizer.encode("Hello, world!"),
@@ -254,7 +254,7 @@ def test_concurrent_logprobs_and_sample(async_llm):
     asyncio.run(both_tasks())
 
 
-@cuda_only
+@v1_capable
 @pytest.mark.asyncio
 async def test_cache(model_name):
     """Test output caching functionality."""
