@@ -1,7 +1,10 @@
 import os
+import asyncio
 import torch
 import logging
 import threading
+import hashlib
+from collections import defaultdict
 
 # Enable vLLM v1 with in-process mode (no multiprocessing)
 # This must be set BEFORE importing vllm
@@ -13,6 +16,7 @@ from genlm.backend.cache import OutputCache
 
 try:
     from vllm import LLM, SamplingParams
+    from vllm.lora.request import LoRARequest
     from vllm.inputs import TokensPrompt
     from vllm.distributed.parallel_state import (
         destroy_model_parallel,
@@ -109,7 +113,15 @@ else:
             "ignore_eos": True,
         }
 
-        def __init__(self, llm_engine, logprobs_capture, cache_size=0, cache_opts={}):
+        def __init__(
+            self,
+            llm_engine,
+            logprobs_capture,
+            cache_size=0,
+            cache_opts={},
+            batch_size=20,
+            timeout=0.02,
+        ):
             """Initialize an `AsyncVirtualLM` instance.
 
             Args:
@@ -117,6 +129,8 @@ else:
                 logprobs_capture (GlobalLogprobsCapture): The global logprobs capture processor.
                 cache_size (int, optional): Maximum size of the output cache. If 0, caching is disabled. Defaults to 0.
                 cache_opts (dict, optional): Additional options to pass to the [`OutputCache`][genlm.backend.cache.OutputCache] constructor. Defaults to {}.
+                batch_size (int, optional): Maximum queries to process in one batch during auto-batching. Defaults to 20.
+                timeout (float, optional): Seconds to wait since last query before processing current batch. Defaults to 0.02.
 
             Note:
                 The cache stores the log probabilities for previously seen token sequences to avoid redundant requests. KV caching is handled internally by the vLLM engine.
@@ -130,6 +144,13 @@ else:
                 if cache_size > 0
                 else None
             )
+            self.lora_request = None
+            self.lora_name_to_ids = {}
+
+            self.queries = []
+            self.batch_size = batch_size
+            self.timeout = timeout
+            self.timer = None
 
             super().__init__(tokenizer=self.tokenizer)
 
@@ -183,52 +204,167 @@ else:
             model_runner = engine_core.model_executor.driver_worker.worker.model_runner
             return model_runner.model
 
+        def clear_lora(self):
+            """
+            Disable any active LoRA adapter for the vLLM engine.
+            """
+            self.lora_request = None
+
+        def add_new_lora(self, lora_path, lora_name="lora_1"):
+            """Load a LoRA adapter into the base model by creating a unique id for it.
+
+            Args:
+                lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
+                lora_name (str): Name to assign to the loaded adapter.
+
+            Notes:
+                This does not activate the adapter immediately. Call `set_lora()` to enable the adapter.
+            """
+            self.lora_name_to_ids[lora_name] = self.hash_to_int(lora_name)
+
+        def hash_to_int(self, value):
+            """Generates a deterministic unique id for a LoRA adapter from its name.
+
+            Args:
+                value (str): The name of the LoRA adapter to hash.
+
+            Returns:
+                An integer ID corresponding to the LoRA adapter, in the range 0–255.
+            """
+            hash_bytes = hashlib.shake_128(value.encode("utf-8")).digest(1)
+            return int.from_bytes(hash_bytes, "big")
+
+        def set_lora(self, lora_path, lora_name="lora_1"):
+            """Configure a LoRA adapter request for the vLLM engine.
+
+            Args:
+                lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
+                lora_name (str): Identifier name to associate with this LoRA adapter within vLLM.
+                lora_id (int): Globally unique ID for the adapter.
+            """
+            if lora_name not in self.lora_name_to_ids.keys():
+                raise ValueError(
+                    f"A LoRA adapter named '{lora_name}' has not been loaded yet. Please call add_new_lora() first to load and name your LoRA adapters."
+                )
+            self.lora_request = LoRARequest(
+                lora_name, self.lora_name_to_ids[lora_name], lora_path
+            )
+
         async def next_token_logprobs(self, token_ids):
-            """Request log probabilities of next token asynchronously with output caching.
+            """Request log probabilities of next token asynchronously with auto-batching.
+
+            Concurrent calls to this method are automatically batched into a single
+            ``LLM.generate()`` call for efficiency. Use with ``await``.
 
             Args:
                 token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
 
             Returns:
                 result (torch.Tensor): Normalized log probability tensor.
-
-            Note:
-                This method is async for API compatibility but uses synchronous vLLM internally.
             """
             key = tuple(token_ids)
 
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
 
-            result = self._next_token_logprobs_impl(token_ids)
+            future = asyncio.get_running_loop().create_future()
+            self._add_query(token_ids, future)
+            result = await future
 
             if self.cache is not None:
                 self.cache[key] = result
 
             return result
 
-        def _next_token_logprobs_impl(self, token_ids):
-            """Internal implementation for getting next token logprobs."""
+        def _add_query(self, token_ids, future):
+            """Add a query to be evaluated in the next batch.
+
+            Args:
+                token_ids (list[int]): Token IDs representing the query prompt.
+                future (asyncio.Future): Future to store the result in.
+            """
+            self.queries.append((token_ids, future))
+
+            if self.timer:
+                self.timer.cancel()
+                self.timer = None
+
+            if len(self.queries) >= self.batch_size:
+                self._batch_evaluate()
+            else:
+                self.timer = asyncio.get_running_loop().call_later(
+                    self.timeout, self._batch_evaluate
+                )
+
+        def _batch_evaluate(self):
+            """Process all queued queries in a single batched ``generate()`` call."""
+            queries, self.queries = self.queries, []
+            if not queries:
+                return
+
+            if self.timer:
+                self.timer.cancel()
+                self.timer = None
+
             if self.logprobs_capture is None:
-                raise RuntimeError("Cannot use model after cleanup() has been called")
-            # Clear any stale captured logprobs
+                exc = RuntimeError("Cannot use model after cleanup() has been called")
+                for _, future in queries:
+                    future.set_exception(exc)
+                return
+
+            # Deduplicate: group futures by identical prompts
+            query_groups = defaultdict(list)
+            for token_ids, future in queries:
+                query_groups[tuple(token_ids)].append(future)
+
+            unique_token_ids = list(query_groups.keys())
+
             self.logprobs_capture.clear()
 
-            # Generate one token
-            self.llm_engine.generate(
-                prompts=TokensPrompt(prompt_token_ids=list(token_ids)),
-                sampling_params=SamplingParams(**self.default_params),
-                use_tqdm=False,
-            )
+            prompts = [
+                TokensPrompt(prompt_token_ids=list(token_ids))
+                for token_ids in unique_token_ids
+            ]
 
-            # Get captured logprobs
-            logprobs = self.logprobs_capture.get_logprobs(batch_index=0)
-            assert logprobs is not None, "Logprobs should be captured by global processor"
+            try:
+                self.llm_engine.generate(
+                    prompts=prompts,
+                    sampling_params=SamplingParams(**self.default_params),
+                    use_tqdm=False,
+                )
 
-            return logprobs
+                all_logprobs = self.logprobs_capture.get_all_logprobs()
+                assert all_logprobs is not None, "Logprobs should be captured"
+                assert all_logprobs.shape[0] == len(unique_token_ids), (
+                    f"Expected {len(unique_token_ids)} logprobs, got {all_logprobs.shape[0]}"
+                )
+
+                for i, key in enumerate(unique_token_ids):
+                    logprobs = all_logprobs[i]
+                    for future in query_groups[key]:
+                        future.set_result(logprobs)
+            except Exception as exc:
+                for futures in query_groups.values():
+                    for future in futures:
+                        if not future.done():
+                            future.set_exception(exc)
+
+        def reset_async_queries(self):
+            """Clear any pending queries from the queue.
+
+            Use this method when an exception prevented an inference algorithm
+            from executing to completion.
+            """
+            self.queries = []
+            if self.timer:
+                self.timer.cancel()
+                self.timer = None
 
         def next_token_logprobs_sync(self, token_ids):
             """Request log probabilities of next token synchronously.
+
+            Does not support auto-batching. For batched sync calls, use
+            ``batch_next_token_logprobs_sync`` instead.
 
             Args:
                 token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
@@ -241,7 +377,19 @@ else:
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
 
-            result = self._next_token_logprobs_impl(token_ids)
+            if self.logprobs_capture is None:
+                raise RuntimeError("Cannot use model after cleanup() has been called")
+
+            self.logprobs_capture.clear()
+
+            self.llm_engine.generate(
+                prompts=TokensPrompt(prompt_token_ids=list(token_ids)),
+                sampling_params=SamplingParams(**self.default_params),
+                use_tqdm=False,
+            )
+
+            result = self.logprobs_capture.get_logprobs(batch_index=0)
+            assert result is not None, "Logprobs should be captured by global processor"
 
             if self.cache is not None:
                 self.cache[key] = result
@@ -315,25 +463,26 @@ else:
         def _cleanup_engine(self):
             """Clean up the vLLM engine and associated resources."""
             import gc
+
             try:
                 # Clear our references
-                if hasattr(self, 'logprobs_capture'):
+                if hasattr(self, "logprobs_capture"):
                     self.logprobs_capture.clear()
                     self.logprobs_capture = None
-                
+
                 # Delete the engine to free GPU memory
-                if hasattr(self, 'llm_engine') and self.llm_engine is not None:
+                if hasattr(self, "llm_engine") and self.llm_engine is not None:
                     del self.llm_engine
                     self.llm_engine = None
-                
+
                 # Force garbage collection
                 gc.collect()
-                
+
                 # Clear CUDA cache
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
-                
+
                 # Clean up distributed state
                 destroy_model_parallel()
                 destroy_distributed_environment()

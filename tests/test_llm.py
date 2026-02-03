@@ -10,13 +10,13 @@ from genlm.backend.llm import load_model_by_name, MockAsyncLM, AsyncVirtualLM
 
 @pytest.fixture(scope="module")
 def model_name():
-    return "gpt2"
+    return "HuggingFaceTB/SmolLM-135M" 
 
 
 @pytest.fixture(scope="module")
 def reference_llm(model_name):
     return ReferenceVirtualLM.from_name(
-        model_name, llm_opts={"gpu_memory_utilization": 0.2, "dtype": "float16"}
+        model_name, llm_opts={"gpu_memory_utilization": 0.1, "dtype": "float16"}
     )
 
 
@@ -25,7 +25,7 @@ def async_llm(model_name):
     return load_model_by_name(
         model_name,
         backend="vllm",
-        llm_opts={"engine_opts": {"gpu_memory_utilization": 0.2, "dtype": "float16"}},
+        llm_opts={"engine_opts": {"gpu_memory_utilization": 0.1, "dtype": "float16"}},
     )
 
 
@@ -210,7 +210,7 @@ def test_sample_seeded_vllm(async_llm):
     )
     assert (
         async_llm.tokenizer.decode(generated_token_ids)
-        == " I'm sorry, but I'm not sure"
+        == " I'm new here and I'm trying to understand" #I'm sorry, but I'm not sure
     )
 
 

@@ -383,7 +383,6 @@ else:
 
             assert len(results) == len(unique_queries)
 
-            results = results
             for i, q in enumerate(unique_queries):
                 for dup_query in query_groups[tuple(q.prompt)]:
                     dup_query.future.set_result(results[i])

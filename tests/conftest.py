@@ -9,6 +9,7 @@ try:
         destroy_model_parallel,
         destroy_distributed_environment,
     )
+    from vllm.lora.request import LoRARequest
 
     HAS_VLLM = True
 except ImportError:
@@ -142,6 +143,7 @@ class ReferenceVirtualLM:
             stop=None,
             ignore_eos=True,
         )
+        self.lora_request = None
 
     @classmethod
     def from_name(cls, model_name, llm_opts=None):
@@ -156,11 +158,18 @@ class ReferenceVirtualLM:
         llm = LLM(model=model_name, tokenizer=model_name, **llm_opts)
         return cls(llm)
 
+    def clear_lora(self):
+        self.lora_request = None
+
+    def set_lora(self, lora_path, lora_name="current_lora", lora_id=1):
+        self.lora_request = LoRARequest(lora_name, lora_id, lora_path)
+
     def next_token_logprobs_sync(self, token_ids):
         outputs = self.llm.generate(
             prompts=TokensPrompt(prompt_token_ids=token_ids),
             sampling_params=self.DEFAULT_SAMPLING_PARAMS,
             use_tqdm=False,
+            lora_request=self.lora_request
         )
         logprobs = np.array(
             [
@@ -183,6 +192,7 @@ class ReferenceVirtualLM:
             prompts=prompts,
             sampling_params=self.DEFAULT_SAMPLING_PARAMS,
             use_tqdm=False,
+            lora_request=self.lora_request
         )
         logprobs = np.array(
             [
