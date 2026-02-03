@@ -17,13 +17,11 @@ Usage:
 """
 
 import os
-import sys
 import time
 import json
 import argparse
 from datetime import datetime
 from dataclasses import dataclass, asdict
-from typing import Optional
 
 # Parse args BEFORE importing anything else (to set env vars)
 parser = argparse.ArgumentParser(description="Benchmark vLLM v0 vs v1")
@@ -177,7 +175,7 @@ def run_benchmark(
         # V1 uses our optimized implementation
         from genlm.backend.llm import AsyncVirtualLM
 
-        print(f"Loading model with v1 engine...")
+        print("Loading model with v1 engine...")
         t0 = time.perf_counter()
         llm = AsyncVirtualLM.from_name(
             model_name,
