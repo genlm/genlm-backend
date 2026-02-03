@@ -22,7 +22,7 @@ try:
         destroy_model_parallel,
         destroy_distributed_environment,
     )
-    from vllm.v1.sample.logits_processor import LogitsProcessor, BatchUpdate
+    from vllm.v1.sample.logits_processor import LogitsProcessor
 
     HAS_VLLM = True
 except ImportError:  # pragma: no cover
