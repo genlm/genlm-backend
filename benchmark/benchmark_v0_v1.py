@@ -108,7 +108,7 @@ def run_benchmark(
             """Wrapper to make v0 API compatible with our benchmark."""
 
             def __init__(self, model_name, gpu_mem, extra_opts):
-                print(f"Loading model with v0 engine...")
+                print("Loading model with v0 engine...")
                 t0 = time.perf_counter()
                 self.llm = LLM(
                     model=model_name,
