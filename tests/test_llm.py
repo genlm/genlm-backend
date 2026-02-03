@@ -1,7 +1,7 @@
 import torch
 import pytest
 import asyncio
-from conftest import cuda_only, v1_capable, ReferenceVirtualLM
+from conftest import v1_capable, ReferenceVirtualLM
 from arsenal.maths import compare
 from genlm.backend.llm import load_model_by_name, MockAsyncLM
 
