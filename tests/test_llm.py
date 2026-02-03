@@ -10,7 +10,7 @@ from genlm.backend.llm import load_model_by_name, MockAsyncLM, AsyncVirtualLM
 
 @pytest.fixture(scope="module")
 def model_name():
-    return "HuggingFaceTB/SmolLM-135M" 
+    return "HuggingFaceTB/SmolLM-135M"
 
 
 @pytest.fixture(scope="module")
@@ -210,7 +210,7 @@ def test_sample_seeded_vllm(async_llm):
     )
     assert (
         async_llm.tokenizer.decode(generated_token_ids)
-        == " I'm new here and I'm trying to understand" #I'm sorry, but I'm not sure
+        == " I'm new here and I'm trying to understand"  # I'm sorry, but I'm not sure
     )
 
 

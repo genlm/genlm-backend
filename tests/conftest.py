@@ -169,7 +169,7 @@ class ReferenceVirtualLM:
             prompts=TokensPrompt(prompt_token_ids=token_ids),
             sampling_params=self.DEFAULT_SAMPLING_PARAMS,
             use_tqdm=False,
-            lora_request=self.lora_request
+            lora_request=self.lora_request,
         )
         logprobs = np.array(
             [
@@ -192,7 +192,7 @@ class ReferenceVirtualLM:
             prompts=prompts,
             sampling_params=self.DEFAULT_SAMPLING_PARAMS,
             use_tqdm=False,
-            lora_request=self.lora_request
+            lora_request=self.lora_request,
         )
         logprobs = np.array(
             [

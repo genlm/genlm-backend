@@ -82,26 +82,26 @@ class AsyncLM(ABC):
         """
         raise NotImplementedError(
             "add_new_lora must be implemented by subclasses"
-        ) # pragma: no cover
-    
+        )  # pragma: no cover
+
     def set_lora(self, lora_path, lora_name):
         """Activate a previously loaded LoRA adapter.
 
         Args:
             lora_name (str): Name of the LoRA adapter to activate.
-        
+
         """
         raise NotImplementedError(
             "set_lora must be implemented by subclasses"
-        ) # pragma: no cover
-    
+        )  # pragma: no cover
+
     def clear_lora(self):
         """
         Deactivate all LoRA adapters.
         """
         raise NotImplementedError(
             "clear_lora must be implemented by subclasses"
-        ) # pragma: no cover
+        )  # pragma: no cover
 
     def clear_cache(self):
         """Clear any caches used by the language model. No-op in base class."""
