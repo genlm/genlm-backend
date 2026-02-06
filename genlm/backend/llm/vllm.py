@@ -6,15 +6,14 @@ import threading
 import hashlib
 from collections import defaultdict
 
-# Enable vLLM v1 with in-process mode (no multiprocessing)
-# This must be set BEFORE importing vllm
-os.environ.setdefault("VLLM_USE_V1", "1")
-os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-
 from genlm.backend.llm.base import AsyncLM
 from genlm.backend.cache import OutputCache
 
 try:
+    # Enable vLLM v1 with in-process mode (no multiprocessing)
+    # This must be set BEFORE importing vllm
+    os.environ.setdefault("VLLM_USE_V1", "1")
+    os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
     from vllm.inputs import TokensPrompt
