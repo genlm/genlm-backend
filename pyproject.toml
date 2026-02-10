@@ -22,6 +22,9 @@ mlx = [
     "mlx",
     "mlx-lm"
 ]
+lora = [
+    'peft'
+]
 docs = [
     "mkdocs",
     "mkdocstrings[python]",
