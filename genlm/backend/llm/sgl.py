@@ -1,10 +1,7 @@
 import asyncio
-import threading
 from typing import Dict, List, Tuple, Optional
 from collections import deque
-
 import torch
-
 
 from genlm.backend.cache import OutputCache
 from genlm.backend.llm.base import AsyncLM
@@ -42,6 +39,29 @@ if not HAS_SGL:
 else:
     SP = SamplingParams(max_new_tokens=0)
 
+    def _make_request(token_ids: Tuple[int]) -> Request:
+        """Construct a SGLang inference request object.
+
+        Args:
+            token_ids (Tuple[int]): The token IDs of the request.
+
+        Returns:
+            (Request): The Request object.
+        """
+        req = Request(
+            input_text="",
+            input_ids=list(token_ids),
+            mm_inputs=None,
+            sampling_params=SP,
+            return_logprob=False,
+            logprob_start_len=-1,
+            top_logprobs_num=-1,
+            token_ids_logprob=[],
+            stream=False,
+        )
+        req.regenerate_rid()
+        return req
+
     class AsyncSGLTransformer(AsyncLM):
         """Asynchronous wrapper around a SGLang inference engine.
 
@@ -77,12 +97,7 @@ else:
             self._pending: Dict[Tuple[int, ...], List[asyncio.Future]] = {}
             self._inflight: Dict[Tuple[int, ...], Request] = {}
 
-            self._loop: Optional[asyncio.AbstractEventLoop] = None
-            self._loop_thread_id: Optional[int] = None
-
             self._rid_to_token_ids: Dict[str, Tuple[int, ...]] = {}
-
-            self._engine_paused: bool = False
 
             super().__init__(tokenizer=self.tokenizer)
 
@@ -125,18 +140,9 @@ else:
             """Clear the SGLang cache."""
             return self.model.flush_cache()
 
-        def _pause_engine(self):
-            """Pause the SGLang inference engine."""
-            self._engine_paused = True
-
-        def _resume_engine(self):
-            """Resume the SGLang inference engine."""
-            self._engine_paused = False
-
         def reset_async_queries(self):
             """Clear any pending language model queries from the queue. Use this method when an exception prevented an inference algorithm from executing
             to completion."""
-            self._pause_engine()
 
             for waiters in self._pending.values():
                 for fut in waiters:
@@ -154,21 +160,22 @@ else:
                     except asyncio.QueueEmpty:
                         break
 
-            self._resume_engine()
+            if self._task and not self._task.done():
+                self._task.cancel()
+            self._task = None
+            self._queue = None
 
         def _start(self):
             """Start the background loop if it is not already running."""
             if not self._task or self._task.done():
                 self._queue = asyncio.Queue()
-                self._loop = asyncio.get_running_loop()
-                self._loop_thread_id = threading.get_ident()
                 self._task = asyncio.create_task(self._background_loop())
 
-        def _queue_request(self, token_ids):
+        def _queue_request(self, token_ids: Tuple[int]):
             """Queue a request to the SGLang inference engine.
 
             Args:
-                token_ids (List[int]): The token IDs of the request.
+                token_ids (tuple[int]): The token IDs of the request.
 
             Returns:
                 (asyncio.Future): A future that will be set with the result of the request.
@@ -212,24 +219,49 @@ else:
             Returns:
                 (torch.Tensor): Normalized log probability tensor.
             """
-            if not token_ids:
-                raise ValueError("Token ids must not be empty")
+            return self.batch_next_token_logprobs_sync([token_ids])[0]
 
-            key = tuple(token_ids)
-            if self.cache is not None and key in self.cache:
-                return self.cache[key]
+        def batch_next_token_logprobs_sync(self, token_ids_list: List[List[int]]):
+            """Request log probabilities of next tokens in a batch synchronously.
 
-            out = asyncio.run(self.next_token_logprobs(token_ids))
+            Args:
+                token_ids_list (list[list[int]]): A list of token ID lists, each representing a prompt.
 
-            if self.cache is not None:
-                self.cache[key] = out
-            return out
+            Returns:
+                (torch.Tensor): A tensor of normalized log probability tensors.
+            """
+            results = {}
+            to_compute = []
 
-        def _register(self, token_ids, future):
+            for token_ids in token_ids_list:
+                if not token_ids:
+                    raise ValueError("Token ids must not be empty")
+                key = tuple(token_ids)
+                if self.cache is not None and key in self.cache:
+                    results[key] = self.cache[key]
+                elif key not in results:
+                    to_compute.append(key)
+                    results[key] = None
+
+            if to_compute:
+                requests = []
+                for key in to_compute:
+                    req = _make_request(key)
+                    self._rid_to_token_ids[req.rid] = key
+                    requests.append(req)
+
+                for key, logprobs in self._batch_evaluate(requests):
+                    results[key] = logprobs
+                    if self.cache is not None:
+                        self.cache[key] = logprobs
+
+            return torch.stack([results[tuple(t)] for t in token_ids_list])
+
+        def _register(self, token_ids: Tuple[int], future: asyncio.Future):
             """Register a request with the SGLang inference engine.
 
             Args:
-                token_ids (List[int]): The token IDs of the request.
+                token_ids (Tuple[int]): The token IDs of the request.
                 future (asyncio.Future): A future that will be set with the result of the request.
 
             Returns:
@@ -245,18 +277,7 @@ else:
             if key in self._inflight:
                 return None
 
-            req = Request(
-                input_text="",
-                input_ids=list(token_ids),
-                mm_inputs=None,
-                sampling_params=SP,
-                return_logprob=False,
-                logprob_start_len=-1,
-                top_logprobs_num=-1,
-                token_ids_logprob=[],
-                stream=False,
-            )
-            req.regenerate_rid()
+            req = _make_request(token_ids)
             self._rid_to_token_ids[req.rid] = key
             self._inflight[key] = req
             return req
@@ -284,33 +305,39 @@ else:
 
             return requests
 
+        def _batch_evaluate(self, requests: List[Request]):
+            """Evaluate a batch of requests and return the token IDs and log probabilities."""
+            if not requests:
+                return
+
+            self.model.process_input_requests(requests)
+
+            while batch := self.model.get_next_batch_to_run():
+                with torch.inference_mode():
+                    batch_result = self.model.run_batch(batch)
+                    self.model.process_batch_result(batch, batch_result)
+                    logprobs = torch.log_softmax(
+                        batch_result.logits_output.next_token_logits, dim=-1
+                    ).to("cpu")
+
+                    for i, req in enumerate(batch.reqs):
+                        if req.finished():
+                            token_ids = self._rid_to_token_ids.pop(req.rid, None)
+                            if token_ids is None:
+                                continue
+                            yield token_ids, logprobs[i]
+
         async def _background_loop(self):
             """Background task that processes queued requests from the queue."""
             assert self._queue is not None
             try:
                 while True:
                     requests = await self._drain_queue()
-                    self.model.process_input_requests(requests)
-
-                    if self._engine_paused:
-                        await asyncio.sleep(0.01)
-                        continue
-                    while batch := self.model.get_next_batch_to_run():
-                        with torch.inference_mode():
-                            batch_result = self.model.run_batch(batch)
-                            self.model.process_batch_result(batch, batch_result)
-                            logprobs = torch.log_softmax(
-                                batch_result.logits_output.next_token_logits, dim=-1
-                            ).to("cpu", non_blocking=True)
-
-                            for i, req in enumerate(batch.reqs):
-                                if req.finished():
-                                    token_ids = self._rid_to_token_ids.pop(req.rid)
-                                    waiters = self._pending.pop(token_ids, [])
-                                    self._inflight.pop(token_ids, None)
-
-                                    for f in waiters:
-                                        f.set_result(logprobs[i])
+                    for token_ids, logprobs in self._batch_evaluate(requests):
+                        waiters = self._pending.pop(token_ids, [])
+                        self._inflight.pop(token_ids, None)
+                        for f in waiters:
+                            f.set_result(logprobs)
 
             except asyncio.CancelledError:
                 raise
@@ -325,9 +352,14 @@ else:
 
         def _cleanup_engine(self):
             """Clean up the SGLang inference engine and distributed environment."""
-            self.reset_async_queries()
-            destroy_model_parallel()
-            destroy_distributed_environment()
+            if getattr(self, "model", None) is None:
+                return
+            try:
+                self.reset_async_queries()
+                destroy_model_parallel()
+                destroy_distributed_environment()
+            except Exception:
+                pass
 
         def __del__(self):  # pragma: no cover
             """Clean up the SGLang inference engine when the instance is deleted."""

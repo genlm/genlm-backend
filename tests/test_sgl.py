@@ -165,7 +165,6 @@ def test_reset_async_queries(async_llm):
 async def test_reset_async_queries_with_pending_futures(async_llm, long_token_ids_list):
     async_llm.clear_cache()
     async_llm.clear_kv_cache()
-    async_llm._pause_engine()
     fut = asyncio.get_running_loop().create_future()
     async_llm._register(tuple(long_token_ids_list[0]), fut)
     assert async_llm._pending != {}
@@ -174,7 +173,6 @@ async def test_reset_async_queries_with_pending_futures(async_llm, long_token_id
     assert async_llm._pending == {}
     assert async_llm._inflight == {}
     assert async_llm._rid_to_token_ids == {}
-    async_llm._resume_engine()
 
 
 @cuda_only
@@ -210,7 +208,6 @@ async def test_background_loop_exception_handling(async_llm, token_ids_list):
 def test_del_cleanup(async_llm, token_ids_list):
     asyncio.run(async_llm.next_token_logprobs(token_ids_list[0]))
 
-    assert async_llm._loop is not None
     assert async_llm._task is not None
 
     async_llm._cleanup_engine()
