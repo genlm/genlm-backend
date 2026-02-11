@@ -14,29 +14,29 @@ from .util import (
     run_await_batch_next_token_logprobs,
 )
 
-from genlm.backend.llm import AsyncVirtualLM, AsyncTransformer
+from genlm.backend.llm import load_model_by_name
 
 text = get_wikitext()
 
 
-def load_model(model, batch_size=None):
+def load_model(backend, batch_size=None):
     model_name = "gpt2"
-    if model == "vllm":
-        return AsyncVirtualLM.from_name(model_name)
+    if backend in ["vllm", "sglang"]:
+        return load_model_by_name(model_name, backend=backend)
     else:
-        return AsyncTransformer.from_name(model_name, batch_size=batch_size)
+        return load_model_by_name(model_name, backend=backend, batch_size=batch_size)
 
 
-@pytest.mark.parametrize("model", ["vllm", "sglang"])
-def test_await_next_token_logprobs(benchmark, model):
-    llm = load_model(model, batch_size=1)
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_await_next_token_logprobs(benchmark, backend):
+    llm = load_model(backend, batch_size=1)
     sequences = token_prefixes(text, tokenizer=llm.tokenizer)
     run_await_next_token_logprobs(benchmark=benchmark, llm=llm, sequences=sequences)
 
 
-@pytest.mark.parametrize("model", ["vllm", "sglang"])
-def test_await_batch_next_token_logprobs(benchmark, model, batch_size=20):
-    llm = load_model(model, batch_size=batch_size)
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_await_batch_next_token_logprobs(benchmark, backend, batch_size=20):
+    llm = load_model(backend, batch_size=batch_size)
     batches = token_prefix_batches(text, tokenizer=llm.tokenizer, batch_size=batch_size)
     run_await_batch_next_token_logprobs(
         benchmark=benchmark, llm=llm, batches=batches, rounds=50, warmup_rounds=10

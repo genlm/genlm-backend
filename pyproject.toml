@@ -22,6 +22,13 @@ mlx = [
     "mlx",
     "mlx-lm"
 ]
+vllm = [
+    "vllm>=0.6.6,<=0.10.0; sys_platform == 'linux'",
+    "triton>=3.2.0; sys_platform == 'linux'",
+]
+sgl = [
+    "sglang",
+]
 lora = [
     'peft'
 ]
@@ -32,13 +39,6 @@ docs = [
     "mkdocs-gen-files",
     "mkdocs-literate-nav",
     "mkdocs-section-index",
-]
-vllm = [
-    "vllm>=0.6.6,<=0.10.0; sys_platform == 'linux'",
-    "triton>=3.2.0; sys_platform == 'linux'",
-]
-sgl = [
-    "sglang",
 ]
 
 [tool.setuptools.packages.find]
