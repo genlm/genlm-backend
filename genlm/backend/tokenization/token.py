@@ -48,6 +48,16 @@ class Token:
         """Hash based on token_id only (consistent with __eq__)."""
         return hash(self.token_id)
 
+    def __lt__(self, other):
+        """Order by token_id for sorting support."""
+        if not isinstance(other, Token):
+            return NotImplemented
+        return self.token_id < other.token_id
+
+    def __bytes__(self):
+        """Return the byte string representation for bytes() conversion."""
+        return self.byte_string
+
     def __len__(self):
         """Return the length of the byte string."""
         return len(self.byte_string)

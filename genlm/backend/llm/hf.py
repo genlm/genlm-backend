@@ -162,6 +162,40 @@ class AsyncTransformer(AsyncLM):
         result = self.model(torch.tensor([prompt_tokens]).to(self.device))
         node = self.cache.extend_cache(0, prompt_tokens, result.logits[0], 0)
         node.past_key_values = result.past_key_values
+    
+    def add_new_lora(self, lora_path, lora_name='lora_1'):
+        """Load a LoRA adapter into the base model.
+
+        Args:
+            lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
+            lora_name (str): Name to assign to the loaded adapter.
+
+        Notes:
+            This does not activate the adapter immediately. Call `set_lora()` to enable the adapter.
+        """
+        self.model.load_adapter(lora_path, lora_name)
+    
+    def set_lora(self, lora_path=None, lora_name='lora_1'):
+        """Activate a previously loaded LoRA adapter.
+
+        Args:
+            lora_name (str): Name of the LoRA adapter to activate.
+        
+        """
+        if lora_name not in list(self.model.peft_config.keys()):
+            raise ValueError(f"A LoRA adapter named '{lora_name}' has not been loaded yet. Please call add_new_lora() first to load and name your LoRA adapters.")
+                
+        self.clear_kv_cache()
+        self.clear_cache()
+        self.model.set_adapter(lora_name)
+
+    def clear_lora(self):
+        """
+        Deactivate all LoRA adapters.
+        """
+        self.clear_kv_cache()
+        self.clear_cache()
+        self.model.set_adapter([])
 
     @torch.no_grad()
     def batch_evaluate_queries(self):

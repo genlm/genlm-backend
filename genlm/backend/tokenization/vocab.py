@@ -48,11 +48,16 @@ def decode_vocab(tokenizer, byte2str_fallback="tokenizer"):
                 f"Could not decode byte representation of token vocabuary from tokenizer {tokenizer.name_or_path}"
             ) from e
 
-    # Create Token objects for byte_vocab
-    byte_vocab = [
-        Token(token_id=i, byte_string=raw_byte_vocab[i])
-        for i in range(len(raw_byte_vocab))
-    ]
+    # Create Token objects for byte_vocab.
+    # Assumption: token_id == position index in the vocabulary. This is relied upon
+    # by the trie (idx_to_leaf) and weight arrays (ws[i] corresponds to decode[i]).
+    byte_vocab = []
+    for i in range(len(raw_byte_vocab)):
+        token = Token(token_id=i, byte_string=raw_byte_vocab[i])
+        assert token.token_id == i, (
+            f"Token ID {token.token_id} does not match position index {i}"
+        )
+        byte_vocab.append(token)
     str_vocab = bytes_to_strs(tokenizer, raw_byte_vocab, byte2str_fallback)
 
     return byte_vocab, str_vocab

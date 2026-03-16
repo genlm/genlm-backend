@@ -72,6 +72,37 @@ class AsyncLM(ABC):
             [self.next_token_logprobs_sync(token_ids) for token_ids in token_ids_list]
         )
 
+    def add_new_lora(self, lora_path, lora_name):
+        """Load a LoRA adapter into the base model.
+
+        Args:
+            lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
+            lora_name (str): Name to assign to the loaded adapter.
+
+        """
+        raise NotImplementedError(
+            "add_new_lora must be implemented by subclasses"
+        ) # pragma: no cover
+    
+    def set_lora(self, lora_path, lora_name):
+        """Activate a previously loaded LoRA adapter.
+
+        Args:
+            lora_name (str): Name of the LoRA adapter to activate.
+        
+        """
+        raise NotImplementedError(
+            "set_lora must be implemented by subclasses"
+        ) # pragma: no cover
+    
+    def clear_lora(self):
+        """
+        Deactivate all LoRA adapters.
+        """
+        raise NotImplementedError(
+            "clear_lora must be implemented by subclasses"
+        ) # pragma: no cover
+
     def clear_cache(self):
         """Clear any caches used by the language model. No-op in base class."""
         pass  # pragma: no cover
@@ -211,6 +242,6 @@ class MockAsyncLM(AsyncLM):
         seed = sum([(i + 1) * t for i, t in enumerate(token_ids)])
         self._rng.seed(seed)
         logits = torch.from_numpy(
-            self._rng.rand(len(self.tokenizer)).astype(np.float32)
+            self._rng.rand(len(self.byte_vocab)).astype(np.float32)
         )
         return torch.log_softmax(logits, dim=-1)
