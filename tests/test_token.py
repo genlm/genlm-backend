@@ -3,6 +3,8 @@
 import pytest
 import torch
 import numpy as np
+import copy
+import pickle
 from genlm.backend.tokenization import Token
 from genlm.backend.trie import TokenCharacterTrie, ParallelTokenCharacterTrie
 
@@ -170,3 +172,141 @@ def test_token_in_trie_word2leaf_key():
     assert key1 in trie.word2leaf
     assert key2 in trie.word2leaf
     assert trie.word2leaf[key1] != trie.word2leaf[key2]
+
+
+# ---------------------------------------------------------------------------
+# Token as bytes subclass: deepcopy, pickle, join, ordering
+# ---------------------------------------------------------------------------
+
+
+def test_token_deepcopy():
+    """deepcopy must preserve token_id (SMC resampling uses deepcopy)."""
+    t = Token(42, b"hello")
+    t2 = copy.deepcopy(t)
+    assert t2.token_id == 42
+    assert t2.byte_string == b"hello"
+    assert t2 == t
+    assert t2 is not t
+
+
+def test_token_pickle_roundtrip():
+    """Tokens must survive pickle (used by multiprocessing potentials)."""
+    t = Token(42, b"hello")
+    t2 = pickle.loads(pickle.dumps(t))
+    assert t2.token_id == 42
+    assert t2.byte_string == b"hello"
+
+
+def test_token_bytes_join():
+    """b''.join must work on Token objects (bytes subclass)."""
+    tokens = [Token(0, b"hello"), Token(1, b" "), Token(2, b"world")]
+    assert b"".join(tokens) == b"hello world"
+
+
+def test_token_ordering():
+    """Tokens must sort by token_id, not byte content."""
+    t_z = Token(1, b"z")
+    t_a = Token(2, b"a")
+    assert t_z < t_a  # 1 < 2, even though z > a
+    assert t_a > t_z
+    assert t_z <= t_z
+    assert t_z >= t_z
+    assert t_z <= t_a
+    assert sorted([t_a, t_z]) == [t_z, t_a]
+
+
+def test_token_ne():
+    """!= between Tokens must use token_id, not byte content."""
+    t1 = Token(0, b"same")
+    t2 = Token(1, b"same")  # same bytes, different id
+    t3 = Token(0, b"other")  # same id, different bytes
+    assert t1 != t2
+    assert not (t1 != t3)  # same id → not unequal
+
+
+def test_token_byte_string_is_plain_bytes():
+    """.byte_string must return plain bytes, not a Token."""
+    t = Token(0, b"hello")
+    bs = t.byte_string
+    assert type(bs) is bytes
+    assert not isinstance(bs, Token)
+
+
+def test_token_cross_type_comparison():
+    """Token compared to plain bytes falls back to bytes content comparison.
+
+    This exercises the NotImplemented return paths in __eq__, __ne__,
+    __lt__, __le__, __gt__, __ge__ (Token subclasses bytes, so Python
+    falls back to bytes.__eq__ etc).
+    """
+    t = Token(0, b"hello")
+
+    # eq/ne fall back to bytes content comparison
+    assert t == b"hello"  # bytes.__eq__ compares content
+    assert not (t != b"hello")  # bytes.__ne__
+    assert t != b"other"
+    assert not (t == b"other")
+
+    # Ordering against plain bytes: Token returns NotImplemented,
+    # Python falls back to bytes.__lt__ (content comparison).
+    # This is a consequence of subclassing bytes.
+    assert not (t < b"hello")  # same content
+    assert t <= b"hello"
+    assert not (t > b"hello")
+    assert t >= b"hello"
+
+
+# ---------------------------------------------------------------------------
+# Trie: weight_max with duplicates (only weight_sum was tested)
+# ---------------------------------------------------------------------------
+
+
+def test_trie_weight_max_with_duplicates():
+    """weight_max must propagate the correct max through shared trie paths."""
+    vocab = [
+        Token(0, b"ab"),
+        Token(1, b"ab"),  # duplicate byte_string
+        Token(2, b"ac"),
+        Token(3, b"b"),
+    ]
+    trie = TokenCharacterTrie(decode=vocab)
+
+    # Token 1 has the highest weight among the "ab" pair
+    weights = torch.tensor([0.1, 0.9, 0.3, 0.2])
+    node_ws = trie.weight_max(weights)
+
+    # The "a" internal node should have max(0.1, 0.9, 0.3) = 0.9
+    # (it's the ancestor of both "ab" tokens and the "ac" token)
+    # Root should have max(0.9, 0.2) = 0.9
+    assert np.isclose(node_ws[trie.root], 0.9, rtol=1e-5)
+
+    # Individual leaves
+    leaf_0 = trie.idx_to_leaf[0][1]
+    leaf_1 = trie.idx_to_leaf[1][1]
+    assert np.isclose(node_ws[leaf_0], 0.1, rtol=1e-5)
+    assert np.isclose(node_ws[leaf_1], 0.9, rtol=1e-5)
+
+
+def test_trie_internal_node_sums_both_duplicates():
+    """An internal node shared by two duplicate tokens must sum both weights."""
+    vocab = [
+        Token(0, b"ab"),
+        Token(1, b"ab"),  # shares the a→b path
+        Token(2, b"c"),
+    ]
+    trie = TokenCharacterTrie(decode=vocab)
+
+    weights = torch.tensor([0.3, 0.5, 0.2])
+    node_ws = trie.weight_sum(weights)
+
+    # Root = 0.3 + 0.5 + 0.2 = 1.0
+    assert np.isclose(node_ws[trie.root], 1.0, rtol=1e-5)
+
+    # The "a" internal node = 0.3 + 0.5 = 0.8
+    # (both "ab" tokens descend from it)
+    # Find "a" node: it's the parent of the "b" node
+    leaf_0 = trie.idx_to_leaf[0][1]
+    leaf_1 = trie.idx_to_leaf[1][1]
+    # Both leaf weights should be independent
+    assert np.isclose(node_ws[leaf_0], 0.3, rtol=1e-5)
+    assert np.isclose(node_ws[leaf_1], 0.5, rtol=1e-5)
