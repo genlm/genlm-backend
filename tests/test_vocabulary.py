@@ -1,7 +1,8 @@
 import pytest
+from unittest.mock import patch, MagicMock
 from transformers import AutoTokenizer
 from genlm.backend.tokenization import decode_vocab
-from genlm.backend.tokenization.bytes import ByteDecoderError, check_byte_decoder
+from genlm.backend.tokenization.bytes import ByteDecoderError, ByteVocabError, check_byte_decoder
 from conftest import assert_roundtrip_bytes
 from hypothesis import given, strategies as st, settings
 
@@ -81,26 +82,10 @@ def test_deepseek_r1_unsloth(text, is_fast):
 def test_byte2str_fallbacks():
     tokenizer = load_tokenizer("gpt2", False)
 
-    byte_vocab1, str_vocab1 = decode_vocab(tokenizer, byte2str_fallback="latin1")
-    assert all(
-        hasattr(token, "token_id") and hasattr(token, "byte_string")
-        for token in byte_vocab1
-    )
-    assert isinstance(str_vocab1, list)
-
-    byte_vocab2, str_vocab2 = decode_vocab(tokenizer, byte2str_fallback="tokenizer")
-    assert all(
-        hasattr(token, "token_id") and hasattr(token, "byte_string")
-        for token in byte_vocab2
-    )
-    assert isinstance(str_vocab2, list)
-
-    byte_vocab3, str_vocab3 = decode_vocab(tokenizer, byte2str_fallback="replace")
-    assert all(
-        hasattr(token, "token_id") and hasattr(token, "byte_string")
-        for token in byte_vocab3
-    )
-    assert isinstance(str_vocab3, list)
+    for fallback in ("latin1", "tokenizer", "replace"):
+        byte_vocab, str_vocab = decode_vocab(tokenizer, byte2str_fallback=fallback)
+        assert len(byte_vocab) > 0
+        assert len(str_vocab) == len(byte_vocab)
 
     with pytest.raises(ValueError):
         decode_vocab(tokenizer, byte2str_fallback="invalid")
@@ -122,9 +107,6 @@ def test_byte_decoder_error_handling():
 
 def test_decode_vocab_failure_both_tokenizers():
     """Test that decode_vocab raises ValueError when both slow and fast tokenizers fail."""
-    from unittest.mock import patch, MagicMock
-    from genlm.backend.tokenization.bytes import ByteVocabError
-
     # Create a mock tokenizer
     mock_tokenizer = MagicMock()
     mock_tokenizer.is_fast = False

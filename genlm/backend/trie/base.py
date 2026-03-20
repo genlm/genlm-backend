@@ -28,8 +28,21 @@ class TokenCharacterTrie:
             if isinstance(item, Token):
                 word = item.byte_string
                 word_key = (item.byte_string, item.token_id)
+            elif isinstance(item, bytes):
+                import warnings
+
+                if not getattr(self, "_warned_bytes_decode", False):
+                    warnings.warn(
+                        "Passing plain bytes to TokenCharacterTrie is deprecated. "
+                        "Use Token objects from decode_vocab() instead.",
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
+                    self._warned_bytes_decode = True
+                word = item
+                word_key = item
             else:
-                # For other iterables, iterate directly
+                # For other iterables (e.g. EndOfSequence), iterate directly
                 word = item
                 word_key = item
 

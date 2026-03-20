@@ -286,8 +286,7 @@ def test_parallel_invalid_device():
 
 
 def test_trie_with_non_token_iterables():
-    """Test that the trie works with non-Token iterables like bytes."""
-    # Mix Token objects and plain bytes
+    """Test that the trie works with non-Token iterables like bytes but warns."""
     decode = [
         Token(0, b"hello"),
         b"world",  # Plain bytes object
@@ -295,22 +294,23 @@ def test_trie_with_non_token_iterables():
         b"data",  # Another plain bytes object
     ]
 
-    trie = TokenCharacterTrie(decode=decode)
+    with pytest.warns(DeprecationWarning, match="Passing plain bytes to TokenCharacterTrie is deprecated"):
+        trie = TokenCharacterTrie(decode=decode)
     assert (b"hello", 0) in trie.word2leaf
     assert b"world" in trie.word2leaf
     assert (b"test", 2) in trie.word2leaf
     assert b"data" in trie.word2leaf
     ws = torch.tensor([0.25, 0.25, 0.25, 0.25])
     result = trie.weight_sum(ws)
-    assert result is not None
     assert len(result) == len(trie.children)
 
 
 def test_trie_duplicate_word_error():
     """Test that duplicate words in vocabulary raise ValueError."""
     decode_bytes = [b"hello", b"world", b"hello"]
-    with pytest.raises(ValueError, match="Duplicate word in vocabulary"):
-        TokenCharacterTrie(decode=decode_bytes)
+    with pytest.warns(DeprecationWarning):
+        with pytest.raises(ValueError, match="Duplicate word in vocabulary"):
+            TokenCharacterTrie(decode=decode_bytes)
     decode_tokens = [
         Token(0, b"test"),
         Token(1, b"other"),
