@@ -126,7 +126,7 @@ See the [LLM Code Reference](reference/genlm/backend/llm/__init__/) for detailed
 
 ### Vocabulary Decoding
 
-The [`genlm.backend.tokenization`](reference/genlm/backend/tokenization/__init__/) module converts Hugging Face tokenizer vocabularies into byte and string representations, with each token's representation stored at its corresponding token ID in the output lists.
+The [`genlm.backend.tokenization`](reference/genlm/backend/tokenization/__init__/) module converts Hugging Face tokenizer vocabularies into `Token` objects and string representations. Each `Token` carries both a `token_id` and a `byte_string`, and subclasses `bytes` for backwards compatibility.
 
 ```python
 from transformers import AutoTokenizer
@@ -135,20 +135,23 @@ from genlm.backend import decode_vocab
 # Load a tokenizer and decode its vocabulary
 tokenizer = AutoTokenizer.from_pretrained("gpt2")
 byte_vocab, str_vocab = decode_vocab(tokenizer)
-byte_vocab[10] # Byte representation of token with ID 10
+token = byte_vocab[10]
+token.token_id     # Unique token ID
+token.byte_string  # Byte representation
 ```
 
 !!! warning
-    The byte representation (`byte_vocab`) is the canonical form and should be preferred for reliable token handling. The string representation (`str_vocab`) is provided for convenience and debugging but may not correctly represent all tokens, especially those containing invalid UTF-8 sequences.
+    Multiple tokens can share the same byte string (e.g., in Gemma, CodeLlama). `Token` objects are distinguished by `token_id`, not byte content. The string representation (`str_vocab`) is provided for convenience and debugging but may not correctly represent all tokens, especially those containing invalid UTF-8 sequences.
 
 ### Token-Character Tries
 
 The [`genlm.backend.trie`](reference/genlm/backend/trie/__init__/) module provides an efficient trie data structure for mapping weight distributions over tokens to weight distributions over token prefixes.
 
 ```python
-from genlm.backend import TokenCharacterTrie
-# Initialize TokenCharacterTrie from a byte vocabulary
-trie = TokenCharacterTrie(decode=[b'cat', b'cats', b'dog', b'dogs'])
+from genlm.backend import TokenCharacterTrie, Token
+# Initialize TokenCharacterTrie from Token objects
+decode = [Token(0, b'cat'), Token(1, b'cats'), Token(2, b'dog'), Token(3, b'dogs')]
+trie = TokenCharacterTrie(decode=decode)
 probs = [0.4, 0.1, 0.3, 0.2]
 # Get mass at each node given a distribution over the vocab
 trie_ws = trie.weight_sum(probs)
