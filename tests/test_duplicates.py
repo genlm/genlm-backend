@@ -1,7 +1,7 @@
 import pytest
 from collections import defaultdict
 from genlm.backend.llm import MockAsyncLM
-from genlm.backend.tokenization import Token, decode_vocab
+from genlm.backend.tokenization import Token
 from genlm.backend.trie import TokenCharacterTrie
 
 
