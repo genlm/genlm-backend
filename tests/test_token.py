@@ -310,3 +310,18 @@ def test_trie_internal_node_sums_both_duplicates():
     # Both leaf weights should be independent
     assert np.isclose(node_ws[leaf_0], 0.3, rtol=1e-5)
     assert np.isclose(node_ws[leaf_1], 0.5, rtol=1e-5)
+
+
+def test_as_bytes():
+    """Token.as_bytes extracts byte_string from Token, passes through plain bytes."""
+    token = Token(0, b"hello")
+    assert Token.as_bytes(token) == b"hello"
+    assert Token.as_bytes(b"world") == b"world"
+
+
+def test_is_plain_bytes():
+    """Token.is_plain_bytes distinguishes plain bytes from Token objects."""
+    assert Token.is_plain_bytes(b"hello")
+    assert not Token.is_plain_bytes(Token(0, b"hello"))
+    assert not Token.is_plain_bytes("hello")
+    assert not Token.is_plain_bytes(42)
