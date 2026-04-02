@@ -1,3 +1,5 @@
+import warnings
+
 import torch
 import numba
 import numpy as np
@@ -23,22 +25,21 @@ class TokenCharacterTrie:
         # Maps position index in decode to leaf node: idx_to_leaf[k] = (idx, leaf_node)
         self.idx_to_leaf = []
 
+        _warned_bytes = False
         for idx, item in enumerate(self.decode):
             # Get the word (bytes to iterate) and a unique key for word2leaf
             if isinstance(item, Token):
                 word = item.byte_string
                 word_key = (item.byte_string, item.token_id)
-            elif isinstance(item, bytes):
-                import warnings
-
-                if not getattr(self, "_warned_bytes_decode", False):
+            elif Token.is_plain_bytes(item):
+                if not _warned_bytes:
                     warnings.warn(
                         "Passing plain bytes to TokenCharacterTrie is deprecated. "
                         "Use Token objects from decode_vocab() instead.",
                         DeprecationWarning,
                         stacklevel=2,
                     )
-                    self._warned_bytes_decode = True
+                    _warned_bytes = True
                 word = item
                 word_key = item
             else:
