@@ -72,6 +72,18 @@ class Token(bytes):
             return NotImplemented
         return self.token_id >= other.token_id
 
+    # -- Helpers --
+
+    @staticmethod
+    def as_bytes(x):
+        """Extract byte string from a Token or pass through plain bytes."""
+        return x.byte_string if isinstance(x, Token) else x
+
+    @staticmethod
+    def is_plain_bytes(x):
+        """Check if x is plain bytes (not a Token)."""
+        return isinstance(x, bytes) and not isinstance(x, Token)
+
     # -- Pickle / deepcopy support --
 
     def __reduce__(self):
