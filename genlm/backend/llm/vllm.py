@@ -11,7 +11,7 @@ from genlm.backend.cache import OutputCache
 
 try:
     # Enable vLLM v1 with in-process mode (no multiprocessing)
-    # This must be set BEFORE importing vllm
+    # Must be set BEFORE importing vllm
     os.environ.setdefault("VLLM_USE_V1", "1")
     os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     from vllm import LLM, SamplingParams
@@ -48,7 +48,7 @@ if not HAS_VLLM:
 else:
     logging.getLogger("vllm").setLevel(logging.WARNING)
 
-    class GlobalLogprobsCapture(LogitsProcessor):
+    class GlobalLogprobsCapture(LogitsProcessor):  # pragma: no cover
         """A global logits processor that captures full vocabulary logprobs.
 
         This processor is injected into the vLLM v1 engine and captures
@@ -97,7 +97,7 @@ else:
             with self._lock:
                 self._captured_batch = None
 
-    class AsyncVirtualLM(AsyncLM):
+    class AsyncVirtualLM(AsyncLM):  # pragma: no cover
         """Async language model using vLLM v1 with global logits processor.
 
         This implementation uses vLLM v1's in-process mode with a global
@@ -137,7 +137,6 @@ else:
             self.llm_engine = llm_engine
             self.logprobs_capture = logprobs_capture
             self.tokenizer = llm_engine.get_tokenizer()
-            self._request_id = 0
             self.cache = (
                 OutputCache(maxsize=cache_size, **cache_opts)
                 if cache_size > 0
@@ -152,11 +151,6 @@ else:
             self.timer = None
 
             super().__init__(tokenizer=self.tokenizer)
-
-        def _next_request_id(self):
-            """Generate a unique request ID."""
-            self._request_id += 1
-            return str(self._request_id)
 
         @classmethod
         def from_name(cls, model_name, engine_opts=None, **kwargs):
@@ -329,6 +323,7 @@ else:
                 self.llm_engine.generate(
                     prompts=prompts,
                     sampling_params=SamplingParams(**self.default_params),
+                    lora_request=self.lora_request,
                     use_tqdm=False,
                 )
 
@@ -340,8 +335,12 @@ else:
 
                 for i, key in enumerate(unique_token_ids):
                     logprobs = all_logprobs[i]
-                    for future in query_groups[key]:
-                        future.set_result(logprobs)
+                    futures = query_groups[key]
+                    if len(futures) == 1:
+                        futures[0].set_result(logprobs)
+                    else:
+                        for future in futures:
+                            future.set_result(logprobs.clone())
             except Exception as exc:
                 for futures in query_groups.values():
                     for future in futures:
@@ -384,6 +383,7 @@ else:
             self.llm_engine.generate(
                 prompts=TokensPrompt(prompt_token_ids=list(token_ids)),
                 sampling_params=SamplingParams(**self.default_params),
+                lora_request=self.lora_request,
                 use_tqdm=False,
             )
 
@@ -420,6 +420,7 @@ else:
             self.llm_engine.generate(
                 prompts=prompts,
                 sampling_params=SamplingParams(**self.default_params),
+                lora_request=self.lora_request,
                 use_tqdm=False,
             )
 
@@ -517,6 +518,7 @@ else:
                     seed=seed,
                     stop=[self.byte_vocab[i].decode() for i in eos_token_ids],
                 ),
+                lora_request=self.lora_request,
                 use_tqdm=False,
             )
 
