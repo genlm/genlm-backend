@@ -308,7 +308,7 @@ else:
         def _batch_evaluate(self, requests: List[Request]):
             """Evaluate a batch of requests and return the token IDs and log probabilities."""
             if not requests:
-                return
+                return  # pragma: no cover
 
             self.model.process_input_requests(requests)
 
@@ -324,7 +324,7 @@ else:
                         if req.finished():
                             token_ids = self._rid_to_token_ids.pop(req.rid, None)
                             if token_ids is None:
-                                continue
+                                continue  # pragma: no cover
                             yield token_ids, logprobs[i]
 
         async def _background_loop(self):
@@ -353,13 +353,13 @@ else:
         def _cleanup_engine(self):
             """Clean up the SGLang inference engine and distributed environment."""
             if getattr(self, "model", None) is None:
-                return
+                return  # pragma: no cover
             try:
                 self.reset_async_queries()
                 destroy_model_parallel()
                 destroy_distributed_environment()
-            except Exception:
-                pass
+            except Exception:  # pragma: no cover
+                pass  # pragma: no cover
 
         def __del__(self):  # pragma: no cover
             """Clean up the SGLang inference engine when the instance is deleted."""

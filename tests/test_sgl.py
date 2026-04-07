@@ -205,6 +205,19 @@ async def test_background_loop_exception_handling(async_llm, token_ids_list):
 
 
 @cuda_only
+@pytest.mark.asyncio
+async def test_reset_cancels_queue_and_task(async_llm):
+    """reset_async_queries should cancel queued futures and stop the background task."""
+    async_llm._start()
+    fut = asyncio.get_running_loop().create_future()
+    async_llm._queue.put_nowait(((1, 2, 3), fut))
+    assert not async_llm._task.done()
+    async_llm.reset_async_queries()
+    assert fut.cancelled()
+    assert async_llm._task is None
+
+
+@cuda_only
 def test_del_cleanup(async_llm, token_ids_list):
     asyncio.run(async_llm.next_token_logprobs(token_ids_list[0]))
 
