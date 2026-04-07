@@ -1,5 +1,5 @@
 from .llm import AsyncVirtualLM, AsyncTransformer, load_model_by_name
-from .tokenization import decode_vocab
+from .tokenization import decode_vocab, Token
 from .trie import (
     TokenCharacterTrie,
     ParallelTokenCharacterTrie,
@@ -11,6 +11,7 @@ __all__ = [
     "AsyncVirtualLM",
     "AsyncTransformer",
     "decode_vocab",
+    "Token",
     "TokenCharacterTrie",
     "ParallelTokenCharacterTrie",
     "AsyncTokenCharacterTrie",

@@ -25,7 +25,7 @@ class AsyncTokenCharacterTrie:
         """Creates an `AsyncTokenCharacterTrie` from a vocabulary.
 
         Args:
-            vocab (list): The vocabulary over which the trie will be defined.
+            vocab (list[Token]): The vocabulary over which the trie will be defined.
             backend (str, optional): The trie implementation to use - either 'sequential' or 'parallel'.
                     Defaults to 'parallel' which uses GPU acceleration when available.
             **kwargs: Additional arguments passed to the trie constructor
