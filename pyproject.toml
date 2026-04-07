@@ -27,7 +27,7 @@ vllm = [
     "triton>=3.2.0; sys_platform == 'linux'",
 ]
 sgl = [
-    "sglang",
+    "sglang>=0.5.8,<0.5.9",
 ]
 lora = [
     'peft'
