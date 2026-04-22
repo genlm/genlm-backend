@@ -242,6 +242,6 @@ class MockAsyncLM(AsyncLM):
         seed = sum([(i + 1) * t for i, t in enumerate(token_ids)])
         self._rng.seed(seed)
         logits = torch.from_numpy(
-            self._rng.rand(len(self.tokenizer)).astype(np.float32)
+            self._rng.rand(len(self.byte_vocab)).astype(np.float32)
         )
         return torch.log_softmax(logits, dim=-1)
