@@ -280,7 +280,9 @@ else:
                 lora_id (int): Globally unique ID for the adapter.
             """
             if lora_name not in self.lora_name_to_ids:
-                raise _lora_not_loaded_error(lora_name)
+                raise ValueError(
+                    f"A LoRA adapter named '{lora_name}' has not been loaded yet. Please call add_new_lora() first to load and name your LoRA adapters."
+                )
             self.lora_request = LoRARequest(
                 lora_name, self.lora_name_to_ids[lora_name], lora_path
             )

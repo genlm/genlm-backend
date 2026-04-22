@@ -2,7 +2,11 @@ import pytest
 from unittest.mock import patch, MagicMock
 from transformers import AutoTokenizer
 from genlm.backend.tokenization import decode_vocab
-from genlm.backend.tokenization.bytes import ByteDecoderError, ByteVocabError, check_byte_decoder
+from genlm.backend.tokenization.bytes import (
+    ByteDecoderError,
+    ByteVocabError,
+    check_byte_decoder,
+)
 from conftest import assert_roundtrip_bytes
 from hypothesis import given, strategies as st, settings
 

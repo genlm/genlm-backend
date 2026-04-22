@@ -294,7 +294,10 @@ def test_trie_with_non_token_iterables():
         b"data",  # Another plain bytes object
     ]
 
-    with pytest.warns(DeprecationWarning, match="Passing plain bytes to TokenCharacterTrie is deprecated"):
+    with pytest.warns(
+        DeprecationWarning,
+        match="Passing plain bytes to TokenCharacterTrie is deprecated",
+    ):
         trie = TokenCharacterTrie(decode=decode)
     assert (b"hello", 0) in trie.word2leaf
     assert b"world" in trie.word2leaf

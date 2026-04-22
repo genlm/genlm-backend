@@ -35,7 +35,9 @@ def test_gemma_vocabulary_duplicates(gemma_byte_vocab):
     for token in gemma_byte_vocab:
         byte_string_to_token_ids[token.byte_string].append(token.token_id)
 
-    duplicates = {bs: ids for bs, ids in byte_string_to_token_ids.items() if len(ids) > 1}
+    duplicates = {
+        bs: ids for bs, ids in byte_string_to_token_ids.items() if len(ids) > 1
+    }
     assert len(duplicates) > 0, "No duplicates found in Gemma vocabulary"
 
     for byte_str, token_ids in duplicates.items():
@@ -85,4 +87,6 @@ def test_gemma_token_consistency(gemma_byte_vocab):
             assert list(token) == list(token.byte_string)
             if len(token) > 0:
                 assert token[0] == token.byte_string[0]
-            assert token.decode("utf-8", errors="replace") == token.byte_string.decode("utf-8", errors="replace")
+            assert token.decode("utf-8", errors="replace") == token.byte_string.decode(
+                "utf-8", errors="replace"
+            )
