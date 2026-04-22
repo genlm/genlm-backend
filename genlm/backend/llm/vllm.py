@@ -1,5 +1,7 @@
 import os
+import sys
 import asyncio
+import warnings
 import torch
 import logging
 import threading
@@ -10,10 +12,22 @@ from genlm.backend.llm.base import AsyncLM
 from genlm.backend.cache import OutputCache
 
 try:
-    # Enable vLLM v1 with in-process mode (no multiprocessing)
-    # Must be set BEFORE importing vllm
-    os.environ.setdefault("VLLM_USE_V1", "1")
-    os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    # Enable vLLM v1 with in-process mode (no multiprocessing). These env vars
+    # must be set BEFORE vllm is imported for the first time in this process;
+    # once vllm is imported the values have already been captured and cannot be
+    # changed by rewriting os.environ. We hard-set (rather than setdefault) so
+    # that pre-existing values from the user's environment do not silently
+    # switch us back to v0 or re-enable multiprocessing.
+    if "vllm" in sys.modules:
+        warnings.warn(
+            "vllm was imported before genlm.backend.llm.vllm; "
+            "VLLM_USE_V1=1 / VLLM_ENABLE_V1_MULTIPROCESSING=0 may not take "
+            "effect and AsyncVirtualLM may fail to capture logprobs.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    os.environ["VLLM_USE_V1"] = "1"
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
     from vllm.inputs import TokensPrompt
@@ -51,8 +65,29 @@ else:
     class GlobalLogprobsCapture(LogitsProcessor):  # pragma: no cover
         """A global logits processor that captures full vocabulary logprobs.
 
-        This processor is injected into the vLLM v1 engine and captures
-        log probabilities for all tokens in the vocabulary during inference.
+        This processor is injected once into the vLLM v1 engine and records
+        the log probabilities for *the most recent* sampling step, as a
+        single ``[batch_size, vocab_size]`` tensor.
+
+        Semantics:
+
+        * :meth:`apply` is invoked by the v1 sampler exactly once per decode
+          step across a batch of prompts, so the captured tensor always
+          reflects the final token-position logprobs for every prompt in
+          that batch.
+        * It does NOT retain history. Each :meth:`apply` call overwrites
+          ``_captured_batch``. This is intentional: for the
+          ``next_token_logprobs`` paths in :class:`AsyncVirtualLM`, every
+          ``generate`` is issued with ``max_tokens=1`` and preceded by
+          :meth:`clear`, so exactly one decode step runs and the overwrite
+          never hides information. For sampling paths (:meth:`sample`,
+          :meth:`batch_sample`) ``max_tokens > 1``, :meth:`apply` fires
+          once per step, and the final-step capture is correct but earlier
+          steps are discarded - callers of those methods don't read
+          ``_captured_batch`` anyway.
+        * Concurrent reads/writes are serialized by ``_lock``, so a
+          consumer thread calling :meth:`get_logprobs` never observes a
+          half-written tensor.
         """
 
         def __init__(self, device):
@@ -61,7 +96,10 @@ else:
             self._lock = threading.Lock()
 
         def apply(self, logits: torch.Tensor) -> torch.Tensor:
-            """Capture logprobs and pass through logits unchanged."""
+            """Capture logprobs and pass through logits unchanged.
+
+            Overwrites any previously captured batch; see class docstring.
+            """
             logprobs = torch.log_softmax(logits, dim=-1, dtype=logits.dtype)
             with self._lock:
                 # Single clone of entire batch - O(1) instead of O(batch_size)
@@ -129,7 +167,7 @@ else:
                 cache_size (int, optional): Maximum size of the output cache. If 0, caching is disabled. Defaults to 0.
                 cache_opts (dict, optional): Additional options to pass to the [`OutputCache`][genlm.backend.cache.OutputCache] constructor. Defaults to {}.
                 batch_size (int, optional): Maximum queries to process in one batch during auto-batching. Defaults to 20.
-                timeout (float, optional): Seconds to wait since last query before processing current batch. Defaults to 0.02.
+                timeout (float, optional): Seconds to wait after the first queued query before processing the current batch. The batch also fires immediately when ``batch_size`` is reached. Defaults to 0.02.
 
             Note:
                 The cache stores the log probabilities for previously seen token sequences to avoid redundant requests. KV caching is handled internally by the vLLM engine.
@@ -172,7 +210,7 @@ else:
             engine_opts = {
                 "enable_prefix_caching": True,
                 "disable_log_stats": True,
-                "gpu_memory_utilization": 0.5,
+                "gpu_memory_utilization": 0.9,
                 **(engine_opts or {}),
             }
 
@@ -272,19 +310,23 @@ else:
         def _add_query(self, token_ids, future):
             """Add a query to be evaluated in the next batch.
 
+            The timeout is measured from the *first* queued query, not the most
+            recent one: we only arm the timer when the queue transitions from
+            empty to non-empty. This prevents starvation when queries trickle in
+            faster than ``self.timeout`` but never fill a batch.
+
             Args:
                 token_ids (list[int]): Token IDs representing the query prompt.
                 future (asyncio.Future): Future to store the result in.
             """
             self.queries.append((token_ids, future))
 
-            if self.timer:
-                self.timer.cancel()
-                self.timer = None
-
             if len(self.queries) >= self.batch_size:
+                if self.timer:
+                    self.timer.cancel()
+                    self.timer = None
                 self._batch_evaluate()
-            else:
+            elif self.timer is None:
                 self.timer = asyncio.get_running_loop().call_later(
                     self.timeout, self._batch_evaluate
                 )
@@ -461,13 +503,33 @@ else:
             self._cleanup_engine()
 
         def _cleanup_engine(self):
-            """Clean up the vLLM engine and associated resources."""
-            import gc
+            """Clean up the vLLM engine and associated resources.
 
+            This is invoked from both :meth:`cleanup` (explicit, during normal
+            program flow) and :meth:`__del__` (implicit, possibly at
+            interpreter shutdown). The narrow exception classes below cover
+            the races and idempotency issues we know about:
+
+            * ``ImportError`` / ``AttributeError`` arise when ``__del__`` runs
+              after ``sys.meta_path`` is already torn down during interpreter
+              shutdown.
+            * ``AssertionError`` is raised by vLLM's
+              ``destroy_distributed_environment`` if it's called twice.
+            * ``RuntimeError`` can surface from CUDA when the driver is
+              already being torn down.
+
+            Anything else is re-raised so real bugs are not swallowed.
+            """
             try:
+                # ``import gc`` can itself raise ImportError when ``__del__`` is
+                # invoked after ``sys.meta_path`` has been torn down at
+                # interpreter shutdown, so it lives inside the try block.
+                import gc
+
                 # Clear our references
                 if hasattr(self, "logprobs_capture"):
-                    self.logprobs_capture.clear()
+                    if self.logprobs_capture is not None:
+                        self.logprobs_capture.clear()
                     self.logprobs_capture = None
 
                 # Delete the engine to free GPU memory
@@ -486,8 +548,22 @@ else:
                 # Clean up distributed state
                 destroy_model_parallel()
                 destroy_distributed_environment()
-            except Exception:
-                pass  # Ignore cleanup errors
+            except (
+                ImportError,
+                AttributeError,
+                AssertionError,
+                RuntimeError,
+            ) as e:
+                # Best-effort log; during interpreter shutdown logging itself
+                # may already be torn down, in which case silently drop.
+                try:
+                    logging.getLogger(__name__).debug(
+                        "AsyncVirtualLM cleanup raised %s: %s",
+                        type(e).__name__,
+                        e,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
         async def sample(
             self,

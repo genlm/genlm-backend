@@ -2,15 +2,19 @@
 """
 Benchmark script to compare vLLM v0 vs v1 performance for genlm-backend.
 
+Because ``VLLM_USE_V1`` must be set *before* ``import vllm`` for the first
+time in a Python process, v0 and v1 cannot be benchmarked in the same
+process. Use the workflow below:
+
 Usage:
-    # Run v1 benchmark (default)
-    python benchmark/benchmark_v0_v1.py
+    # Run v1 benchmark (default), save results
+    python benchmark/benchmark_v0_v1.py --output v1.json
 
-    # Run v0 benchmark
-    python benchmark/benchmark_v0_v1.py --v0
+    # Run v0 benchmark in a fresh process, save results
+    python benchmark/benchmark_v0_v1.py --v0 --output v0.json
 
-    # Compare both
-    python benchmark/benchmark_v0_v1.py --compare
+    # Print a side-by-side comparison from the two JSONs
+    python benchmark/benchmark_v0_v1.py --compare-files v0.json v1.json
 
     # Custom model
     python benchmark/benchmark_v0_v1.py --model meta-llama/Llama-3.2-1B
@@ -27,7 +31,10 @@ from dataclasses import dataclass, asdict
 parser = argparse.ArgumentParser(description="Benchmark vLLM v0 vs v1")
 parser.add_argument("--v0", action="store_true", help="Use vLLM v0 (default is v1)")
 parser.add_argument(
-    "--compare", action="store_true", help="Run both v0 and v1 and compare"
+    "--compare-files",
+    nargs=2,
+    metavar=("V0_JSON", "V1_JSON"),
+    help="Skip benchmarking and just print a comparison of two saved result files",
 )
 parser.add_argument("--model", type=str, default="gpt2", help="Model to benchmark")
 parser.add_argument("--gpu-mem", type=float, default=0.3, help="GPU memory utilization")
@@ -297,46 +304,31 @@ def print_comparison(
             )
 
 
+def _load_results(path: str) -> list[BenchmarkResult]:
+    """Load benchmark results previously written with ``--output``."""
+    with open(path) as f:
+        data = json.load(f)
+    return [BenchmarkResult(**r) for r in data["results"]]
+
+
 def main():
+    if args.compare_files:
+        v0_path, v1_path = args.compare_files
+        v0_results = _load_results(v0_path)
+        v1_results = _load_results(v1_path)
+        print_comparison(v0_results, v1_results)
+        return
+
     batch_sizes = [int(x) for x in args.batch_sizes.split(",")]
 
-    all_results = []
-
-    if args.compare:
-        # Run both v0 and v1
-        print("Running comparison benchmark...")
-
-        # Run v0 first
-        v0_results = run_benchmark(
-            use_v0=True,
-            model_name=args.model,
-            gpu_mem=args.gpu_mem,
-            warmup=args.warmup,
-            iterations=args.iterations,
-            batch_sizes=batch_sizes,
-        )
-        all_results.extend(v0_results)
-
-        # Clear GPU memory between runs
-        import torch
-
-        torch.cuda.empty_cache()
-
-        # Need to restart Python for clean v1 import (env vars)
-        print("\n⚠️  For accurate v1 comparison, run separately:")
-        print(f"   python benchmark/benchmark_v0_v1.py --model {args.model}")
-
-    else:
-        # Run single version
-        results = run_benchmark(
-            use_v0=args.v0,
-            model_name=args.model,
-            gpu_mem=args.gpu_mem,
-            warmup=args.warmup,
-            iterations=args.iterations,
-            batch_sizes=batch_sizes,
-        )
-        all_results.extend(results)
+    all_results = run_benchmark(
+        use_v0=args.v0,
+        model_name=args.model,
+        gpu_mem=args.gpu_mem,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        batch_sizes=batch_sizes,
+    )
 
     # Print summary
     print(f"\n{'=' * 60}")

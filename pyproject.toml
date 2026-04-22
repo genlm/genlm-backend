@@ -25,7 +25,12 @@ mlx = [
     "mlx-lm"
 ]
 lora = [
-    'peft'
+    # peft >=0.19 imports ``EmbeddingParallel`` from
+    # ``transformers.integrations.tensor_parallel``, which only exists in a
+    # very recent transformers branch; on the transformers pin above (which
+    # resolves to 4.57.x) this raises ImportError at LoRA load time. Pin
+    # below 0.19 until peft's TP handling catches up.
+    'peft>=0.17,<0.19'
 ]
 docs = [
     "mkdocs",

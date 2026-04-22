@@ -24,8 +24,7 @@ cuda_only = pytest.mark.skipif(
 )
 
 v1_capable = pytest.mark.skipif(
-    not torch.cuda.is_available()
-    or torch.cuda.get_device_capability()[0] < 8,
+    not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 8,
     reason="vLLM v1 requires CUDA Compute Capability >= 8.0 (Ampere+)",
 )
 
