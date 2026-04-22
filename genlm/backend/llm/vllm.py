@@ -1,6 +1,7 @@
 import os
 import sys
 import asyncio
+import contextlib
 import warnings
 import torch
 import logging
@@ -8,7 +9,7 @@ import threading
 import hashlib
 from collections import defaultdict
 
-from genlm.backend.llm.base import AsyncLM
+from genlm.backend.llm.base import AsyncLM, _lora_not_loaded_error
 from genlm.backend.cache import OutputCache
 
 try:
@@ -90,8 +91,7 @@ else:
           half-written tensor.
         """
 
-        def __init__(self, device):
-            self.device = device
+        def __init__(self):
             self._captured_batch = None  # [batch_size, vocab_size] tensor
             self._lock = threading.Lock()
 
@@ -100,10 +100,11 @@ else:
 
             Overwrites any previously captured batch; see class docstring.
             """
-            logprobs = torch.log_softmax(logits, dim=-1, dtype=logits.dtype)
+            # Do the clone outside the critical section so readers aren't blocked
+            # on the full [batch, vocab] copy.
+            captured = torch.log_softmax(logits, dim=-1, dtype=logits.dtype).clone()
             with self._lock:
-                # Single clone of entire batch - O(1) instead of O(batch_size)
-                self._captured_batch = logprobs.clone()
+                self._captured_batch = captured
             return logits
 
         def is_argmax_invariant(self) -> bool:
@@ -155,7 +156,7 @@ else:
             llm_engine,
             logprobs_capture,
             cache_size=0,
-            cache_opts={},
+            cache_opts=None,
             batch_size=20,
             timeout=0.02,
         ):
@@ -165,7 +166,7 @@ else:
                 llm_engine (LLM): The vLLM engine instance.
                 logprobs_capture (GlobalLogprobsCapture): The global logprobs capture processor.
                 cache_size (int, optional): Maximum size of the output cache. If 0, caching is disabled. Defaults to 0.
-                cache_opts (dict, optional): Additional options to pass to the [`OutputCache`][genlm.backend.cache.OutputCache] constructor. Defaults to {}.
+                cache_opts (dict, optional): Additional options to pass to the [`OutputCache`][genlm.backend.cache.OutputCache] constructor. Defaults to None (no extra options).
                 batch_size (int, optional): Maximum queries to process in one batch during auto-batching. Defaults to 20.
                 timeout (float, optional): Seconds to wait after the first queued query before processing the current batch. The batch also fires immediately when ``batch_size`` is reached. Defaults to 0.02.
 
@@ -176,7 +177,7 @@ else:
             self.logprobs_capture = logprobs_capture
             self.tokenizer = llm_engine.get_tokenizer()
             self.cache = (
-                OutputCache(maxsize=cache_size, **cache_opts)
+                OutputCache(maxsize=cache_size, **(cache_opts or {}))
                 if cache_size > 0
                 else None
             )
@@ -214,26 +215,31 @@ else:
                 **(engine_opts or {}),
             }
 
-            # Create the vLLM engine
             llm = LLM(model=model_name, tokenizer=model_name, **engine_opts)
 
-            # Access the model runner to inject our global logprobs capture processor
-            engine_core = llm.llm_engine.engine_core.engine_core
-            model_runner = engine_core.model_executor.driver_worker.worker.model_runner
-            input_batch = model_runner.input_batch
-
-            # Create and inject the logprobs capture processor
-            logprobs_capture = GlobalLogprobsCapture(device=input_batch.device)
-            input_batch.logitsprocs.argmax_invariant.append(logprobs_capture)
+            logprobs_capture = GlobalLogprobsCapture()
+            model_runner = cls._get_model_runner(llm)
+            model_runner.input_batch.logitsprocs.argmax_invariant.append(
+                logprobs_capture
+            )
 
             return cls(llm, logprobs_capture, **kwargs)
+
+        @staticmethod
+        def _get_model_runner(llm):
+            """Walk the vLLM v1 internals to reach the driver worker's model runner.
+
+            This path is brittle against vLLM refactors, so it lives in one
+            place and is reused by ``from_name`` (to inject the logits
+            processor) and ``underlying_model``.
+            """
+            engine_core = llm.llm_engine.engine_core.engine_core
+            return engine_core.model_executor.driver_worker.worker.model_runner
 
         @property
         def underlying_model(self):
             """Access the underlying model for advanced use cases."""
-            engine_core = self.llm_engine.llm_engine.engine_core.engine_core
-            model_runner = engine_core.model_executor.driver_worker.worker.model_runner
-            return model_runner.model
+            return self._get_model_runner(self.llm_engine).model
 
         def clear_lora(self):
             """
@@ -273,10 +279,8 @@ else:
                 lora_name (str): Identifier name to associate with this LoRA adapter within vLLM.
                 lora_id (int): Globally unique ID for the adapter.
             """
-            if lora_name not in self.lora_name_to_ids.keys():
-                raise ValueError(
-                    f"A LoRA adapter named '{lora_name}' has not been loaded yet. Please call add_new_lora() first to load and name your LoRA adapters."
-                )
+            if lora_name not in self.lora_name_to_ids:
+                raise _lora_not_loaded_error(lora_name)
             self.lora_request = LoRARequest(
                 lora_name, self.lora_name_to_ids[lora_name], lora_path
             )
@@ -556,14 +560,12 @@ else:
             ) as e:
                 # Best-effort log; during interpreter shutdown logging itself
                 # may already be torn down, in which case silently drop.
-                try:
+                with contextlib.suppress(Exception):
                     logging.getLogger(__name__).debug(
                         "AsyncVirtualLM cleanup raised %s: %s",
                         type(e).__name__,
                         e,
                     )
-                except Exception:  # noqa: BLE001
-                    pass
 
         async def sample(
             self,
