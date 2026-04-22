@@ -9,7 +9,7 @@ import threading
 import hashlib
 from collections import defaultdict
 
-from genlm.backend.llm.base import AsyncLM, _lora_not_loaded_error
+from genlm.backend.llm.base import AsyncLM
 from genlm.backend.cache import OutputCache
 
 try:
