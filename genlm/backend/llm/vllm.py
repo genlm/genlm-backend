@@ -6,6 +6,16 @@ import hashlib
 from genlm.backend.llm.base import AsyncLM
 from genlm.backend.cache import OutputCache
 
+# Sentinel for "use the global default lora_request"
+_LORA_UNSET = object()
+
+
+def _lora_cache_key(lora_request):
+    """Extract a hashable key from a LoRARequest (or None)."""
+    if lora_request is None:
+        return None
+    return lora_request.lora_name
+
 try:
     from vllm import AsyncLLMEngine, SamplingParams, AsyncEngineArgs
     from vllm.lora.request import LoRARequest
@@ -174,11 +184,14 @@ else:
                 raise ValueError(f"A LoRA adapter named '{lora_name}' has not been loaded yet. Please call add_new_lora() first to load and name your LoRA adapters.")
             self.lora_request = LoRARequest(lora_name, self.lora_name_to_ids[lora_name], lora_path)
         
-        async def next_token_logprobs(self, token_ids):
+        async def next_token_logprobs(self, token_ids, lora_request=_LORA_UNSET):
             """Request log probabilities of next token asynchronously with output caching.
 
             Args:
-                token_ids_list (list[int]): A list of token IDs, representing a prompt to the language model.
+                token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
+                lora_request (LoRARequest | None, optional): Per-request LoRA adapter.
+                    ``None`` uses the base model (no adapter).  If omitted, falls
+                    back to the global ``self.lora_request``.
 
             Returns:
                 result (torch.Tensor): Normalized log probability tensor.
@@ -187,23 +200,28 @@ else:
                 Do not use `asyncio.run(next_token_logprobs())` as it may interfere with vLLM's background loop.
                 For synchronous usage, use the `next_token_logprobs_sync()` method instead.
             """
-            key = tuple(token_ids)
+            if lora_request is _LORA_UNSET:
+                lora_request = self.lora_request
+
+            lora_key = _lora_cache_key(lora_request)
+            key = (tuple(token_ids), lora_key)
 
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
 
-            result = await self._next_token_logprobs(key)
+            result = await self._next_token_logprobs(tuple(token_ids), lora_request)
 
             if self.cache is not None:
                 self.cache[key] = result
 
             return result
 
-        async def _next_token_logprobs(self, token_ids):
+        async def _next_token_logprobs(self, token_ids, lora_request):
             """Request log probabilities of next token asynchronously.
 
             Args:
-                token_ids_list (list[int]): A list of token IDs, representing a prompt to the language model.
+                token_ids (tuple[int]): Token IDs representing the prompt.
+                lora_request (LoRARequest | None): Per-request LoRA adapter.
 
             Returns:
                 (torch.Tensor): Normalized log probability tensor.
@@ -218,7 +236,7 @@ else:
                 sampling_params=SamplingParams(
                     **self.default_params, logits_processors=[processor]
                 ),
-                lora_request=self.lora_request,
+                lora_request=lora_request,
                 request_id=req_id,
             ):
                 if output.finished:
@@ -229,27 +247,36 @@ else:
             )
             return processor.log_probs
 
-        def next_token_logprobs_sync(self, token_ids):
+        def next_token_logprobs_sync(self, token_ids, lora_request=_LORA_UNSET):
             """Request log probabilities of next token synchronously.
 
             Args:
-                token_ids_list (list[int]): A list of token IDs, representing a prompt to the language model.
+                token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
+                lora_request (LoRARequest | None, optional): Per-request LoRA adapter.
+                    If omitted, falls back to ``self.lora_request``.
 
             Returns:
                 (torch.Tensor): Normalized log probability tensor.
             """
-            return self.batch_next_token_logprobs_sync([token_ids])[0]
+            return self.batch_next_token_logprobs_sync(
+                [token_ids], lora_request=lora_request
+            )[0]
 
-        def batch_next_token_logprobs_sync(self, token_ids_list):
+        def batch_next_token_logprobs_sync(self, token_ids_list, lora_request=_LORA_UNSET):
             """
             Request log probabilities of next tokens in a batch synchronously.
 
             Args:
                 token_ids_list (list[list[int]]): A list of token ID lists, each representing a prompt to the language model.
+                lora_request (LoRARequest | None, optional): Per-request LoRA
+                    adapter.  If omitted, falls back to ``self.lora_request``.
 
             Returns:
                 (torch.Tensor): A tensor of normalized log probability tensors, one for each prompt in the input list.
             """
+            if lora_request is _LORA_UNSET:
+                lora_request = self.lora_request
+
             req_ids = []
             req_id2processors = {}
             for token_ids in token_ids_list:
@@ -262,12 +289,12 @@ else:
                     params=SamplingParams(
                         **self.default_params, logits_processors=[processor]
                     ),
-                    lora_request=self.lora_request,
+                    lora_request=lora_request,
                     request_id=req_id,
                 )
 
             while self.async_llm_engine.engine.has_unfinished_requests():
-                output = self.async_llm_engine.engine.step() 
+                output = self.async_llm_engine.engine.step()
                 for out in output:
                     if out.finished:
                         assert out.request_id in req_id2processors, (
