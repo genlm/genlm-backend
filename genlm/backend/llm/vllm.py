@@ -453,6 +453,11 @@ else:
 
             Returns:
                 (torch.Tensor): A tensor of normalized log probability tensors, one for each prompt in the input list.
+
+            Note:
+                This method does not consult the output cache (unlike the async batch path,
+                which delegates to the cached ``next_token_logprobs``). Every prompt is
+                re-evaluated.
             """
             if self.logprobs_capture is None:
                 raise RuntimeError("Cannot use model after cleanup() has been called")
