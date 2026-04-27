@@ -172,6 +172,7 @@ else:
 
             Note:
                 The cache stores the log probabilities for previously seen token sequences to avoid redundant requests. KV caching is handled internally by the vLLM engine.
+                ``batch_next_token_logprobs_sync`` bypasses this cache and always re-evaluates; the other three logprobs methods consult it.
             """
             self.llm_engine = llm_engine
             self.logprobs_capture = logprobs_capture
