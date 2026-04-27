@@ -3,8 +3,8 @@
 
 <div align="center">
 
-[![Docs](https://github.com/genlm/genlm-backend/actions/workflows/docs.yml/badge.svg)](https://genlm.github.io/backend/)
-[![Tests](https://github.com/genlm/genlm-backend/actions/workflows/pytest.yml/badge.svg)](https://github.com/genlm/backend/actions/workflows/pytest.yml)
+[![Docs](https://github.com/genlm/genlm-backend/actions/workflows/docs.yml/badge.svg)](https://genlm.github.io/genlm-backend/)
+[![Tests](https://github.com/genlm/genlm-backend/actions/workflows/pytest.yml/badge.svg)](https://github.com/genlm/genlm-backend/actions/workflows/pytest.yml)
 [![codecov](https://codecov.io/github/genlm/genlm-backend/graph/badge.svg?token=PwmHwMJC2y)](https://codecov.io/github/genlm/genlm-backend)
 [![PyPI](https://img.shields.io/pypi/v/genlm-backend?label=pypi)](https://pypi.org/project/genlm-backend/)
 
