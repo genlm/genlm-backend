@@ -30,7 +30,7 @@ sgl = [
     "sglang>=0.5.8,<0.5.9",
 ]
 lora = [
-    'peft'
+    "peft>=0.18,<0.19",
 ]
 docs = [
     "mkdocs",
