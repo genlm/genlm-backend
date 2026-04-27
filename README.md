@@ -10,7 +10,7 @@
 
 </div>
 
-GenLM Backend is a high-performance backend for language model probabilistic programs, built for the GenLM ecosystem. It provides an **asynchronous** and **autobatched** interface to `vllm` and `transformers` language models, enabling scalable and efficient inference.
+GenLM Backend is a high-performance backend for language model probabilistic programs, built for the GenLM ecosystem. It provides an **asynchronous** and **autobatched** interface to language model inference via `vllm`, `sglang`, `transformers`, and `mlx-lm`.
 
 See our [documentation](https://genlm.github.io/genlm-backend/).
 
@@ -23,19 +23,21 @@ See our [documentation](https://genlm.github.io/genlm-backend/).
 
 ## ⚡ Quick Start
 
-This library supports installation via pip:
+This library supports installation via pip. This uses `transformers` as the default inference backend.
 
 ```bash
 pip install genlm-backend
 ```
 
-Or to install with MLX support, run:
+To use a different backend, install the corresponding extra:
 
 ```bash
 pip install genlm-backend[mlx]
+pip install genlm-backend[vllm]
+pip install genlm-backend[sgl]
 ```
 
-Or to install with LoRA support, run:
+For LoRA support:
 
 ```bash
 pip install genlm-backend[lora]

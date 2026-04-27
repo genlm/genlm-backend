@@ -15,14 +15,19 @@ dependencies = [
     "accelerate",
     "bitsandbytes; sys_platform == 'linux'",
     "numba",
-    "vllm>=0.6.6,<=0.10.0; sys_platform == 'linux'",
-    "triton>=3.2.0; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
 mlx = [
     "mlx",
     "mlx-lm"
+]
+vllm = [
+    "vllm>=0.6.6,<=0.10.0; sys_platform == 'linux'",
+    "triton>=3.2.0; sys_platform == 'linux'",
+]
+sgl = [
+    "sglang>=0.5.8,<0.5.9",
 ]
 lora = [
     'peft'
