@@ -23,6 +23,11 @@ cuda_only = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="test requires CUDA"
 )
 
+v1_capable = pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 8,
+    reason="vLLM v1 requires CUDA Compute Capability >= 8.0 (Ampere+)",
+)
+
 
 @pytest.fixture(autouse=True, scope="function")
 def cleanup_modules():
@@ -135,10 +140,10 @@ class ReferenceVirtualLM:
 
     def __init__(self, llm):
         self.llm = llm
-        self.tokenizer = llm.llm_engine.get_tokenizer()
+        self.tokenizer = llm.get_tokenizer()
         self.byte_vocab, self.str_vocab = decode_vocab(self.tokenizer)
         self.vocab_length = len(self.byte_vocab)
-        self.llm.llm_engine.get_model_config().max_logprobs = self.vocab_length
+        self.llm.llm_engine.model_config.max_logprobs = self.vocab_length
         self.DEFAULT_SAMPLING_PARAMS = SamplingParams(
             max_tokens=1,
             n=1,
@@ -148,8 +153,6 @@ class ReferenceVirtualLM:
             ignore_eos=True,
         )
         self.lora_request = None
-
-        self.llm.llm_engine.log_stats = False
 
     @classmethod
     def from_name(cls, model_name, llm_opts=None):
@@ -175,7 +178,7 @@ class ReferenceVirtualLM:
             prompts=TokensPrompt(prompt_token_ids=token_ids),
             sampling_params=self.DEFAULT_SAMPLING_PARAMS,
             use_tqdm=False,
-            lora_request=self.lora_request
+            lora_request=self.lora_request,
         )
         logprobs = np.array(
             [
@@ -198,7 +201,7 @@ class ReferenceVirtualLM:
             prompts=prompts,
             sampling_params=self.DEFAULT_SAMPLING_PARAMS,
             use_tqdm=False,
-            lora_request=self.lora_request
+            lora_request=self.lora_request,
         )
         logprobs = np.array(
             [
