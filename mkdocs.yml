@@ -22,7 +22,6 @@ plugins:
         python:
           options:
             members_order: source
-            members_order_submodules: source
             group_by_category: false
   - gen-files:
       scripts:
