@@ -247,6 +247,7 @@ else:
             Disable any active LoRA adapter for the vLLM engine.
             """
             self.lora_request = None
+            self._adapter_id = None
 
         def add_new_lora(self, lora_path, lora_name="lora_1"):
             """Load a LoRA adapter into the base model by creating a unique id for it.
@@ -287,6 +288,7 @@ else:
             self.lora_request = LoRARequest(
                 lora_name, self.lora_name_to_ids[lora_name], lora_path
             )
+            self._adapter_id = lora_name
 
         async def next_token_logprobs(self, token_ids):
             """Request log probabilities of next token asynchronously with auto-batching.
@@ -300,7 +302,7 @@ else:
             Returns:
                 result (torch.Tensor): Normalized log probability tensor.
             """
-            key = tuple(token_ids)
+            key = self._cache_key(token_ids)
 
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
@@ -419,7 +421,7 @@ else:
             Returns:
                 (torch.Tensor): Normalized log probability tensor.
             """
-            key = tuple(token_ids)
+            key = self._cache_key(token_ids)
 
             if self.cache is not None and key in self.cache:
                 return self.cache[key]

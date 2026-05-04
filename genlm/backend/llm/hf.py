@@ -190,6 +190,7 @@ class AsyncTransformer(AsyncLM):
         self.clear_kv_cache()
         self.clear_cache()
         self.model.set_adapter(lora_name)
+        self._adapter_id = lora_name
 
     def clear_lora(self):
         """
@@ -198,6 +199,7 @@ class AsyncTransformer(AsyncLM):
         self.clear_kv_cache()
         self.clear_cache()
         self.model.set_adapter([])
+        self._adapter_id = None
 
     @torch.no_grad()
     def batch_evaluate_queries(self):
