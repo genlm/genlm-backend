@@ -35,6 +35,10 @@ def async_llm(model_name):
             "enable_lora": True,
             "max_lora_rank": 16,
             "max_loras_per_batch": 1,
+            # Required by sglang when no initial --lora-paths is supplied:
+            # both max_lora_rank and lora_target_modules must be set up
+            # front so the LoRAManager can size its weight buffers.
+            "lora_target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
         },
     }
     return load_model_by_name(model_name, backend="sgl", llm_opts=llm_opts)
