@@ -19,21 +19,6 @@ class AsyncLM(ABC):
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
         self.byte_vocab, self.str_vocab = decode_vocab(self.tokenizer)
-        # Identifier of the currently-selected adapter regime (e.g. an
-        # active LoRA). ``None`` means the base model. Subclasses with
-        # adapter support assign to this in their ``set_lora`` /
-        # ``clear_lora`` implementations.
-        self._adapter_id = None
-
-    def _cache_key(self, token_ids):
-        """Compose a cache key that distinguishes the current adapter regime.
-
-        Subclasses backed by an :class:`OutputCache` should use this when
-        looking up or storing logprobs, so that a swap from adapter A to
-        adapter B (or to/from the base model) misses the cache instead of
-        returning stale logprobs computed under a different adapter.
-        """
-        return (tuple(token_ids), self._adapter_id)
 
     @abstractmethod
     async def next_token_logprobs(self, token_ids):

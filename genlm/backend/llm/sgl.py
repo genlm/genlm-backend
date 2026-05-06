@@ -100,13 +100,18 @@ else:
             self._queue: Optional[asyncio.Queue] = None
             self._task: Optional[asyncio.Task] = None
 
-            # _pending, _inflight, and _rid_to_key are all keyed by the
-            # composite ``self._cache_key(token_ids)``.
+            # _pending, _inflight, and _rid_to_token_ids are all keyed by
+            # tuple(token_ids). Adapter switches wipe these (along with the
+            # output cache), so the cache only ever holds entries from the
+            # currently-active regime.
             self._pending: Dict = {}
             self._inflight: Dict = {}
-            self._rid_to_key: Dict[str, tuple] = {}
+            self._rid_to_token_ids: Dict[str, tuple] = {}
 
             self._lora_name_to_id: Dict[str, str] = {}
+            # UUID of the currently-active LoRA adapter, or None for the
+            # base model. Plumbed into every TokenizedGenerateReqInput.
+            self._lora_id: Optional[str] = None
 
             super().__init__(tokenizer=self.tokenizer)
 
@@ -179,22 +184,32 @@ else:
             Args:
                 lora_path: Unused; accepted for signature parity with the base class.
                 lora_name (str): Name of the adapter to activate (must match a prior ``add_new_lora`` call).
+
+            Notes:
+                Wipes the output cache and any in-flight tracking, so the
+                cache only ever holds entries from the currently-active
+                regime. Concurrent in-flight requests are cancelled.
             """
             if lora_name not in self._lora_name_to_id:
                 raise ValueError(
                     f"A LoRA adapter named '{lora_name}' has not been loaded yet. "
                     "Call add_new_lora() first."
                 )
-            self._adapter_id = self._lora_name_to_id[lora_name]
+            self._lora_id = self._lora_name_to_id[lora_name]
+            self.reset_async_queries()
+            self.clear_cache()
 
         def clear_lora(self):
             """Deactivate any active LoRA adapter; subsequent requests use the base model.
 
             Notes:
                 Adapter weights stay loaded in the engine; only the active
-                pointer is reset.
+                pointer is reset. Wipes the output cache and any in-flight
+                tracking; concurrent in-flight requests are cancelled.
             """
-            self._adapter_id = None
+            self._lora_id = None
+            self.reset_async_queries()
+            self.clear_cache()
 
         def clear_cache(self):
             """Clear the logprobs output cache."""
@@ -215,7 +230,7 @@ else:
 
             self._pending.clear()
             self._inflight.clear()
-            self._rid_to_key.clear()
+            self._rid_to_token_ids.clear()
 
             if self._queue:
                 while True:
@@ -264,14 +279,13 @@ else:
                 raise ValueError("Token ids must not be empty")
 
             token_tuple = tuple(token_ids)
-            cache_key = self._cache_key(token_tuple)
-            if self.cache is not None and cache_key in self.cache:
-                return self.cache[cache_key]
+            if self.cache is not None and token_tuple in self.cache:
+                return self.cache[token_tuple]
 
             out = await self._queue_request(token_tuple)
 
             if self.cache is not None:
-                self.cache[cache_key] = out
+                self.cache[token_tuple] = out
 
             return out
 
@@ -295,30 +309,30 @@ else:
             Returns:
                 (torch.Tensor): A tensor of normalized log probability tensors.
             """
-            input_keys = [self._cache_key(t) for t in token_ids_list]
+            input_keys = [tuple(t) for t in token_ids_list]
             results = {}
-            to_compute = []  # list of (token_tuple, key) for entries not in cache
+            to_compute = []
 
-            for token_ids, key in zip(token_ids_list, input_keys):
-                if not token_ids:
+            for token_tuple in input_keys:
+                if not token_tuple:
                     raise ValueError("Token ids must not be empty")
-                if self.cache is not None and key in self.cache:
-                    results[key] = self.cache[key]
-                elif key not in results:
-                    to_compute.append((tuple(token_ids), key))
-                    results[key] = None
+                if self.cache is not None and token_tuple in self.cache:
+                    results[token_tuple] = self.cache[token_tuple]
+                elif token_tuple not in results:
+                    to_compute.append(token_tuple)
+                    results[token_tuple] = None
 
             if to_compute:
                 requests = []
-                for token_tuple, key in to_compute:
-                    req = _make_request(token_tuple, lora_id=self._adapter_id)
-                    self._rid_to_key[req.rid] = key
+                for token_tuple in to_compute:
+                    req = _make_request(token_tuple, lora_id=self._lora_id)
+                    self._rid_to_token_ids[req.rid] = token_tuple
                     requests.append(req)
 
-                for key, logprobs in self._batch_evaluate(requests):
-                    results[key] = logprobs
+                for token_tuple, logprobs in self._batch_evaluate(requests):
+                    results[token_tuple] = logprobs
                     if self.cache is not None:
-                        self.cache[key] = logprobs
+                        self.cache[token_tuple] = logprobs
 
             return torch.stack([results[k] for k in input_keys])
 
@@ -335,14 +349,14 @@ else:
             if future.cancelled():
                 return None
 
-            key = self._cache_key(token_ids)
+            key = tuple(token_ids)
             self._pending.setdefault(key, []).append(future)
 
             if key in self._inflight:
                 return None
 
-            req = _make_request(token_ids, lora_id=self._adapter_id)
-            self._rid_to_key[req.rid] = key
+            req = _make_request(token_ids, lora_id=self._lora_id)
+            self._rid_to_token_ids[req.rid] = key
             self._inflight[key] = req
             return req
 
@@ -386,7 +400,7 @@ else:
 
                     for i, req in enumerate(batch.reqs):
                         if req.finished():
-                            key = self._rid_to_key.pop(req.rid, None)
+                            key = self._rid_to_token_ids.pop(req.rid, None)
                             if key is None:
                                 continue  # pragma: no cover
                             yield key, logprobs[i]
@@ -411,7 +425,7 @@ else:
                         f.set_exception(e)
                 self._pending.clear()
                 self._inflight.clear()
-                self._rid_to_key.clear()
+                self._rid_to_token_ids.clear()
                 raise
 
         def _cleanup_engine(self):

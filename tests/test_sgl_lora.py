@@ -90,10 +90,9 @@ def test_logprobs_match_hf_with_adapter(
 def test_set_lora_does_not_leak_base_cache(async_llm, token_ids_list, lora_path):
     """Base-model cache entries must not be served to post-set_lora calls.
 
-    With ``AsyncLM._cache_key`` composing prompt with adapter id, the prior
-    base-model entry stays in the cache but the adapter-active lookup misses
-    it. Observable behavior: same prompt under the adapter returns different
-    logprobs from the base, even though the base entry is still cached.
+    ``set_lora`` wipes the output cache, so the post-switch lookup misses
+    and runs a fresh forward under the adapter. Observable behavior: same
+    prompt under the adapter returns different logprobs from the base.
     """
     async_llm.clear_lora()
     async_llm.clear_cache()

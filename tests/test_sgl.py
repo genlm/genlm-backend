@@ -157,7 +157,7 @@ def test_reset_async_queries(async_llm):
     async_llm.reset_async_queries()
     assert async_llm._pending == {}
     assert async_llm._inflight == {}
-    assert async_llm._rid_to_key == {}
+    assert async_llm._rid_to_token_ids == {}
 
 
 @cuda_only
@@ -172,7 +172,7 @@ async def test_reset_async_queries_with_pending_futures(async_llm, long_token_id
     assert fut.cancelled()
     assert async_llm._pending == {}
     assert async_llm._inflight == {}
-    assert async_llm._rid_to_key == {}
+    assert async_llm._rid_to_token_ids == {}
 
 
 @cuda_only
@@ -201,7 +201,7 @@ async def test_background_loop_exception_handling(async_llm, token_ids_list):
 
         assert async_llm._pending == {}
         assert async_llm._inflight == {}
-        assert async_llm._rid_to_key == {}
+        assert async_llm._rid_to_token_ids == {}
 
 
 @cuda_only
