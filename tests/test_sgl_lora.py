@@ -41,7 +41,9 @@ def async_llm(model_name):
             "lora_target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
         },
     }
-    return load_model_by_name(model_name, backend="sgl", llm_opts=llm_opts)
+    llm = load_model_by_name(model_name, backend="sgl", llm_opts=llm_opts)
+    yield llm
+    llm._cleanup_engine()
 
 
 @pytest.fixture(scope="module")
@@ -54,7 +56,10 @@ def transformer_llm(model_name, lora_path):
     )
     llm.add_new_lora(lora_path, "lora_1")
     llm.set_lora(lora_name="lora_1")
-    return llm
+    yield llm
+    llm.model = None
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 @pytest.fixture(scope="module")

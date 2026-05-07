@@ -429,7 +429,15 @@ else:
                 raise
 
         def _cleanup_engine(self):
-            """Clean up the SGLang inference engine and distributed environment."""
+            """Clean up the SGLang inference engine and release GPU memory.
+
+            sglang's ``Scheduler`` has no public shutdown method — it's
+            designed to live until process exit. But when it's instantiated
+            directly (the in-process pattern this wrapper uses), it's a
+            plain Python object with no background threads. Dropping the
+            reference plus emptying PyTorch's caching allocator releases
+            the model weights and KV pool back to the GPU.
+            """
             if getattr(self, "model", None) is None:
                 return  # pragma: no cover
             try:
@@ -438,6 +446,9 @@ else:
                 destroy_distributed_environment()
             except Exception:  # pragma: no cover
                 pass  # pragma: no cover
+            self.model = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         def __del__(self):  # pragma: no cover
             """Clean up the SGLang inference engine when the instance is deleted."""

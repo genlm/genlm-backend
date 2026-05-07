@@ -23,7 +23,9 @@ def async_llm(model_name):
             "chunked_prefill_size": 200,
         },
     }
-    return load_model_by_name(model_name, backend="sgl", llm_opts=llm_opts)
+    llm = load_model_by_name(model_name, backend="sgl", llm_opts=llm_opts)
+    yield llm
+    llm._cleanup_engine()
 
 
 @pytest.fixture(scope="module")
