@@ -190,6 +190,9 @@ else:
             self.timeout = timeout
             self.timer = None
 
+            self.sample_queries = []
+            self.sample_timer = None
+
             super().__init__(tokenizer=self.tokenizer)
 
         @classmethod
@@ -407,6 +410,11 @@ else:
                 self.timer.cancel()
                 self.timer = None
 
+            self.sample_queries = []
+            if self.sample_timer:
+                self.sample_timer.cancel()
+                self.sample_timer = None
+
         def next_token_logprobs_sync(self, token_ids):
             """Request log probabilities of next token synchronously.
 
@@ -575,6 +583,47 @@ else:
                         e,
                     )
 
+        def _add_sample_query(self, prompt_token_ids, sampling_params, future):
+            """Enqueue a ``sample()`` request; mirrors ``_add_query`` for the logprobs path."""
+            self.sample_queries.append((prompt_token_ids, sampling_params, future))
+            if len(self.sample_queries) >= self.batch_size:
+                if self.sample_timer:
+                    self.sample_timer.cancel()
+                    self.sample_timer = None
+                self._batch_sample_evaluate()
+            elif self.sample_timer is None:
+                self.sample_timer = asyncio.get_running_loop().call_later(
+                    self.timeout, self._batch_sample_evaluate
+                )
+
+        def _batch_sample_evaluate(self):
+            """Dispatch queued ``sample()`` requests in one batched ``generate()`` call."""
+            queries, self.sample_queries = self.sample_queries, []
+            if not queries:
+                return
+            if self.sample_timer:
+                self.sample_timer.cancel()
+                self.sample_timer = None
+            if self.logprobs_capture is None:
+                exc = RuntimeError("Cannot use model after cleanup() has been called")
+                for _, _, future in queries:
+                    future.set_exception(exc)
+                return
+            try:
+                outputs = self.llm_engine.generate(
+                    prompts=[TokensPrompt(prompt_token_ids=t) for t, _, _ in queries],
+                    sampling_params=[sp for _, sp, _ in queries],
+                    lora_request=self.lora_request,
+                    use_tqdm=False,
+                )
+                assert len(outputs) == len(queries)
+                for output, (_, _, future) in zip(outputs, queries):
+                    future.set_result(list(output.outputs[0].token_ids))
+            except Exception as exc:
+                for _, _, future in queries:
+                    if not future.done():
+                        future.set_exception(exc)
+
         async def sample(
             self,
             prompt_token_ids,
@@ -584,6 +633,9 @@ else:
             seed=None,
         ):
             """Sample from the language model.
+
+            Concurrent calls are auto-batched into a single ``LLM.generate()``
+            so vLLM continuous-batches the decode steps. Use with ``await``.
 
             Args:
                 prompt_token_ids (list[int]): The token IDs of the prompt.
@@ -595,24 +647,19 @@ else:
             Returns:
                 (list[int]): The sampled token IDs.
             """
-            outputs = self.llm_engine.generate(
-                prompts=TokensPrompt(prompt_token_ids=list(prompt_token_ids)),
-                sampling_params=SamplingParams(
+            future = asyncio.get_running_loop().create_future()
+            self._add_sample_query(
+                list(prompt_token_ids),
+                SamplingParams(
                     n=1,
                     max_tokens=max_tokens,
                     temperature=temperature,
                     seed=seed,
                     stop=[self.byte_vocab[i].decode() for i in eos_token_ids],
                 ),
-                lora_request=self.lora_request,
-                use_tqdm=False,
+                future,
             )
-
-            assert len(outputs) == 1, "Expected exactly one output"
-            assert len(outputs[0].outputs) == 1, "Expected exactly one sequence"
-
-            token_ids = list(outputs[0].outputs[0].token_ids)
+            token_ids = await future
             if token_ids and token_ids[-1] in eos_token_ids:
                 token_ids = token_ids[:-1]
-
             return token_ids

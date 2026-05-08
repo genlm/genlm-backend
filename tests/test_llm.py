@@ -1,6 +1,7 @@
 import torch
 import pytest
 import asyncio
+from unittest.mock import patch
 from conftest import v1_capable, ReferenceVirtualLM
 from arsenal.maths import compare
 from genlm.backend.llm import load_model_by_name, MockAsyncLM
@@ -234,6 +235,41 @@ def test_batch_sample(async_llm):
     assert len(generated_token_ids_vllm) == len(prompts)
     assert len(generated_token_ids_vllm[0]) == 10
     assert len(generated_token_ids_vllm[1]) == 10
+
+
+@v1_capable
+def test_concurrent_sample_calls_batch_into_one_generate(async_llm):
+    """Concurrent ``sample()`` calls must dispatch as a single batched ``generate()``.
+
+    Without sample-queue auto-batching each caller would block the synchronous
+    vLLM v1 engine for all of its decode steps before the next one could begin.
+    """
+    prompts = [
+        async_llm.tokenizer.encode("Hello, world!"),
+        async_llm.tokenizer.encode("An apple a day keeps the"),
+        async_llm.tokenizer.encode("The quick brown fox"),
+    ]
+
+    with patch.object(
+        async_llm.llm_engine,
+        "generate",
+        wraps=async_llm.llm_engine.generate,
+    ) as spy:
+        outputs = asyncio.run(
+            async_llm.batch_sample(
+                prompt_token_ids_list=prompts,
+                max_tokens=5,
+                eos_token_ids=[],
+                temperature=0.01,
+                seed=42,
+            )
+        )
+
+    assert len(outputs) == len(prompts)
+    assert spy.call_count == 1, (
+        f"Expected 1 batched generate() call, got {spy.call_count}"
+    )
+    assert len(spy.call_args.kwargs["prompts"]) == len(prompts)
 
 
 @pytest.mark.skip("This fails.")
