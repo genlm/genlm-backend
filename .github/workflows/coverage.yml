@@ -32,7 +32,7 @@ jobs:
 
       - name: Run tests
         run: |
-          coverage run --source=genlm/backend -m pytest --benchmark-disable --ignore=tests/test_mlx.py --ignore=tests/test_sgl.py
+          coverage run --source=genlm/backend -m pytest --benchmark-disable --ignore=tests/test_mlx.py --ignore=tests/test_sgl.py --ignore=tests/test_sgl_lora.py
           coverage json --omit "*/test*"
           coverage report --omit "*/test*"
 
@@ -61,11 +61,12 @@ jobs:
         run: |
           python -m pip install -U pip
           pip install -e .[sgl]
+          pip install -e .[lora]
           pip install -r requirements-dev.txt
 
       - name: Run tests
         run: |
-          coverage run --source=genlm/backend -m pytest tests/test_sgl.py
+          coverage run --source=genlm/backend -m pytest tests/test_sgl.py tests/test_sgl_lora.py
           coverage json --omit "*/test*"
           coverage report --omit "*/test*"
 
