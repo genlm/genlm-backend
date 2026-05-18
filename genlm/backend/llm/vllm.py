@@ -270,10 +270,10 @@ else:
                 value (str): The name of the LoRA adapter to hash.
 
             Returns:
-                An integer ID corresponding to the LoRA adapter, in the range 0–255.
+                An integer ID corresponding to the LoRA adapter, in the range [1, 2^32].
             """
-            hash_bytes = hashlib.shake_128(value.encode("utf-8")).digest(1)
-            return int.from_bytes(hash_bytes, "big")
+            hash_bytes = hashlib.shake_128(value.encode("utf-8")).digest(4)
+            return int.from_bytes(hash_bytes, "big") + 1
 
         def set_lora(self, lora_path, lora_name="lora_1"):
             """Configure a LoRA adapter request for the vLLM engine.
