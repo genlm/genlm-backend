@@ -1,7 +1,10 @@
+import warnings
+
 import torch
 import numba
 import numpy as np
 from numba.typed import List
+from genlm.backend.tokenization import Token
 
 
 class TokenCharacterTrie:
@@ -12,15 +15,38 @@ class TokenCharacterTrie:
 
         Args:
             decode (list): List representing the token vocabulary.
-                Each element of the list must be iterable.
+                Each element must be iterable. Token objects use byte_string for iteration,
+                other iterables (bytes, EndOfSequence) are iterated directly.
         """
         self.decode = decode
         self.word2leaf = {}
         self.children = [{}]  # First node is root
         self.root = 0
-        self.token_id_to_leaf = []
+        # Maps position index in decode to leaf node: idx_to_leaf[k] = (idx, leaf_node)
+        self.idx_to_leaf = []
 
-        for token_id, word in enumerate(self.decode):
+        _warned_bytes = False
+        for idx, item in enumerate(self.decode):
+            # Get the word (bytes to iterate) and a unique key for word2leaf
+            if isinstance(item, Token):
+                word = item.byte_string
+                word_key = (item.byte_string, item.token_id)
+            elif Token.is_plain_bytes(item):
+                if not _warned_bytes:
+                    warnings.warn(
+                        "Passing plain bytes to TokenCharacterTrie is deprecated. "
+                        "Use Token objects from decode_vocab() instead.",
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
+                    _warned_bytes = True
+                word = item
+                word_key = item
+            else:
+                # For other iterables (e.g. EndOfSequence), iterate directly
+                word = item
+                word_key = item
+
             curr = self.root
             for letter in word:
                 if letter not in self.children[curr]:
@@ -28,14 +54,18 @@ class TokenCharacterTrie:
                     self.children.append({})
                 curr = self.children[curr][letter]
 
-            self.children[curr][None] = last = len(self.children)
-            self.children.append({})
-            assert word not in self.word2leaf, (
-                "Can't have duplicate words in vocabulary"
-            )
-            self.word2leaf[word] = last
+            # Each item gets its own leaf
+            leaf_edge_key = (None, idx)  # Use position index for uniqueness
 
-            self.token_id_to_leaf.append((token_id, last))
+            self.children[curr][leaf_edge_key] = last = len(self.children)
+            self.children.append({})
+
+            if word_key in self.word2leaf:
+                raise ValueError(f"Duplicate word in vocabulary: {word_key}")
+            self.word2leaf[word_key] = last
+
+            # Use position index for weight array indexing
+            self.idx_to_leaf.append((idx, last))
 
         self.leaf2word = dict(zip(self.word2leaf.values(), self.word2leaf.keys()))
         self.jump = List(
@@ -55,7 +85,8 @@ class TokenCharacterTrie:
         node2prefix = {self.root: []}
         for x in reversed(range(len(self.children))):
             for letter, y in self.children[x].items():
-                if letter is None:
+                # Leaf edges are tuples of (None, token_id)
+                if isinstance(letter, tuple) and letter[0] is None:
                     node2prefix[y] = node2prefix[x]
                 else:
                     node2prefix[y] = node2prefix[x] + [letter]
@@ -81,8 +112,8 @@ class TokenCharacterTrie:
         self.word2leaf = {w: f(x) for w, x in self.word2leaf.items()}
         self.leaf2word = dict(zip(self.word2leaf.values(), self.word2leaf.keys()))
 
-        self.token_id_to_leaf = np.array(
-            [(i, f(x)) for i, x in self.token_id_to_leaf], dtype=np.int32
+        self.idx_to_leaf = np.array(
+            [(i, f(x)) for i, x in self.idx_to_leaf], dtype=np.int32
         )
 
         self.ordering = np.array([f(x) for x in self.ordering])
@@ -120,7 +151,8 @@ class TokenCharacterTrie:
         that are descendants of that node.
 
         Args:
-            ws (torch.Tensor|np.ndarray): Token weights over the vocabulary of shape `(len(self.decode),)`
+            ws (torch.Tensor|np.ndarray): Token weights indexed by position in `self.decode`,
+                i.e., `ws[i]` is the weight for `self.decode[i]`. Shape: `(len(self.decode),)`
 
         Returns:
             (np.ndarray): Summed weights for each node in the trie.
@@ -130,7 +162,7 @@ class TokenCharacterTrie:
         _update_trie_numba_sum(
             node_ws=node_ws,
             ws=ws,
-            token_id_to_leaf=self.token_id_to_leaf,
+            idx_to_leaf=self.idx_to_leaf,
             jump=self.jump,
             ordering=self.ordering,
         )
@@ -143,7 +175,8 @@ class TokenCharacterTrie:
         that are descendants of that node.
 
         Args:
-            ws (torch.Tensor|np.ndarray): Token weights over the vocabulary of shape `(len(self.decode),)`
+            ws (torch.Tensor|np.ndarray): Token weights indexed by position in `self.decode`,
+                i.e., `ws[i]` is the weight for `self.decode[i]`. Shape: `(len(self.decode),)`
 
         Returns:
             (np.ndarray): Weight max values for each node in the trie.
@@ -153,7 +186,7 @@ class TokenCharacterTrie:
         _update_trie_numba_max(
             node_ws=node_ws,
             ws=ws,
-            token_id_to_leaf=self.token_id_to_leaf,
+            idx_to_leaf=self.idx_to_leaf,
             jump=self.jump,
             ordering=self.ordering,
         )
@@ -163,23 +196,25 @@ class TokenCharacterTrie:
         """Batched equivalent of `weight_sum`.
 
         Args:
-            ws (list[torch.Tensor|np.ndarray]): Batch of token weights, each of shape `(len(self.decode),)`
+            ws (list[torch.Tensor|np.ndarray]): Batch of token weights, each indexed by
+                position in `self.decode`. Shape of each: `(len(self.decode),)`
 
         Returns:
             (np.ndarray): Batch of weight values of `len(ws)` for each node in the trie
         """
-        return np.array([self.weight_sum(ws) for ws in ws])
+        return np.array([self.weight_sum(w) for w in ws])
 
     def batch_weight_max(self, ws):
         """Batched equivalent of `weight_max`.
 
         Args:
-            ws (list[torch.Tensor|np.ndarray]): Batch of token weights, each of shape `(len(self.decode),)`
+            ws (list[torch.Tensor|np.ndarray]): Batch of token weights, each indexed by
+                position in `self.decode`. Shape of each: `(len(self.decode),)`
 
         Returns:
             (np.ndarray): Batch of weight max values of `len(ws)` for each node in the trie
         """
-        return np.array([self.weight_max(ws) for ws in ws])
+        return np.array([self.weight_max(w) for w in ws])
 
     def _order(self, node):
         """Generate a topological ordering of nodes beneath the given node.
@@ -191,7 +226,8 @@ class TokenCharacterTrie:
             int: Node indices in topological order
         """
         for a in self.children[node]:
-            if a is None:
+            # Skip leaf edges (tuples of (None, token_id))
+            if isinstance(a, tuple) and a[0] is None:
                 pass
             else:
                 yield from self._order(self.children[node][a])
@@ -296,10 +332,11 @@ class TokenCharacterTrie:
 
         for node_id, children in enumerate(self.children):
             for char, child_id in children.items():
-                if char is not None:
-                    edge_label = str(char)
+                # Leaf edges are tuples of (None, token_id)
+                if isinstance(char, tuple) and char[0] is None:
+                    edge_label = f"End-of-Token (ID: {char[1]})"
                 else:
-                    edge_label = "End-of-Token"
+                    edge_label = str(char)
 
                 dot.edge(str(node_id), str(child_id), label=edge_label)
 
@@ -311,15 +348,15 @@ def _update_trie_numba_sum(
     node_ws: numba.float64[:],
     ws: numba.float64[:],
     jump: List[numba.int32[:]],
-    token_id_to_leaf: numba.int32[:, :],
+    idx_to_leaf: numba.int32[:, :],
     ordering: numba.int32[:],
 ):  # pragma: no cover
-    # update leaves
-    M = token_id_to_leaf.shape[0]
+    # update leaves: idx_to_leaf[k] = (position_in_decode, leaf_node_id)
+    M = idx_to_leaf.shape[0]
     for k in range(M):
-        i = token_id_to_leaf[k, 0]
-        x = token_id_to_leaf[k, 1]
-        node_ws[x] = ws[i]
+        idx = idx_to_leaf[k, 0]  # position in decode (and in ws array)
+        leaf = idx_to_leaf[k, 1]  # leaf node id
+        node_ws[leaf] = ws[idx]
 
     # update internal nodes
     N = ordering.shape[0]
@@ -336,15 +373,15 @@ def _update_trie_numba_max(
     node_ws: numba.float64[:],
     ws: numba.float64[:],
     jump: List[numba.int32[:]],
-    token_id_to_leaf: numba.int32[:, :],
+    idx_to_leaf: numba.int32[:, :],
     ordering: numba.int32[:],
 ):  # pragma: no cover
-    # update leaves
-    M = token_id_to_leaf.shape[0]
+    # update leaves: idx_to_leaf[k] = (position_in_decode, leaf_node_id)
+    M = idx_to_leaf.shape[0]
     for k in range(M):
-        i = token_id_to_leaf[k, 0]
-        x = token_id_to_leaf[k, 1]
-        node_ws[x] = ws[i]
+        idx = idx_to_leaf[k, 0]  # position in decode (and in ws array)
+        leaf = idx_to_leaf[k, 1]  # leaf node id
+        node_ws[leaf] = ws[idx]
 
     # update internal nodes
     N = ordering.shape[0]

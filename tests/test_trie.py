@@ -5,6 +5,7 @@ import numpy as np
 from transformers import AutoTokenizer
 
 from genlm.backend.llm import MockAsyncLM
+from genlm.backend.tokenization import Token
 from genlm.backend.trie import (
     TokenCharacterTrie,
     ParallelTokenCharacterTrie,
@@ -14,7 +15,7 @@ from genlm.backend.trie import (
 
 @pytest.fixture()
 def decode():
-    return [b"a", b"b", b"ab", b"<eos>"]
+    return [Token(0, b"a"), Token(1, b"b"), Token(2, b"ab"), Token(3, b"<eos>")]
 
 
 @pytest.fixture(scope="module")
@@ -279,5 +280,44 @@ def test_visualize(decode):
 
 
 def test_parallel_invalid_device():
+    vocab = [Token(0, b"a"), Token(1, b"b"), Token(2, b"c")]
     with pytest.raises(ValueError):
-        ParallelTokenCharacterTrie(decode=["a", "b", "c"], device="invalid")
+        ParallelTokenCharacterTrie(decode=vocab, device="invalid")
+
+
+def test_trie_with_non_token_iterables():
+    """Test that the trie works with non-Token iterables like bytes but warns."""
+    decode = [
+        Token(0, b"hello"),
+        b"world",  # Plain bytes object
+        Token(2, b"test"),
+        b"data",  # Another plain bytes object
+    ]
+
+    with pytest.warns(
+        DeprecationWarning,
+        match="Passing plain bytes to TokenCharacterTrie is deprecated",
+    ):
+        trie = TokenCharacterTrie(decode=decode)
+    assert (b"hello", 0) in trie.word2leaf
+    assert b"world" in trie.word2leaf
+    assert (b"test", 2) in trie.word2leaf
+    assert b"data" in trie.word2leaf
+    ws = torch.tensor([0.25, 0.25, 0.25, 0.25])
+    result = trie.weight_sum(ws)
+    assert len(result) == len(trie.children)
+
+
+def test_trie_duplicate_word_error():
+    """Test that duplicate words in vocabulary raise ValueError."""
+    decode_bytes = [b"hello", b"world", b"hello"]
+    with pytest.warns(DeprecationWarning):
+        with pytest.raises(ValueError, match="Duplicate word in vocabulary"):
+            TokenCharacterTrie(decode=decode_bytes)
+    decode_tokens = [
+        Token(0, b"test"),
+        Token(1, b"other"),
+        Token(0, b"test"),
+    ]
+    with pytest.raises(ValueError, match="Duplicate word in vocabulary"):
+        TokenCharacterTrie(decode=decode_tokens)

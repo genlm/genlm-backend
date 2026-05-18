@@ -2,6 +2,7 @@ from genlm.backend.llm.vllm import AsyncVirtualLM
 from genlm.backend.llm.hf import AsyncTransformer
 from genlm.backend.llm.base import AsyncLM, MockAsyncLM
 from genlm.backend.llm.mlx import AsyncMlxLM
+from genlm.backend.llm.sgl import AsyncSGLTransformer
 
 import torch
 
@@ -11,7 +12,7 @@ def load_model_by_name(name, backend=None, llm_opts=None):
 
     Args:
         name (str): Hugging Face model name (e.g. "gpt2", "meta-llama/Llama-3.2-1B-Instruct")
-        backend (str, optional): Backend to use for inference. Can be "vllm", "hf" or "mock".
+        backend (str, optional): Backend to use for inference. Can be "vllm", "hf", "mlx", "sgl", or "mock".
             If None, defaults to "vllm" if CUDA is available, otherwise "hf".
         llm_opts (dict, optional): Additional options to pass to the backend constructor.
             See AsyncVirtualLM and AsyncTransformer documentation for details.
@@ -36,6 +37,8 @@ def load_model_by_name(name, backend=None, llm_opts=None):
         return MockAsyncLM.from_name(name, **llm_opts)
     elif backend == "mlx":
         return AsyncMlxLM.from_name(name, **llm_opts)
+    elif backend == "sgl":
+        return AsyncSGLTransformer.from_name(name, **llm_opts)
     else:
         raise ValueError(f"Invalid backend: {backend}")
 
@@ -46,5 +49,6 @@ __all__ = [
     "AsyncVirtualLM",
     "AsyncTransformer",
     "AsyncMlxLM",
+    "AsyncSGLTransformer",
     "MockAsyncLM",
 ]
