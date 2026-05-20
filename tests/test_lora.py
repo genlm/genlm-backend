@@ -23,7 +23,6 @@ def async_llm(model_name):
                 "dtype": "float16",
                 "gpu_memory_utilization": 0.1,
                 "max_model_len": 15,
-                "enforce_eager": True,
             }
         },
     )
@@ -38,7 +37,6 @@ def reference_llm(model_name):
             "dtype": "float16",
             "gpu_memory_utilization": 0.1,
             "max_model_len": 15,
-            "enforce_eager": True,
         },
     )
 
