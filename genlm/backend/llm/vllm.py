@@ -37,6 +37,8 @@ try:
         destroy_distributed_environment,
     )
     from vllm.v1.sample.logits_processor import LogitsProcessor
+    from vllm.v1.sample.sampler import Sampler
+    from vllm.v1.outputs import SamplerOutput, LogprobsTensors
 
     HAS_VLLM = True
 except ImportError:  # pragma: no cover
@@ -135,6 +137,123 @@ else:
             """Clear captured logprobs."""
             with self._lock:
                 self._captured_batch = None
+
+    class HubSampler(Sampler):  # pragma: no cover
+        """A ``Sampler`` whose decode step is driven by an SMC hub.
+
+        This is a thin engine *arm*: it owns no SMC logic. When a hub
+        (:class:`~genlm.backend.llm.engine_control.EngineControl`) is attached
+        for the current window, :meth:`forward` reproduces the stock sampler's
+        logits-shaping pipeline and then hands control to the hub:
+
+        1. compute raw logprobs if requested (stock behavior),
+        2. cast logits to float32 (stock behavior),
+        3. ``apply_logits_processors(...)`` -- the non-argmax-invariant
+           processors and penalties (stock behavior),
+        4. apply the argmax-invariant processors -- this is where
+           :class:`GlobalLogprobsCapture` lives, so full-vocab logprob capture
+           keeps working and reflects the post-processor logits,
+        5. ``hub.shape(logits, rows)`` -- the hub mutates each row into its
+           proposal log-distribution,
+        6. ``hub.draw(logits, rows, sampling_metadata)`` -- the hub draws one
+           token per row (and may force EOS to pop a particle out),
+        7. package the drawn ids into a :class:`SamplerOutput`.
+
+        When no hub is attached, :meth:`forward` defers entirely to
+        ``super().forward`` so normal generation and the ``next_token_logprobs``
+        paths are byte-for-byte unaffected.
+
+        Row -> request identity is read from ``model_runner.input_batch.req_ids``
+        (see :mod:`genlm.backend.llm.engine_control`). The sampler is constructed
+        with a reference to its ``model_runner`` for exactly this.
+        """
+
+        def __init__(self, logprobs_mode, model_runner):
+            super().__init__(logprobs_mode=logprobs_mode)
+            self._model_runner = model_runner
+            self._hub = None
+
+        def attach(self, hub):
+            """Bind the hub that drives the current window (or ``None``)."""
+            self._hub = hub
+
+        def detach(self):
+            """Unbind any hub; subsequent steps behave like the stock sampler."""
+            self._hub = None
+
+        def _row_request_ids(self, num_rows):
+            """Row index -> vLLM internal request id for the current step."""
+            req_ids = self._model_runner.input_batch.req_ids
+            return list(req_ids[:num_rows])
+
+        def forward(
+            self,
+            logits,
+            sampling_metadata,
+            predict_bonus_token=False,
+            logprobs_mode_override=None,
+        ):
+            hub = self._hub
+            if hub is None:
+                # No window active: identical to the stock sampler.
+                return super().forward(
+                    logits,
+                    sampling_metadata,
+                    predict_bonus_token=predict_bonus_token,
+                    logprobs_mode_override=logprobs_mode_override,
+                )
+
+            logprobs_mode = logprobs_mode_override or self.logprobs_mode
+            num_logprobs = sampling_metadata.max_num_logprobs
+            raw_logprobs = None
+            if num_logprobs is not None:
+                if logprobs_mode == "raw_logprobs":
+                    raw_logprobs = self.compute_logprobs(logits)
+                elif logprobs_mode == "raw_logits":
+                    raw_logprobs = (
+                        logits.clone()
+                        if logits.dtype == torch.float32
+                        else logits.to(torch.float32)
+                    )
+
+            logits = logits.to(torch.float32)
+
+            # Stock non-argmax-invariant processors + penalties.
+            logits = self.apply_logits_processors(
+                logits, sampling_metadata, predict_bonus_token
+            )
+            # Stock argmax-invariant processors (GlobalLogprobsCapture lives
+            # here). These normally run inside ``sample`` after temperature; the
+            # hub owns temperature/draw, so we run them here on the shaped
+            # logits to keep capture working.
+            for processor in sampling_metadata.logitsprocs.argmax_invariant:
+                logits = processor.apply(logits)
+
+            rows = self._row_request_ids(logits.shape[0])
+
+            # Hand the proposal shaping and the draw to the hub.
+            hub.shape(logits, rows)
+            sampled = hub.draw(logits, rows, sampling_metadata)
+
+            if not isinstance(sampled, torch.Tensor):
+                sampled = torch.tensor(sampled, dtype=torch.int64, device=logits.device)
+            sampled = sampled.to(logits.device).long().view(-1)
+
+            logprobs_tensors = None
+            if num_logprobs is not None and raw_logprobs is not None:
+                if num_logprobs == -1:
+                    logprobs_tensors = LogprobsTensors(
+                        torch.empty(0), raw_logprobs, torch.empty(0)
+                    )
+                else:
+                    logprobs_tensors = self.gather_logprobs(
+                        raw_logprobs, num_logprobs, token_ids=sampled
+                    )
+
+            return SamplerOutput(
+                sampled_token_ids=sampled.to(torch.int32).unsqueeze(-1),
+                logprobs_tensors=logprobs_tensors,
+            )
 
     class AsyncVirtualLM(AsyncLM):  # pragma: no cover
         """Async language model using vLLM v1 with global logits processor.
@@ -663,3 +782,123 @@ else:
             if token_ids and token_ids[-1] in eos_token_ids:
                 token_ids = token_ids[:-1]
             return token_ids
+
+    def install_hub_sampler(llm):  # pragma: no cover
+        """Swap the engine's sampler for a :class:`HubSampler`.
+
+        Returns ``(hub_sampler, restore)`` where ``restore()`` puts the original
+        sampler back. The returned :class:`HubSampler` starts with no hub
+        attached, so it behaves exactly like the stock sampler until
+        :meth:`HubSampler.attach` is called.
+
+        Args:
+            llm (LLM): a vLLM engine (e.g. ``AsyncVirtualLM.llm_engine``).
+
+        Returns:
+            (HubSampler, callable): the installed sampler and a zero-arg
+            ``restore`` that reinstates the original sampler.
+        """
+        model_runner = AsyncVirtualLM._get_model_runner(llm)
+        original = model_runner.sampler
+        hub_sampler = HubSampler(
+            logprobs_mode=model_runner.model_config.logprobs_mode,
+            model_runner=model_runner,
+        )
+        model_runner.sampler = hub_sampler
+
+        def restore():
+            model_runner.sampler = original
+
+        return hub_sampler, restore
+
+    def run_window(
+        llm,
+        prompts,
+        control,
+        max_steps,
+        eos_token_ids,
+        temperature=1.0,
+    ):  # pragma: no cover
+        """Run one engine-native decode window driven by an SMC ``control`` hub.
+
+        Submits one request per prompt, swaps in a :class:`HubSampler` bound to
+        ``control``, and step-locks the engine for up to ``max_steps`` decode
+        steps. Each step the hub shapes the proposal logits and draws the next
+        token for every live request (via :meth:`EngineControl.shape` /
+        :meth:`EngineControl.draw`); forcing an EOS id in ``draw`` pops a
+        particle out early.
+
+        This function owns NO SMC logic -- no ESS, no resampling, no weights.
+        Those all live in ``control``.
+
+        Args:
+            llm (LLM): a vLLM engine.
+            prompts (list[list[int]]): one token-id prefix per particle.
+            control (EngineControl): the hub.
+            max_steps (int): maximum decode steps for the window.
+            eos_token_ids (list[int]): ids that terminate a request when drawn.
+            temperature (float): sampling temperature passed to vLLM (the hub
+                draws, so this only affects metadata the hub may read).
+
+        Returns:
+            (list[list[int]]): committed token ids per prompt, in input order.
+            EOS tokens that terminate a request are stripped from its output.
+        """
+        eos_set = set(eos_token_ids)
+        hub_sampler, restore = install_hub_sampler(llm)
+
+        sampling_params = SamplingParams(
+            n=1,
+            max_tokens=max_steps,
+            temperature=temperature,
+            detokenize=False,
+            stop_token_ids=list(eos_token_ids),
+            ignore_eos=False,
+        )
+
+        # Map vLLM's internal (suffixed) request id -> particle index. We control
+        # the external id (str(i)) and capture the suffixed internal id that
+        # add_request returns, so both directions are pinned. ``input_batch``
+        # exposes the internal id; ``RequestOutput`` exposes the external id.
+        external_to_index = {str(i): i for i in range(len(prompts))}
+        try:
+            for i, prompt in enumerate(prompts):
+                llm.llm_engine.add_request(
+                    str(i),
+                    TokensPrompt(prompt_token_ids=list(prompt)),
+                    sampling_params,
+                )
+
+            hub_sampler.attach(control)
+
+            results = [None] * len(prompts)
+            steps = 0
+            while llm.llm_engine.has_unfinished_requests() and steps < max_steps:
+                step_outputs = llm.llm_engine.step()
+                steps += 1
+                for output in step_outputs:
+                    if output.finished:
+                        idx = external_to_index[output.request_id]
+                        token_ids = list(output.outputs[0].token_ids)
+                        # vLLM's async-output path can carry a -1 placeholder for
+                        # a not-yet-committed token; keep only committed ids.
+                        token_ids = [t for t in token_ids if t != -1]
+                        if token_ids and token_ids[-1] in eos_set:
+                            token_ids = token_ids[:-1]
+                        results[idx] = token_ids
+        finally:
+            hub_sampler.detach()
+            restore()
+            # Abort anything still running. With max_tokens=max_steps every
+            # request finishes by a length stop, so this is a safety net for the
+            # belt-and-suspenders step cap (or an exception mid-window).
+            if llm.llm_engine.has_unfinished_requests():
+                with contextlib.suppress(Exception):
+                    unfinished = [
+                        ext
+                        for ext, idx in external_to_index.items()
+                        if results[idx] is None
+                    ]
+                    llm.llm_engine.abort_request(unfinished)
+
+        return [r if r is not None else [] for r in results]
