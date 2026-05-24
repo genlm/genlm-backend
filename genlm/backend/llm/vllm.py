@@ -844,6 +844,8 @@ else:
             (list[list[int]]): committed token ids per prompt, in input order.
             EOS tokens that terminate a request are stripped from its output.
         """
+        from vllm.sampling_params import RequestOutputKind
+
         eos_set = set(eos_token_ids)
         hub_sampler, restore = install_hub_sampler(llm)
 
@@ -854,6 +856,9 @@ else:
             detokenize=False,
             stop_token_ids=list(eos_token_ids),
             ignore_eos=False,
+            # Only emit each request once, on completion, with its full token
+            # list (matches LLM.generate's behavior).
+            output_kind=RequestOutputKind.FINAL_ONLY,
         )
 
         # Map vLLM's internal (suffixed) request id -> particle index. We control
@@ -872,10 +877,14 @@ else:
             hub_sampler.attach(control)
 
             results = [None] * len(prompts)
-            steps = 0
-            while llm.llm_engine.has_unfinished_requests() and steps < max_steps:
+            # The window length is enforced by SamplingParams(max_tokens=max_steps):
+            # vLLM stops each request after at most ``max_steps`` drawn tokens (a
+            # ``length`` finish) or earlier when the hub draws an eos id. We drive
+            # the engine until every request finishes. Note one engine step is the
+            # prefill (no token committed), so finishing takes up to max_steps + 1
+            # engine steps -- which is why we do NOT cap the loop on step count.
+            while llm.llm_engine.has_unfinished_requests():
                 step_outputs = llm.llm_engine.step()
-                steps += 1
                 for output in step_outputs:
                     if output.finished:
                         idx = external_to_index[output.request_id]
@@ -890,8 +899,8 @@ else:
             hub_sampler.detach()
             restore()
             # Abort anything still running. With max_tokens=max_steps every
-            # request finishes by a length stop, so this is a safety net for the
-            # belt-and-suspenders step cap (or an exception mid-window).
+            # request finishes (length stop or hub eos), so this is a safety net
+            # for an exception raised mid-window.
             if llm.llm_engine.has_unfinished_requests():
                 with contextlib.suppress(Exception):
                     unfinished = [

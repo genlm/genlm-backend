@@ -4,7 +4,6 @@ These exercise the backend seams only -- no SMC logic. They require CUDA + vLLM
 and are skipped otherwise.
 """
 
-import sys
 import pytest
 import torch
 
@@ -26,12 +25,10 @@ MODEL = "gpt2"
 
 @pytest.fixture(autouse=True, scope="function")
 def cleanup_modules():
+    # Override the conftest autouse fixture: these tests share one module-scoped
+    # vLLM engine, so we must NOT wipe vllm/genlm modules between tests (doing so
+    # triggers a duplicate opaque-type registration on re-import). No-op.
     yield
-    for mod_name in list(sys.modules.keys()):
-        if "vllm" in mod_name or "genlm" in mod_name:
-            del sys.modules[mod_name]
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
 
 
 @pytest.fixture(scope="module")
