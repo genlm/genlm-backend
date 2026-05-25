@@ -23,7 +23,11 @@ mlx = [
     "mlx-lm"
 ]
 vllm = [
-    "vllm>=0.10.0,<0.22.0; sys_platform == 'linux'",
+    # The engine-native arms (ControlSampler, run_burst) reach into vLLM v1
+    # internals (Sampler.forward signature, input_batch.req_ids, the model-runner
+    # sampler swap) that are version-specific; pin to the 0.21 line validated on
+    # the box rather than advertising the whole >=0.10 range.
+    "vllm>=0.21.0,<0.22.0; sys_platform == 'linux'",
     "triton>=3.2.0; sys_platform == 'linux'",
 ]
 sgl = [

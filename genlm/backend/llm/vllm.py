@@ -143,7 +143,7 @@ else:
 
         This is a thin engine *arm*: it owns no SMC logic. When a hub
         (:class:`~genlm.backend.llm.engine_control.EngineControl`) is attached
-        for the current window, :meth:`forward` reproduces the stock sampler's
+        for the current burst, :meth:`forward` reproduces the stock sampler's
         logits-shaping pipeline and then hands control to the hub:
 
         1. compute raw logprobs if requested (stock behavior),
@@ -174,7 +174,7 @@ else:
             self._hub = None
 
         def attach(self, hub):
-            """Bind the hub that drives the current window (or ``None``)."""
+            """Bind the hub that drives the current burst (or ``None``)."""
             self._hub = hub
 
         def detach(self):
@@ -195,7 +195,7 @@ else:
         ):
             hub = self._hub
             if hub is None:
-                # No window active: identical to the stock sampler.
+                # No burst active: identical to the stock sampler.
                 return super().forward(
                     logits,
                     sampling_metadata,
@@ -807,14 +807,14 @@ else:
             eos_token_ids,
             temperature=1.0,
         ):  # pragma: no cover
-            """Run one engine-native decode window driven by an SMC ``control`` hub.
+            """Run one engine-native decode burst driven by an SMC ``control`` hub.
 
             Submits one request per prompt, attaches ``control`` to the persistent
-            :class:`ControlSampler` for the burst, and step-locks the engine for up to
-            ``max_steps`` decode steps. Each step the hub shapes the proposal logits and draws the next
-            token for every live request (via :meth:`EngineControl.shape` /
-            :meth:`EngineControl.draw`); forcing an EOS id in ``draw`` pops a
-            particle out early.
+            :class:`ControlSampler` for the burst, and drives the engine's decode
+            loop for up to ``max_steps`` steps. Each step the hub shapes the
+            proposal logits and draws the next token for every live request (via
+            :meth:`EngineControl.shape` / :meth:`EngineControl.draw`); forcing an
+            EOS id in ``draw`` pops a particle out early.
 
             This method owns NO SMC logic -- no ESS, no resampling, no weights.
             Those all live in ``control``.
@@ -822,7 +822,7 @@ else:
             Args:
                 prompts (list[list[int]]): one token-id prefix per particle.
                 control (EngineControl): the hub.
-                max_steps (int): maximum decode steps for the window.
+                max_steps (int): maximum decode steps for the burst.
                 eos_token_ids (list[int]): ids that terminate a request when drawn.
                 temperature (float): sampling temperature passed to vLLM (the hub
                     draws, so this only affects metadata the hub may read).
@@ -835,6 +835,9 @@ else:
 
             eos_set = set(eos_token_ids)
             sampler = self._control_sampler
+            # self.llm_engine is the vLLM LLM; .llm_engine is the inner LLMEngine.
+            # Bind it once rather than hopping through both attrs at every call.
+            engine = self.llm_engine.llm_engine
 
             sampling_params = SamplingParams(
                 n=1,
@@ -859,21 +862,21 @@ else:
             sampler.attach(control)
             try:
                 for i, prompt in enumerate(prompts):
-                    self.llm_engine.llm_engine.add_request(
+                    engine.add_request(
                         str(i),
                         TokensPrompt(prompt_token_ids=list(prompt)),
                         sampling_params,
                     )
 
                 results = [None] * len(prompts)
-                # The window length is enforced by SamplingParams(max_tokens=max_steps):
+                # The burst length is enforced by SamplingParams(max_tokens=max_steps):
                 # vLLM stops each request after at most ``max_steps`` drawn tokens (a
                 # ``length`` finish) or earlier when the hub draws an eos id. We drive
                 # the engine until every request finishes. Note one engine step is the
                 # prefill (no token committed), so finishing takes up to max_steps + 1
                 # engine steps -- which is why we do NOT cap the loop on step count.
-                while self.llm_engine.llm_engine.has_unfinished_requests():
-                    step_outputs = self.llm_engine.llm_engine.step()
+                while engine.has_unfinished_requests():
+                    step_outputs = engine.step()
                     for output in step_outputs:
                         if output.finished:
                             idx = external_to_index[output.request_id]
@@ -888,14 +891,14 @@ else:
                 sampler.detach()
                 # Abort anything still running. With max_tokens=max_steps every
                 # request finishes (length stop or hub eos), so this is a safety net
-                # for an exception raised mid-window.
-                if self.llm_engine.llm_engine.has_unfinished_requests():
+                # for an exception raised mid-burst.
+                if engine.has_unfinished_requests():
                     with contextlib.suppress(Exception):
                         unfinished = [
                             ext
                             for ext, idx in external_to_index.items()
                             if results[idx] is None
                         ]
-                        self.llm_engine.llm_engine.abort_request(unfinished)
+                        engine.abort_request(unfinished)
 
             return [r if r is not None else [] for r in results]

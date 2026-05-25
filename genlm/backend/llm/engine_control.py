@@ -28,23 +28,16 @@ the externally-supplied id with 8 random characters appended
 ``vllm.v1.engine.input_processor.assign_request_id``). ``ControlSampler`` therefore
 passes those internal ids straight through to the hub; the hub maps them to
 particle indices using the table it built from the ids ``add_request`` returned.
-
-:class:`RowRequestTracker` is an optional helper that maintains the same kind of
-row -> id table from ``BatchUpdate`` events (the ``update_state`` LogitsProcessor
-seam), for callers who prefer not to reach into ``input_batch`` directly. Note
-that ``BatchUpdate.added`` tuples are ``(index, SamplingParams, prompt_ids,
-output_ids)`` and do NOT carry the request id, so a tracker driven purely by
-``BatchUpdate`` can only report *positions*, not ids -- which is why
-``ControlSampler`` reads ``input_batch.req_ids`` instead. The tracker is provided
-for completeness and parity with the documented seam.
+(``BatchUpdate.added`` tuples carry only ``(index, SamplingParams, prompt_ids,
+output_ids)`` -- no request id -- so the ``input_batch.req_ids`` read is the
+authoritative row -> id source, not the LogitsProcessor ``update_state`` seam.)
 """
 
 from __future__ import annotations
 
-from typing import Protocol, Sequence, runtime_checkable
+from typing import Protocol, Sequence
 
 
-@runtime_checkable
 class EngineControl(Protocol):
     """The seam the SMC hub implements to drive an in-engine decode window.
 
@@ -90,66 +83,3 @@ class EngineControl(Protocol):
             A length-``num_rows`` 1-D ``torch.Tensor`` (or list) of token ids.
         """
         ...
-
-
-class RowRequestTracker:
-    """Maintain a row-index -> request-id table from ``BatchUpdate`` events.
-
-    Optional helper for hubs that want to track batch makeup through the
-    LogitsProcessor ``update_state(BatchUpdate)`` seam rather than reading
-    ``model_runner.input_batch.req_ids`` directly. Because ``BatchUpdate`` does
-    not carry request ids, callers must supply the id for each *added* request
-    via :meth:`note_added_id`, keyed by batch index, before/at the step the add
-    is observed.
-
-    The semantics follow vLLM's documented ordering: a ``BatchUpdate`` is applied
-    as removed, then added, then moved.
-    """
-
-    def __init__(self):
-        # row index -> request id (None for a hole that condense() will fill)
-        self._rows: list[str | None] = []
-        # batch index -> request id, staged by the caller for the next add
-        self._pending_ids: dict[int, str] = {}
-
-    def note_added_id(self, index: int, request_id: str) -> None:
-        """Stage the request id that the next ``added`` tuple at ``index`` owns."""
-        self._pending_ids[index] = request_id
-
-    def update_state(self, batch_update) -> None:
-        """Apply a ``BatchUpdate`` (or ``None``) to the row table."""
-        if batch_update is None:
-            return
-
-        size = batch_update.batch_size
-        if len(self._rows) < size:
-            self._rows.extend([None] * (size - len(self._rows)))
-
-        # Order matters: removed, then added, then moved.
-        for index in batch_update.removed:
-            if index < len(self._rows):
-                self._rows[index] = None
-
-        for added in batch_update.added:
-            index = added[0]
-            if index >= len(self._rows):
-                self._rows.extend([None] * (index + 1 - len(self._rows)))
-            self._rows[index] = self._pending_ids.pop(index, None)
-
-        for moved in batch_update.moved:
-            a, b = moved[0], moved[1]
-            direct = moved[2]
-            # MoveDirectionality.SWAP swaps a<->b; UNIDIRECTIONAL moves a->b.
-            if getattr(direct, "name", str(direct)).upper().endswith("SWAP"):
-                self._rows[a], self._rows[b] = self._rows[b], self._rows[a]
-            else:
-                self._rows[b] = self._rows[a]
-                self._rows[a] = None
-
-        del self._rows[size:]
-
-    def request_ids(self, num_rows: int | None = None) -> list[str | None]:
-        """Return the current row -> request-id table."""
-        if num_rows is None:
-            return list(self._rows)
-        return list(self._rows[:num_rows])
