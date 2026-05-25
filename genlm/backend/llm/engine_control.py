@@ -7,7 +7,7 @@ driver, no ESS, no resampling, no weight bookkeeping here. The engine exposes
 two callbacks -- :meth:`EngineControl.shape` and :meth:`EngineControl.draw` --
 plus a way to learn which particle each batch row corresponds to.
 
-The arm that consumes this contract is :class:`genlm.backend.llm.vllm.HubSampler`,
+The arm that consumes this contract is :class:`genlm.backend.llm.vllm.ControlSampler`,
 a swapped-in ``vllm.v1.sample.sampler.Sampler`` whose ``forward`` calls back into
 the hub. The hub is held by direct in-process reference; nothing is smuggled
 through a registry or ``extra_args``.
@@ -25,7 +25,7 @@ runner itself uses to scatter sampled tokens back to requests
 The request ids in ``input_batch.req_ids`` are vLLM's *internal* ids, which are
 the externally-supplied id with 8 random characters appended
 (``f"{external}-{random_uuid():.8}"`` in
-``vllm.v1.engine.input_processor.assign_request_id``). ``HubSampler`` therefore
+``vllm.v1.engine.input_processor.assign_request_id``). ``ControlSampler`` therefore
 passes those internal ids straight through to the hub; the hub maps them to
 particle indices using the table it built from the ids ``add_request`` returned.
 
@@ -35,7 +35,7 @@ seam), for callers who prefer not to reach into ``input_batch`` directly. Note
 that ``BatchUpdate.added`` tuples are ``(index, SamplingParams, prompt_ids,
 output_ids)`` and do NOT carry the request id, so a tracker driven purely by
 ``BatchUpdate`` can only report *positions*, not ids -- which is why
-``HubSampler`` reads ``input_batch.req_ids`` instead. The tracker is provided
+``ControlSampler`` reads ``input_batch.req_ids`` instead. The tracker is provided
 for completeness and parity with the documented seam.
 """
 
@@ -77,7 +77,7 @@ class EngineControl(Protocol):
         token id per row (a 1-D tensor or a list of ints, length ``num_rows``).
         Returning an end-of-sequence token id for a row signals that the
         particle should pop out of the window: vLLM will finish that request and
-        ``run_window`` will stop emitting tokens for it.
+        ``run_burst`` will stop emitting tokens for it.
 
         Args:
             logits: ``[num_rows, vocab]`` float tensor (already shaped).

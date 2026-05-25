@@ -138,7 +138,7 @@ else:
             with self._lock:
                 self._captured_batch = None
 
-    class HubSampler(Sampler):  # pragma: no cover
+    class ControlSampler(Sampler):  # pragma: no cover
         """A ``Sampler`` whose decode step is driven by an SMC hub.
 
         This is a thin engine *arm*: it owns no SMC logic. When a hub
@@ -295,6 +295,10 @@ else:
             """
             self.llm_engine = llm_engine
             self.logprobs_capture = logprobs_capture
+            # The engine-native sampler, swapped in once by from_name (None until
+            # then, and on any non-engine construction path). Detached except for
+            # the duration of a run_burst call.
+            self._control_sampler = None
             self.tokenizer = llm_engine.get_tokenizer()
             self.cache = (
                 OutputCache(maxsize=cache_size, **(cache_opts or {}))
@@ -346,7 +350,19 @@ else:
                 logprobs_capture
             )
 
-            return cls(llm, logprobs_capture, **kwargs)
+            # Install the engine-native sampler ONCE. Detached (the default) it
+            # defers verbatim to the stock sampler, so normal generation and the
+            # next_token_logprobs paths are byte-unaffected; run_burst attaches a
+            # control hub only for a burst's duration.
+            control_sampler = ControlSampler(
+                logprobs_mode=model_runner.model_config.logprobs_mode,
+                model_runner=model_runner,
+            )
+            model_runner.sampler = control_sampler
+
+            inst = cls(llm, logprobs_capture, **kwargs)
+            inst._control_sampler = control_sampler
+            return inst
 
         @staticmethod
         def _get_model_runner(llm):
@@ -783,131 +799,103 @@ else:
                 token_ids = token_ids[:-1]
             return token_ids
 
-    def install_hub_sampler(llm):  # pragma: no cover
-        """Swap the engine's sampler for a :class:`HubSampler`.
+        def run_burst(
+            self,
+            prompts,
+            control,
+            max_steps,
+            eos_token_ids,
+            temperature=1.0,
+        ):  # pragma: no cover
+            """Run one engine-native decode window driven by an SMC ``control`` hub.
 
-        Returns ``(hub_sampler, restore)`` where ``restore()`` puts the original
-        sampler back. The returned :class:`HubSampler` starts with no hub
-        attached, so it behaves exactly like the stock sampler until
-        :meth:`HubSampler.attach` is called.
+            Submits one request per prompt, attaches ``control`` to the persistent
+            :class:`ControlSampler` for the burst, and step-locks the engine for up to
+            ``max_steps`` decode steps. Each step the hub shapes the proposal logits and draws the next
+            token for every live request (via :meth:`EngineControl.shape` /
+            :meth:`EngineControl.draw`); forcing an EOS id in ``draw`` pops a
+            particle out early.
 
-        Args:
-            llm (LLM): a vLLM engine (e.g. ``AsyncVirtualLM.llm_engine``).
+            This method owns NO SMC logic -- no ESS, no resampling, no weights.
+            Those all live in ``control``.
 
-        Returns:
-            (HubSampler, callable): the installed sampler and a zero-arg
-            ``restore`` that reinstates the original sampler.
-        """
-        model_runner = AsyncVirtualLM._get_model_runner(llm)
-        original = model_runner.sampler
-        hub_sampler = HubSampler(
-            logprobs_mode=model_runner.model_config.logprobs_mode,
-            model_runner=model_runner,
-        )
-        model_runner.sampler = hub_sampler
+            Args:
+                prompts (list[list[int]]): one token-id prefix per particle.
+                control (EngineControl): the hub.
+                max_steps (int): maximum decode steps for the window.
+                eos_token_ids (list[int]): ids that terminate a request when drawn.
+                temperature (float): sampling temperature passed to vLLM (the hub
+                    draws, so this only affects metadata the hub may read).
 
-        def restore():
-            model_runner.sampler = original
+            Returns:
+                (list[list[int]]): committed token ids per prompt, in input order.
+                EOS tokens that terminate a request are stripped from its output.
+            """
+            from vllm.sampling_params import RequestOutputKind
 
-        return hub_sampler, restore
+            eos_set = set(eos_token_ids)
+            sampler = self._control_sampler
 
-    def run_window(
-        llm,
-        prompts,
-        control,
-        max_steps,
-        eos_token_ids,
-        temperature=1.0,
-    ):  # pragma: no cover
-        """Run one engine-native decode window driven by an SMC ``control`` hub.
+            sampling_params = SamplingParams(
+                n=1,
+                max_tokens=max_steps,
+                temperature=temperature,
+                detokenize=False,
+                stop_token_ids=list(eos_token_ids),
+                ignore_eos=False,
+                # Only emit each request once, on completion, with its full token
+                # list (matches LLM.generate's behavior).
+                output_kind=RequestOutputKind.FINAL_ONLY,
+            )
 
-        Submits one request per prompt, swaps in a :class:`HubSampler` bound to
-        ``control``, and step-locks the engine for up to ``max_steps`` decode
-        steps. Each step the hub shapes the proposal logits and draws the next
-        token for every live request (via :meth:`EngineControl.shape` /
-        :meth:`EngineControl.draw`); forcing an EOS id in ``draw`` pops a
-        particle out early.
+            # Map vLLM's internal (suffixed) request id -> particle index. We control
+            # the external id (str(i)) and capture the suffixed internal id that
+            # add_request returns, so both directions are pinned. ``input_batch``
+            # exposes the internal id; ``RequestOutput`` exposes the external id.
+            external_to_index = {str(i): i for i in range(len(prompts))}
+            # Attach the control hub to the persistent ControlSampler for this burst
+            # only; the finally below detaches it so normal generation stays stock
+            # even if the burst raises.
+            sampler.attach(control)
+            try:
+                for i, prompt in enumerate(prompts):
+                    self.llm_engine.llm_engine.add_request(
+                        str(i),
+                        TokensPrompt(prompt_token_ids=list(prompt)),
+                        sampling_params,
+                    )
 
-        This function owns NO SMC logic -- no ESS, no resampling, no weights.
-        Those all live in ``control``.
+                results = [None] * len(prompts)
+                # The window length is enforced by SamplingParams(max_tokens=max_steps):
+                # vLLM stops each request after at most ``max_steps`` drawn tokens (a
+                # ``length`` finish) or earlier when the hub draws an eos id. We drive
+                # the engine until every request finishes. Note one engine step is the
+                # prefill (no token committed), so finishing takes up to max_steps + 1
+                # engine steps -- which is why we do NOT cap the loop on step count.
+                while self.llm_engine.llm_engine.has_unfinished_requests():
+                    step_outputs = self.llm_engine.llm_engine.step()
+                    for output in step_outputs:
+                        if output.finished:
+                            idx = external_to_index[output.request_id]
+                            token_ids = list(output.outputs[0].token_ids)
+                            # vLLM's async-output path can carry a -1 placeholder for
+                            # a not-yet-committed token; keep only committed ids.
+                            token_ids = [t for t in token_ids if t != -1]
+                            if token_ids and token_ids[-1] in eos_set:
+                                token_ids = token_ids[:-1]
+                            results[idx] = token_ids
+            finally:
+                sampler.detach()
+                # Abort anything still running. With max_tokens=max_steps every
+                # request finishes (length stop or hub eos), so this is a safety net
+                # for an exception raised mid-window.
+                if self.llm_engine.llm_engine.has_unfinished_requests():
+                    with contextlib.suppress(Exception):
+                        unfinished = [
+                            ext
+                            for ext, idx in external_to_index.items()
+                            if results[idx] is None
+                        ]
+                        self.llm_engine.llm_engine.abort_request(unfinished)
 
-        Args:
-            llm (LLM): a vLLM engine.
-            prompts (list[list[int]]): one token-id prefix per particle.
-            control (EngineControl): the hub.
-            max_steps (int): maximum decode steps for the window.
-            eos_token_ids (list[int]): ids that terminate a request when drawn.
-            temperature (float): sampling temperature passed to vLLM (the hub
-                draws, so this only affects metadata the hub may read).
-
-        Returns:
-            (list[list[int]]): committed token ids per prompt, in input order.
-            EOS tokens that terminate a request are stripped from its output.
-        """
-        from vllm.sampling_params import RequestOutputKind
-
-        eos_set = set(eos_token_ids)
-        hub_sampler, restore = install_hub_sampler(llm)
-
-        sampling_params = SamplingParams(
-            n=1,
-            max_tokens=max_steps,
-            temperature=temperature,
-            detokenize=False,
-            stop_token_ids=list(eos_token_ids),
-            ignore_eos=False,
-            # Only emit each request once, on completion, with its full token
-            # list (matches LLM.generate's behavior).
-            output_kind=RequestOutputKind.FINAL_ONLY,
-        )
-
-        # Map vLLM's internal (suffixed) request id -> particle index. We control
-        # the external id (str(i)) and capture the suffixed internal id that
-        # add_request returns, so both directions are pinned. ``input_batch``
-        # exposes the internal id; ``RequestOutput`` exposes the external id.
-        external_to_index = {str(i): i for i in range(len(prompts))}
-        try:
-            for i, prompt in enumerate(prompts):
-                llm.llm_engine.add_request(
-                    str(i),
-                    TokensPrompt(prompt_token_ids=list(prompt)),
-                    sampling_params,
-                )
-
-            hub_sampler.attach(control)
-
-            results = [None] * len(prompts)
-            # The window length is enforced by SamplingParams(max_tokens=max_steps):
-            # vLLM stops each request after at most ``max_steps`` drawn tokens (a
-            # ``length`` finish) or earlier when the hub draws an eos id. We drive
-            # the engine until every request finishes. Note one engine step is the
-            # prefill (no token committed), so finishing takes up to max_steps + 1
-            # engine steps -- which is why we do NOT cap the loop on step count.
-            while llm.llm_engine.has_unfinished_requests():
-                step_outputs = llm.llm_engine.step()
-                for output in step_outputs:
-                    if output.finished:
-                        idx = external_to_index[output.request_id]
-                        token_ids = list(output.outputs[0].token_ids)
-                        # vLLM's async-output path can carry a -1 placeholder for
-                        # a not-yet-committed token; keep only committed ids.
-                        token_ids = [t for t in token_ids if t != -1]
-                        if token_ids and token_ids[-1] in eos_set:
-                            token_ids = token_ids[:-1]
-                        results[idx] = token_ids
-        finally:
-            hub_sampler.detach()
-            restore()
-            # Abort anything still running. With max_tokens=max_steps every
-            # request finishes (length stop or hub eos), so this is a safety net
-            # for an exception raised mid-window.
-            if llm.llm_engine.has_unfinished_requests():
-                with contextlib.suppress(Exception):
-                    unfinished = [
-                        ext
-                        for ext, idx in external_to_index.items()
-                        if results[idx] is None
-                    ]
-                    llm.llm_engine.abort_request(unfinished)
-
-        return [r if r is not None else [] for r in results]
+            return [r if r is not None else [] for r in results]

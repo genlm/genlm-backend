@@ -1,4 +1,4 @@
-"""Gated tests for the engine-native SMC arms (HubSampler / run_window).
+"""Gated tests for the engine-native SMC arms (ControlSampler / run_burst).
 
 These exercise the backend seams only -- no SMC logic. They require CUDA + vLLM
 and are skipped otherwise.
@@ -47,6 +47,29 @@ def engine():
         max_model_len=256,
     )
     yield llm
+
+
+@pytest.fixture(scope="module")
+def vlm(engine):
+    # Mirror from_name's wiring on a raw engine: register the logprobs-capture LP
+    # and install the persistent ControlSampler (detached) once.
+    from genlm.backend.llm.vllm import (
+        AsyncVirtualLM,
+        ControlSampler,
+        GlobalLogprobsCapture,
+    )
+
+    logprobs_capture = GlobalLogprobsCapture()
+    model_runner = AsyncVirtualLM._get_model_runner(engine)
+    model_runner.input_batch.logitsprocs.argmax_invariant.append(logprobs_capture)
+    control_sampler = ControlSampler(
+        logprobs_mode=model_runner.model_config.logprobs_mode,
+        model_runner=model_runner,
+    )
+    model_runner.sampler = control_sampler
+    inst = AsyncVirtualLM(engine, logprobs_capture)
+    inst._control_sampler = control_sampler
+    yield inst
 
 
 # ----- trivial hubs implementing EngineControl -----------------------------
@@ -137,8 +160,10 @@ class RecordRowsHub:
 # ----- tests ----------------------------------------------------------------
 
 
-def test_no_hub_matches_stock(engine):
-    """(a) With no hub attached, the swapped sampler matches stock generation."""
+def test_no_hub_matches_stock(vlm):
+    """(a) The persistent ControlSampler, detached, matches stock generation."""
+    from vllm.v1.sample.sampler import Sampler
+
     prompts = [
         TokensPrompt(prompt_token_ids=[50256, 11, 12]),
         TokensPrompt(prompt_token_ids=[50256, 13]),
@@ -147,31 +172,33 @@ def test_no_hub_matches_stock(engine):
         n=1, max_tokens=4, temperature=0.0, detokenize=False, ignore_eos=True
     )
 
-    stock = engine.generate(prompts, sp, use_tqdm=False)
-    stock_toks = [list(o.outputs[0].token_ids) for o in stock]
+    model_runner = vlm._get_model_runner(vlm.llm_engine)
+    control_sampler = model_runner.sampler  # the persistent ControlSampler
 
-    from genlm.backend.llm.vllm import install_hub_sampler
-
-    hub_sampler, restore = install_hub_sampler(engine)
+    # Baseline through a fresh stock Sampler.
+    model_runner.sampler = Sampler(
+        logprobs_mode=model_runner.model_config.logprobs_mode
+    )
     try:
-        # no attach -> behaves like stock
-        out = engine.generate(prompts, sp, use_tqdm=False)
-        hub_toks = [list(o.outputs[0].token_ids) for o in out]
+        stock = vlm.llm_engine.generate(prompts, sp, use_tqdm=False)
+        stock_toks = [list(o.outputs[0].token_ids) for o in stock]
     finally:
-        restore()
+        model_runner.sampler = control_sampler
+
+    # Detached ControlSampler must match stock byte-for-byte.
+    control_sampler.detach()
+    out = vlm.llm_engine.generate(prompts, sp, use_tqdm=False)
+    hub_toks = [list(o.outputs[0].token_ids) for o in out]
 
     assert hub_toks == stock_toks
 
 
-def test_force_single_token(engine):
-    """(b) A hub that masks to one forced token: run_window returns that token
+def test_force_single_token(vlm):
+    """(b) A hub that masks to one forced token: run_burst returns that token
     every step."""
-    from genlm.backend.llm.vllm import run_window
-
     forced = 198
     hub = ForceTokenHub(forced)
-    out = run_window(
-        engine,
+    out = vlm.run_burst(
         prompts=[[50256, 11, 12], [50256, 13]],
         control=hub,
         max_steps=4,
@@ -184,16 +211,13 @@ def test_force_single_token(engine):
     assert all(len(rows) == 2 for rows in hub.seen_rows)
 
 
-def test_force_eos_pops_out(engine):
+def test_force_eos_pops_out(vlm):
     """(c) A hub that forces EOS mid-window: the request finishes early and
-    run_window returns the truncated (EOS-stripped) tokens."""
-    from genlm.backend.llm.vllm import run_window
-
+    run_burst returns the truncated (EOS-stripped) tokens."""
     forced = 198
     eos = 50256
     hub = ForceEosAtStepHub(forced, eos, trigger=2)
-    out = run_window(
-        engine,
+    out = vlm.run_burst(
         prompts=[[50256, 11, 12], [50256, 13]],
         control=hub,
         max_steps=8,
@@ -204,18 +228,15 @@ def test_force_eos_pops_out(engine):
     assert out == [[forced, forced], [forced, forced]]
 
 
-def test_row_request_mapping_staggered(engine):
+def test_row_request_mapping_staggered(vlm):
     """(d) Mapping stays correct when requests finish at different steps."""
-    from genlm.backend.llm.vllm import run_window
-
     eos = 50256
     # particle 0 -> token 100, particle 1 -> token 200, particle 2 -> token 300
     id_to_token = {0: 100, 1: 200, 2: 300}
     # particle 0 finishes after 1 token, 1 after 2, 2 after 3
     finish_after = {0: 1, 1: 2, 2: 3}
     hub = RecordRowsHub(id_to_token, eos, finish_after)
-    out = run_window(
-        engine,
+    out = vlm.run_burst(
         prompts=[[50256, 11], [50256, 12], [50256, 13]],
         control=hub,
         max_steps=8,
