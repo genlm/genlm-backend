@@ -155,9 +155,11 @@ else:
            keeps working and reflects the post-processor logits,
         5. ``hub.shape(logits, rows)`` -- the hub mutates each row into its
            proposal log-distribution,
-        6. ``hub.draw(logits, rows)`` -- the hub draws one
-           token per row (and may force EOS to pop a particle out),
+        6. ``hub.draw(logits, rows)`` -- the hub draws one token per row,
         7. package the drawn ids into a :class:`SamplerOutput`.
+
+        Pop-out is out-of-band: ``run_burst`` aborts the rows the hub names in
+        :meth:`EngineControl.drain_aborts` after each step (not via an EOS draw).
 
         When no hub is attached, :meth:`forward` defers entirely to
         ``super().forward`` so normal generation and the ``next_token_logprobs``
@@ -804,7 +806,6 @@ else:
             prompts,
             control,
             max_steps,
-            eos_token_ids,
             temperature=1.0,
         ):  # pragma: no cover
             """Run one engine-native decode burst driven by an SMC ``control`` hub.
@@ -813,8 +814,10 @@ else:
             :class:`ControlSampler` for the burst, and drives the engine's decode
             loop for up to ``max_steps`` steps. Each step the hub shapes the
             proposal logits and draws the next token for every live request (via
-            :meth:`EngineControl.shape` / :meth:`EngineControl.draw`); forcing an
-            EOS id in ``draw`` pops a particle out early.
+            :meth:`EngineControl.shape` / :meth:`EngineControl.draw`); after the step
+            the hub's :meth:`EngineControl.drain_aborts` names the rows to drop, which
+            we ``abort_request`` -- the out-of-band pop-out (a particle terminating,
+            or all rows at the ESS crossing). No EOS stop tokens, no discard forward.
 
             This method owns NO SMC logic -- no ESS, no resampling, no weights.
             Those all live in ``control``.
@@ -823,17 +826,15 @@ else:
                 prompts (list[list[int]]): one token-id prefix per particle.
                 control (EngineControl): the hub.
                 max_steps (int): maximum decode steps for the burst.
-                eos_token_ids (list[int]): ids that terminate a request when drawn.
                 temperature (float): sampling temperature passed to vLLM (the hub
                     draws, so this only affects metadata the hub may read).
 
             Returns:
-                (list[list[int]]): committed token ids per prompt, in input order.
-                EOS tokens that terminate a request are stripped from its output.
+                (list[list[int]]): empty lists -- committed tokens are tracked
+                control-side, so the return is unused by the caller.
             """
             from vllm.sampling_params import RequestOutputKind
 
-            eos_set = set(eos_token_ids)
             sampler = self._control_sampler
             # self.llm_engine is the vLLM LLM; .llm_engine is the inner LLMEngine.
             # Bind it once rather than hopping through both attrs at every call.
@@ -844,22 +845,18 @@ else:
                 max_tokens=max_steps,
                 temperature=temperature,
                 detokenize=False,
-                stop_token_ids=list(eos_token_ids),
-                ignore_eos=False,
-                # Only emit each request once, on completion, with its full token
-                # list (matches LLM.generate's behavior).
+                # Pop-out is the control's explicit abort_request, NOT an EOS stop
+                # token -- the hub draws in its own vocab and ends rows out-of-band.
+                ignore_eos=True,
                 output_kind=RequestOutputKind.FINAL_ONLY,
             )
 
-            # Map vLLM's internal (suffixed) request id -> particle index. We control
-            # the external id (str(i)) and capture the suffixed internal id that
-            # add_request returns, so both directions are pinned. ``input_batch``
-            # exposes the internal id; ``RequestOutput`` exposes the external id.
-            external_to_index = {str(i): i for i in range(len(prompts))}
-            # Attach the control hub to the persistent ControlSampler for this burst
-            # only; the finally below detaches it so normal generation stays stock
-            # even if the burst raises.
+            # External request id is str(i); the hub's drain_aborts() returns these
+            # same indices. Attach the control hub to the persistent ControlSampler
+            # for this burst only; the finally below detaches it so normal
+            # generation stays stock even if the burst raises.
             sampler.attach(control)
+            gone = set()
             try:
                 for i, prompt in enumerate(prompts):
                     engine.add_request(
@@ -867,38 +864,32 @@ else:
                         TokensPrompt(prompt_token_ids=list(prompt)),
                         sampling_params,
                     )
-
-                results = [None] * len(prompts)
-                # The burst length is enforced by SamplingParams(max_tokens=max_steps):
-                # vLLM stops each request after at most ``max_steps`` drawn tokens (a
-                # ``length`` finish) or earlier when the hub draws an eos id. We drive
-                # the engine until every request finishes. Note one engine step is the
-                # prefill (no token committed), so finishing takes up to max_steps + 1
-                # engine steps -- which is why we do NOT cap the loop on step count.
+                # Drive the decode loop. Each engine.step() runs the forward + the
+                # hub's draw (which banks the SMC step and flags rows to drop via
+                # abort_rows); after the step we abort the flagged requests. The burst
+                # ends when no request remains -- each row is aborted at its particle's
+                # termination, or all at once when the ESS test crosses (the pop-out).
+                # No SMC logic (ESS/resample/weights) lives here -- only abort plumbing.
                 while engine.has_unfinished_requests():
                     step_outputs = engine.step()
                     for output in step_outputs:
                         if output.finished:
-                            idx = external_to_index[output.request_id]
-                            token_ids = list(output.outputs[0].token_ids)
-                            # vLLM's async-output path can carry a -1 placeholder for
-                            # a not-yet-committed token; keep only committed ids.
-                            token_ids = [t for t in token_ids if t != -1]
-                            if token_ids and token_ids[-1] in eos_set:
-                                token_ids = token_ids[:-1]
-                            results[idx] = token_ids
+                            gone.add(output.request_id)
+                    aborts = [
+                        str(i) for i in control.drain_aborts() if str(i) not in gone
+                    ]
+                    if aborts:
+                        engine.abort_request(aborts)
+                        gone.update(aborts)
             finally:
                 sampler.detach()
-                # Abort anything still running. With max_tokens=max_steps every
-                # request finishes (length stop or hub eos), so this is a safety net
-                # for an exception raised mid-burst.
-                if engine.has_unfinished_requests():
+                # Safety net: drop anything still running (an exception mid-burst, or
+                # a row that hit the max_steps length cap before the control aborted).
+                remaining = [str(i) for i in range(len(prompts)) if str(i) not in gone]
+                if remaining and engine.has_unfinished_requests():
                     with contextlib.suppress(Exception):
-                        unfinished = [
-                            ext
-                            for ext, idx in external_to_index.items()
-                            if results[idx] is None
-                        ]
-                        engine.abort_request(unfinished)
+                        engine.abort_request(remaining)
 
-            return [r if r is not None else [] for r in results]
+            # The committed tokens are tracked control-side (the hub banks each draw
+            # into its particle contexts), so run_burst returns nothing useful.
+            return [[] for _ in prompts]

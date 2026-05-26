@@ -68,9 +68,9 @@ class EngineControl(Protocol):
 
         Called immediately after :meth:`shape`. The controller returns one sampled
         token id per row (a 1-D tensor or a list of ints, length ``num_rows``).
-        Returning an end-of-sequence token id for a row signals that the
-        particle should pop out of the window: vLLM will finish that request and
-        ``run_burst`` will stop emitting tokens for it.
+        Pop-out is out-of-band, not via the drawn token: the controller records the
+        rows to drop and surfaces them from :meth:`drain_aborts`, which ``run_burst``
+        calls after the step to ``abort_request`` them.
 
         The engine's ``SamplingMetadata`` is intentionally not passed: the
         controller draws in its own control-side vocabulary (its own temperature,
@@ -83,5 +83,16 @@ class EngineControl(Protocol):
 
         Returns:
             A length-``num_rows`` 1-D ``torch.Tensor`` (or list) of token ids.
+        """
+        ...
+
+    def drain_aborts(self) -> Sequence[int]:
+        """External request indices (the ``str(i)`` ``run_burst`` submitted, as
+        ints) to abort, accumulated since the last call and cleared on read.
+
+        ``run_burst`` calls this after every ``engine.step()`` and issues
+        ``abort_request`` for the returned rows -- the out-of-band pop-out that
+        replaces an EOS-stop draw. The controller flags a row when its particle
+        terminates (staggered) or, all live rows at once, when its ESS test crosses.
         """
         ...
