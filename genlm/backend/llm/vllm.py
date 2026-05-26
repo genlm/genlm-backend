@@ -155,7 +155,7 @@ else:
            keeps working and reflects the post-processor logits,
         5. ``hub.shape(logits, rows)`` -- the hub mutates each row into its
            proposal log-distribution,
-        6. ``hub.draw(logits, rows, sampling_metadata)`` -- the hub draws one
+        6. ``hub.draw(logits, rows)`` -- the hub draws one
            token per row (and may force EOS to pop a particle out),
         7. package the drawn ids into a :class:`SamplerOutput`.
 
@@ -233,7 +233,7 @@ else:
 
             # Hand the proposal shaping and the draw to the hub.
             hub.shape(logits, rows)
-            sampled = hub.draw(logits, rows, sampling_metadata)
+            sampled = hub.draw(logits, rows)
 
             if not isinstance(sampled, torch.Tensor):
                 sampled = torch.tensor(sampled, dtype=torch.int64, device=logits.device)
