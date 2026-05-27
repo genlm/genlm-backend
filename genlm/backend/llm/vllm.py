@@ -392,6 +392,25 @@ else:
 
                 all_logprobs = self.logprobs_capture.get_all_logprobs()
                 assert all_logprobs is not None, "Logprobs should be captured"
+                if all_logprobs.shape[0] != len(unique_token_ids):
+                    # TEMP DIAGNOSTIC (capture-mismatch investigation): dump the
+                    # per-apply() row-shape sequence + dedup/queue counts so we
+                    # can see whether the extra/missing rows come from a phantom
+                    # forward, an oversized single capture, or a split miscount.
+                    import sys as _sys
+                    _shapes = [int(t.shape[0])
+                               for t in self.logprobs_capture._captured_batches]
+                    _plens = sorted(len(k) for k in unique_token_ids)
+                    print(
+                        "[CAPTURE-DIAG] n_unique={} n_queries={} got_rows={} "
+                        "apply_shapes={} lora_id={} prompt_lens(min/max)={}/{}".format(
+                            len(unique_token_ids), len(queries),
+                            int(all_logprobs.shape[0]), _shapes,
+                            getattr(self.lora_request, "lora_int_id", None),
+                            _plens[0], _plens[-1],
+                        ),
+                        file=_sys.stderr, flush=True,
+                    )
                 assert all_logprobs.shape[0] == len(unique_token_ids), (
                     f"Expected {len(unique_token_ids)} logprobs, got {all_logprobs.shape[0]}"
                 )
