@@ -4,8 +4,8 @@ This module defines the *only* contract the SMC "controller" (which lives entire
 genlm-control) needs to implement in order to drive a vLLM engine step-locked
 from inside the sampler. The backend owns NO algorithm logic: there is no
 driver, no ESS, no resampling, no weight bookkeeping here. The engine exposes
-two callbacks -- :meth:`EngineControl.shape` and :meth:`EngineControl.draw` --
-plus a way to learn which particle each batch row corresponds to.
+one callback -- :meth:`EngineControl.draw` -- plus a way to learn which particle
+each batch row corresponds to.
 
 The arm that consumes this contract is :class:`genlm.backend.llm.vllm.ControlSampler`,
 a swapped-in ``vllm.v1.sample.sampler.Sampler`` whose ``forward`` calls back into
@@ -45,29 +45,14 @@ class EngineControl(Protocol):
     genlm-control; this Protocol is the entire interface.
     """
 
-    def shape(self, logits, request_ids: Sequence[str]) -> None:
-        """Shape one decode step's logits into the proposal log-distribution.
+    def draw(self, logits, request_ids: Sequence[str]):
+        """Draw one token id per row from the decode step's logits.
 
         Called once per decode step, after vLLM has applied its own logits
         processors (allowed-token masks, penalties, bad-words, and the
-        ``GlobalLogprobsCapture`` capture hook stay intact). The controller mutates
-        ``logits[i]`` *in place* so that it becomes the (possibly unnormalized)
-        log-distribution of the proposal for the particle identified by
-        ``request_ids[i]``.
-
-        Args:
-            logits: ``[num_rows, vocab]`` float tensor on the engine device.
-                Mutated in place.
-            request_ids: length-``num_rows`` sequence of vLLM internal request
-                ids; ``request_ids[i]`` owns ``logits[i]``.
-        """
-        ...
-
-    def draw(self, logits, request_ids: Sequence[str]):
-        """Draw one token id per row from the shaped logits.
-
-        Called immediately after :meth:`shape`. The controller returns one sampled
-        token id per row (a 1-D tensor or a list of ints, length ``num_rows``).
+        ``GlobalLogprobsCapture`` capture hook stay intact). The controller returns
+        one sampled token id per row (a 1-D tensor or a list of ints, length
+        ``num_rows``); it forms its own proposal from the raw engine logits.
         Pop-out is out-of-band, not via the drawn token: the controller records the
         rows to drop and surfaces them from :meth:`drain_aborts`, which ``run_burst``
         calls after the step to ``abort_request`` them.
@@ -77,7 +62,7 @@ class EngineControl(Protocol):
         no top-k/p), so the engine's per-row sampling params play no role.
 
         Args:
-            logits: ``[num_rows, vocab]`` float tensor (already shaped).
+            logits: ``[num_rows, vocab]`` float tensor on the engine device.
             request_ids: length-``num_rows`` sequence of vLLM internal request
                 ids; ``request_ids[i]`` owns row ``i``.
 

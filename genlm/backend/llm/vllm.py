@@ -153,10 +153,9 @@ else:
         4. apply the argmax-invariant processors -- this is where
            :class:`GlobalLogprobsCapture` lives, so full-vocab logprob capture
            keeps working and reflects the post-processor logits,
-        5. ``hub.shape(logits, rows)`` -- the hub mutates each row into its
-           proposal log-distribution,
-        6. ``hub.draw(logits, rows)`` -- the hub draws one token per row,
-        7. package the drawn ids into a :class:`SamplerOutput`.
+        5. ``hub.draw(logits, rows)`` -- the hub forms its own proposal from the
+           logits and draws one token per row,
+        6. package the drawn ids into a :class:`SamplerOutput`.
 
         Pop-out is out-of-band: ``run_burst`` aborts the rows the hub names in
         :meth:`EngineControl.drain_aborts` after each step (not via an EOS draw).
@@ -226,15 +225,14 @@ else:
             )
             # Stock argmax-invariant processors (GlobalLogprobsCapture lives
             # here). These normally run inside ``sample`` after temperature; the
-            # hub owns temperature/draw, so we run them here on the shaped
+            # hub owns temperature/draw, so we run them here on the post-processor
             # logits to keep capture working.
             for processor in sampling_metadata.logitsprocs.argmax_invariant:
                 logits = processor.apply(logits)
 
             rows = self._row_request_ids(logits.shape[0])
 
-            # Hand the proposal shaping and the draw to the hub.
-            hub.shape(logits, rows)
+            # Hand the draw to the hub (it forms its own proposal from the logits).
             sampled = hub.draw(logits, rows)
 
             if not isinstance(sampled, torch.Tensor):
@@ -812,9 +810,8 @@ else:
 
             Submits one request per prompt, attaches ``control`` to the persistent
             :class:`ControlSampler` for the burst, and drives the engine's decode
-            loop for up to ``max_steps`` steps. Each step the hub shapes the
-            proposal logits and draws the next token for every live request (via
-            :meth:`EngineControl.shape` / :meth:`EngineControl.draw`); after the step
+            loop for up to ``max_steps`` steps. Each step the hub draws the next
+            token for every live request (via :meth:`EngineControl.draw`); after the step
             the hub's :meth:`EngineControl.drain_aborts` names the rows to drop, which
             we ``abort_request`` -- the out-of-band pop-out (a particle terminating,
             or all rows at the ESS crossing). No EOS stop tokens, no discard forward.
@@ -857,6 +854,7 @@ else:
             # generation stays stock even if the burst raises.
             sampler.attach(control)
             gone = set()
+            added = set()  # every request id ever added (initial + in-place re-adds)
             try:
                 for i, prompt in enumerate(prompts):
                     engine.add_request(
@@ -864,6 +862,7 @@ else:
                         TokensPrompt(prompt_token_ids=list(prompt)),
                         sampling_params,
                     )
+                    added.add(str(i))
                 # Drive the decode loop. Each engine.step() runs the forward + the
                 # hub's draw (which banks the SMC step and flags rows to drop via
                 # abort_rows); after the step we abort the flagged requests. The burst
@@ -881,11 +880,26 @@ else:
                     if aborts:
                         engine.abort_request(aborts)
                         gone.update(aborts)
+                    # In-place per-group resample (Plan B): the hub re-adds forked
+                    # rows mid-burst so a resampled group rejoins the live batch
+                    # WITHOUT draining the engine -- the other groups keep decoding.
+                    # Each is a FRESH request id (the hub maps it back to its
+                    # population slot), so there's no abort/add id race. Empty for the
+                    # pop+relaunch path and for hubs without ``drain_adds``.
+                    for ext_id, prompt in getattr(control, "drain_adds", lambda: [])():
+                        rid = str(ext_id)
+                        engine.add_request(
+                            rid,
+                            TokensPrompt(prompt_token_ids=list(prompt)),
+                            sampling_params,
+                        )
+                        added.add(rid)
+                        gone.discard(rid)
             finally:
                 sampler.detach()
                 # Safety net: drop anything still running (an exception mid-burst, or
                 # a row that hit the max_steps length cap before the control aborted).
-                remaining = [str(i) for i in range(len(prompts)) if str(i) not in gone]
+                remaining = [r for r in added if r not in gone]
                 if remaining and engine.has_unfinished_requests():
                     with contextlib.suppress(Exception):
                         engine.abort_request(remaining)
