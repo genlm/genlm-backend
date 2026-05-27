@@ -67,44 +67,49 @@ else:
         """A global logits processor that captures full vocabulary logprobs.
 
         This processor is injected once into the vLLM v1 engine and records
-        the log probabilities for *the most recent* sampling step, as a
-        single ``[batch_size, vocab_size]`` tensor.
+        the full ``[*, vocab_size]`` log-probability rows produced across all
+        decode steps between two :meth:`clear` calls.
 
         Semantics:
 
-        * :meth:`apply` is invoked by the v1 sampler exactly once per decode
-          step across a batch of prompts, so the captured tensor always
-          reflects the final token-position logprobs for every prompt in
-          that batch.
-        * It does NOT retain history. Each :meth:`apply` call overwrites
-          ``_captured_batch``. This is intentional: for the
-          ``next_token_logprobs`` paths in :class:`AsyncVirtualLM`, every
-          ``generate`` is issued with ``max_tokens=1`` and preceded by
-          :meth:`clear`, so exactly one decode step runs and the overwrite
-          never hides information. For sampling paths (:meth:`sample`,
-          :meth:`batch_sample`) ``max_tokens > 1``, :meth:`apply` fires
-          once per step, and the final-step capture is correct but earlier
-          steps are discarded - callers of those methods don't read
-          ``_captured_batch`` anyway.
-        * Concurrent reads/writes are serialized by ``_lock``, so a
-          consumer thread calling :meth:`get_logprobs` never observes a
-          half-written tensor.
+        * :meth:`apply` is invoked once per *decode step*. A single
+          ``generate`` call does NOT necessarily map to a single decode step:
+          when the vLLM scheduler cannot admit every submitted prompt in one
+          step (sequence-count cap, token budget, or paged-KV exhaustion — the
+          last especially after repeated ``sleep``/``wake_up`` cycles), it
+          splits the batch into multiple waves and ``apply`` fires once per
+          wave. Each call therefore appends its ``[num_running, vocab]`` block;
+          :meth:`get_all_logprobs` concatenates them in arrival order. (The old
+          single-slot store silently kept only the *last* wave — see the
+          ``Expected N logprobs, got 1`` failure.)
+        * With ``max_tokens=1`` on the ``next_token_logprobs`` paths, each
+          submitted prompt does exactly one decode step and so contributes
+          exactly one row across the accumulated waves — prefix-cache hits do
+          not skip ``apply`` because the final-position logits always require a
+          forward. The caller's shape assertion (rows == #prompts) then holds
+          and acts as a live guard.
+        * Row order ↔ submission order is assumed (callers map
+          ``all_logprobs[i]`` back to the i-th submitted prompt). This is an
+          internal vLLM scheduling property, not an API contract — unchanged
+          from the pre-accumulation behavior, which relied on it within a
+          single wave. See ``docs/vllm_v1_logprobs_architecture.md`` §10.
+        * Concurrent reads/writes are serialized by ``_lock``.
         """
 
         def __init__(self):
-            self._captured_batch = None  # [batch_size, vocab_size] tensor
+            self._captured_batches = []  # list of [*, vocab_size] tensors
             self._lock = threading.Lock()
 
         def apply(self, logits: torch.Tensor) -> torch.Tensor:
-            """Capture logprobs and pass through logits unchanged.
+            """Capture this decode step's logprobs and pass logits through.
 
-            Overwrites any previously captured batch; see class docstring.
+            Appends (does not overwrite); see class docstring.
             """
             # Do the clone outside the critical section so readers aren't blocked
             # on the full [batch, vocab] copy.
             captured = torch.log_softmax(logits, dim=-1, dtype=logits.dtype).clone()
             with self._lock:
-                self._captured_batch = captured
+                self._captured_batches.append(captured)
             return logits
 
         def is_argmax_invariant(self) -> bool:
@@ -115,26 +120,32 @@ else:
             """No state updates needed."""
             pass
 
+        def _concat_locked(self):
+            """Concatenate accumulated waves. Caller must hold ``_lock``."""
+            if not self._captured_batches:
+                return None
+            if len(self._captured_batches) == 1:
+                return self._captured_batches[0]
+            return torch.cat(self._captured_batches, dim=0)
+
         def get_logprobs(self, batch_index=0):
-            """Get captured logprobs for a batch index."""
+            """Get captured logprobs for a batch index across accumulated waves."""
             with self._lock:
-                if self._captured_batch is None:
+                cat = self._concat_locked()
+                if cat is None or batch_index >= cat.shape[0]:
                     return None
-                if batch_index >= self._captured_batch.shape[0]:
-                    return None
-                return self._captured_batch[batch_index].clone()
+                return cat[batch_index].clone()
 
         def get_all_logprobs(self):
-            """Get all captured logprobs as a batch tensor."""
+            """Get all captured logprobs, concatenated across waves in order."""
             with self._lock:
-                if self._captured_batch is None:
-                    return None
-                return self._captured_batch.clone()
+                cat = self._concat_locked()
+                return cat.clone() if cat is not None else None
 
         def clear(self):
             """Clear captured logprobs."""
             with self._lock:
-                self._captured_batch = None
+                self._captured_batches = []
 
     class AsyncVirtualLM(AsyncLM):  # pragma: no cover
         """Async language model using vLLM v1 with global logits processor.
