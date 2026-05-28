@@ -139,12 +139,12 @@ else:
                 self._captured_batch = None
 
     class ControlSampler(Sampler):  # pragma: no cover
-        """A ``Sampler`` whose decode step is driven by an SMC hub.
+        """A ``Sampler`` whose decode step is driven by an SMC control object (an ``EngineControl``).
 
-        This is a thin engine *arm*: it owns no SMC logic. When a hub
+        This is a thin engine *arm*: it owns no SMC logic. When a control object
         (:class:`~genlm.backend.llm.engine_control.EngineControl`) is attached
         for the current burst, :meth:`forward` reproduces the stock sampler's
-        logits-shaping pipeline and then hands control to the hub:
+        logits-shaping pipeline and then hands off to it:
 
         1. compute raw logprobs if requested (stock behavior),
         2. cast logits to float32 (stock behavior),
@@ -153,14 +153,14 @@ else:
         4. apply the argmax-invariant processors -- this is where
            :class:`GlobalLogprobsCapture` lives, so full-vocab logprob capture
            keeps working and reflects the post-processor logits,
-        5. ``hub.draw(logits, rows)`` -- the hub forms its own proposal from the
+        5. ``control.draw(logits, rows)`` -- the control forms its own proposal from the
            logits and draws one token per row,
         6. package the drawn ids into a :class:`SamplerOutput`.
 
-        Pop-out is out-of-band: ``run_burst`` aborts the rows the hub names in
+        Pop-out is out-of-band: ``run_burst`` aborts the rows the control names in
         :meth:`EngineControl.drain_aborts` after each step (not via an EOS draw).
 
-        When no hub is attached, :meth:`forward` defers entirely to
+        When no control is attached, :meth:`forward` defers entirely to
         ``super().forward`` so normal generation and the ``next_token_logprobs``
         paths are byte-for-byte unaffected.
 
@@ -172,15 +172,15 @@ else:
         def __init__(self, logprobs_mode, model_runner):
             super().__init__(logprobs_mode=logprobs_mode)
             self._model_runner = model_runner
-            self._hub = None
+            self._control = None
 
-        def attach(self, hub):
-            """Bind the hub that drives the current burst (or ``None``)."""
-            self._hub = hub
+        def attach(self, control):
+            """Bind the control object that drives the current burst (or ``None``)."""
+            self._control = control
 
         def detach(self):
-            """Unbind any hub; subsequent steps behave like the stock sampler."""
-            self._hub = None
+            """Unbind any control; subsequent steps behave like the stock sampler."""
+            self._control = None
 
         def _row_request_ids(self, num_rows):
             """Row index -> vLLM internal request id for the current step."""
@@ -194,8 +194,8 @@ else:
             predict_bonus_token=False,
             logprobs_mode_override=None,
         ):
-            hub = self._hub
-            if hub is None:
+            control = self._control
+            if control is None:
                 # No burst active: identical to the stock sampler.
                 return super().forward(
                     logits,
@@ -225,15 +225,15 @@ else:
             )
             # Stock argmax-invariant processors (GlobalLogprobsCapture lives
             # here). These normally run inside ``sample`` after temperature; the
-            # hub owns temperature/draw, so we run them here on the post-processor
+            # control owns temperature/draw, so we run them here on the post-processor
             # logits to keep capture working.
             for processor in sampling_metadata.logitsprocs.argmax_invariant:
                 logits = processor.apply(logits)
 
             rows = self._row_request_ids(logits.shape[0])
 
-            # Hand the draw to the hub (it forms its own proposal from the logits).
-            sampled = hub.draw(logits, rows)
+            # Hand the draw to the control (it forms its own proposal from the logits).
+            sampled = control.draw(logits, rows)
 
             if not isinstance(sampled, torch.Tensor):
                 sampled = torch.tensor(sampled, dtype=torch.int64, device=logits.device)
@@ -353,7 +353,7 @@ else:
             # Install the engine-native sampler ONCE. Detached (the default) it
             # defers verbatim to the stock sampler, so normal generation and the
             # next_token_logprobs paths are byte-unaffected; run_burst attaches a
-            # control hub only for a burst's duration.
+            # control object only for a burst's duration.
             control_sampler = ControlSampler(
                 logprobs_mode=model_runner.model_config.logprobs_mode,
                 model_runner=model_runner,
@@ -804,15 +804,14 @@ else:
             prompts,
             control,
             max_steps,
-            temperature=1.0,
         ):  # pragma: no cover
-            """Run one engine-native decode burst driven by an SMC ``control`` hub.
+            """Run one engine-native decode burst driven by an SMC ``control`` (an ``EngineControl``).
 
             Submits one request per prompt, attaches ``control`` to the persistent
             :class:`ControlSampler` for the burst, and drives the engine's decode
-            loop for up to ``max_steps`` steps. Each step the hub draws the next
+            loop for up to ``max_steps`` steps. Each step the control draws the next
             token for every live request (via :meth:`EngineControl.draw`); after the step
-            the hub's :meth:`EngineControl.drain_aborts` names the rows to drop, which
+            the control's :meth:`EngineControl.drain_aborts` names the rows to drop, which
             we ``abort_request`` -- the out-of-band pop-out (a particle terminating,
             or all rows at the ESS crossing). No EOS stop tokens, no discard forward.
 
@@ -821,10 +820,8 @@ else:
 
             Args:
                 prompts (list[list[int]]): one token-id prefix per particle.
-                control (EngineControl): the hub.
+                control (EngineControl): the SMC control object.
                 max_steps (int): maximum decode steps for the burst.
-                temperature (float): sampling temperature passed to vLLM (the hub
-                    draws, so this only affects metadata the hub may read).
 
             Returns:
                 (list[list[int]]): empty lists -- committed tokens are tracked
@@ -840,16 +837,15 @@ else:
             sampling_params = SamplingParams(
                 n=1,
                 max_tokens=max_steps,
-                temperature=temperature,
                 detokenize=False,
                 # Pop-out is the control's explicit abort_request, NOT an EOS stop
-                # token -- the hub draws in its own vocab and ends rows out-of-band.
+                # token -- the control draws in its own vocab and ends rows out-of-band.
                 ignore_eos=True,
                 output_kind=RequestOutputKind.FINAL_ONLY,
             )
 
-            # External request id is str(i); the hub's drain_aborts() returns these
-            # same indices. Attach the control hub to the persistent ControlSampler
+            # External request id is str(i); the control's drain_aborts() returns these
+            # same indices. Attach the control object to the persistent ControlSampler
             # for this burst only; the finally below detaches it so normal
             # generation stays stock even if the burst raises.
             sampler.attach(control)
@@ -864,7 +860,7 @@ else:
                     )
                     added.add(str(i))
                 # Drive the decode loop. Each engine.step() runs the forward + the
-                # hub's draw (which banks the SMC step and flags rows to drop via
+                # control's draw (which banks the SMC step and flags rows to drop via
                 # abort_rows); after the step we abort the flagged requests. The burst
                 # ends when no request remains -- each row is aborted at its particle's
                 # termination, or all at once when the ESS test crosses (the pop-out).
@@ -880,12 +876,12 @@ else:
                     if aborts:
                         engine.abort_request(aborts)
                         gone.update(aborts)
-                    # In-place per-group resample (Plan B): the hub re-adds forked
+                    # In-place per-group resample (Plan B): the control re-adds forked
                     # rows mid-burst so a resampled group rejoins the live batch
                     # WITHOUT draining the engine -- the other groups keep decoding.
-                    # Each is a FRESH request id (the hub maps it back to its
+                    # Each is a FRESH request id (the control maps it back to its
                     # population slot), so there's no abort/add id race. Empty for the
-                    # pop+relaunch path and for hubs without ``drain_adds``.
+                    # pop+relaunch path and for controls without ``drain_adds``.
                     for ext_id, prompt in getattr(control, "drain_adds", lambda: [])():
                         rid = str(ext_id)
                         engine.add_request(
@@ -904,6 +900,6 @@ else:
                     with contextlib.suppress(Exception):
                         engine.abort_request(remaining)
 
-            # The committed tokens are tracked control-side (the hub banks each draw
+            # The committed tokens are tracked control-side (the control banks each draw
             # into its particle contexts), so run_burst returns nothing useful.
             return [[] for _ in prompts]

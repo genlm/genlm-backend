@@ -4,15 +4,15 @@ These exercise the backend seams only -- no SMC logic. They require CUDA + vLLM
 and are skipped otherwise.
 
 The shipped contract under test (genlm/backend/llm/vllm.py):
-  * ``ControlSampler.forward`` defers to the stock sampler when no hub is attached,
-    and otherwise calls ``hub.draw(logits, request_ids)`` (TWO args -- no ``shape``,
-    no ``sampling_metadata``). The hub forms its own proposal from ``logits``.
-  * ``run_burst(prompts, control, max_steps, temperature=1.0)`` submits one request
+  * ``ControlSampler.forward`` defers to the stock sampler when no control is attached,
+    and otherwise calls ``control.draw(logits, request_ids)`` (TWO args -- no ``shape``,
+    no ``sampling_metadata``). The control forms its own proposal from ``logits``.
+  * ``run_burst(prompts, control, max_steps)`` submits one request
     per prompt (ids ``str(0..N-1)``, ``ignore_eos=True``), drives the decode loop,
     and -- after each step -- aborts the rows ``control.drain_aborts()`` names and
     (re-)adds the rows ``control.drain_adds()`` names. Pop-out is the explicit
     abort, NOT an EOS draw. ``run_burst`` returns ``[[] for _ in prompts]`` --
-    committed tokens live control-side -- so tests assert on hub-recorded state.
+    committed tokens live control-side -- so tests assert on control-recorded state.
 """
 
 import pytest
@@ -84,16 +84,16 @@ def vlm(engine):
     yield inst
 
 
-# ----- trivial hubs implementing the real EngineControl contract -------------
+# ----- trivial controls implementing the real EngineControl contract -------------
 
 
-class RecordingHub:
+class RecordingControl:
     """Minimal ``EngineControl``: forces a per-row token, records every draw, and
     pops a row out (via ``drain_aborts``) once it has drawn its quota.
 
     Implements exactly what ``ControlSampler.forward`` / ``run_burst`` call:
     ``draw(logits, request_ids)`` and ``drain_aborts()`` (and optionally
-    ``drain_adds()``). No ``shape``, no ``sampling_metadata`` -- the hub forms its
+    ``drain_adds()``). No ``shape``, no ``sampling_metadata`` -- the control forms its
     proposal inside ``draw`` (here: a point mass on the forced token).
     """
 
@@ -115,7 +115,7 @@ class RecordingHub:
     @staticmethod
     def _ext(rid):
         """External index for a vLLM request id. ``run_burst`` submits ``str(i)`` but
-        ``input_batch.req_ids`` (what the hub sees) carries a ``"{ext}-{suffix}"``
+        ``input_batch.req_ids`` (what the control sees) carries a ``"{ext}-{suffix}"``
         form, while ``abort_request`` / ``output.request_id`` use the plain ``"{ext}"``.
         So drain_aborts MUST return the stripped external -- exactly what the real
         Controller's ``_burst_external`` does -- or the abort won't match the engine's
@@ -160,12 +160,12 @@ class RecordingHub:
         return [tok for step in self.draw_log for (_, e, tok) in step if e == ext]
 
 
-def _assert_id_format(hub):
+def _assert_id_format(control):
     """The control side maps a row via ``int(rid.rsplit('-', 1)[0])`` AND
     ``run_burst`` dedups aborts via ``str(ext) in gone`` (verbatim). Both hold iff
     every request id is either the plain external string or ``"{ext}-{suffix}"``.
     This is the #8 consistency assumption -- assert it directly on the box."""
-    for rid in hub.seen_ids:
+    for rid in control.seen_ids:
         ext = int(rid.rsplit("-", 1)[0])
         assert rid == str(ext) or rid.startswith(f"{ext}-"), (
             f"request id {rid!r} breaks the '{{ext}}' / '{{ext}}-{{suffix}}' "
@@ -176,7 +176,7 @@ def _assert_id_format(hub):
 # ----- tests ----------------------------------------------------------------
 
 
-def test_no_hub_matches_stock(vlm):
+def test_detached_matches_stock(vlm):
     """(a) The persistent ControlSampler, detached, matches stock generation."""
     from vllm.v1.sample.sampler import Sampler
 
@@ -204,42 +204,40 @@ def test_no_hub_matches_stock(vlm):
     # Detached ControlSampler must match stock byte-for-byte.
     control_sampler.detach()
     out = vlm.llm_engine.generate(prompts, sp, use_tqdm=False)
-    hub_toks = [list(o.outputs[0].token_ids) for o in out]
+    out_toks = [list(o.outputs[0].token_ids) for o in out]
 
-    assert hub_toks == stock_toks
+    assert out_toks == stock_toks
 
 
 def test_draw_drives_every_step(vlm):
-    """(b) ``hub.draw`` (2-arg) drives the token for every row, every step; with a
+    """(b) ``control.draw`` (2-arg) drives the token for every row, every step; with a
     quota above ``max_steps`` the rows never pop and ``max_steps`` caps the burst."""
     forced = 198
-    hub = RecordingHub(token_of={0: forced, 1: forced}, quota={0: 99, 1: 99})
+    control = RecordingControl(token_of={0: forced, 1: forced}, quota={0: 99, 1: 99})
     ret = vlm.run_burst(
-        prompts=[[EOS, 11, 12], [EOS, 13]], control=hub, max_steps=4, temperature=1.0
+        prompts=[[EOS, 11, 12], [EOS, 13]], control=control, max_steps=4
     )
     # run_burst returns empty lists (tokens are control-side).
     assert ret == [[], []]
     # Exactly max_steps draws, both rows present each step, all forced.
-    assert len(hub.draw_log) == 4
-    assert all(len(step) == 2 for step in hub.draw_log)
-    assert hub.draws_for(0) == [forced] * 4
-    assert hub.draws_for(1) == [forced] * 4
-    _assert_id_format(hub)
+    assert len(control.draw_log) == 4
+    assert all(len(step) == 2 for step in control.draw_log)
+    assert control.draws_for(0) == [forced] * 4
+    assert control.draws_for(1) == [forced] * 4
+    _assert_id_format(control)
 
 
 def test_pop_out_via_abort(vlm):
     """(c) A row pops out via ``drain_aborts`` (NOT an EOS draw): once it draws its
     quota it is aborted, so it is never drawn again and the burst ends when empty."""
     forced = 198
-    hub = RecordingHub(token_of={0: forced, 1: forced}, quota={0: 2, 1: 2})
-    vlm.run_burst(
-        prompts=[[EOS, 11, 12], [EOS, 13]], control=hub, max_steps=8, temperature=1.0
-    )
+    control = RecordingControl(token_of={0: forced, 1: forced}, quota={0: 2, 1: 2})
+    vlm.run_burst(prompts=[[EOS, 11, 12], [EOS, 13]], control=control, max_steps=8)
     # Each row drawn exactly twice (aborted after the 2nd), burst ended early.
-    assert hub.draws_for(0) == [forced, forced]
-    assert hub.draws_for(1) == [forced, forced]
-    assert len(hub.draw_log) == 2
-    _assert_id_format(hub)
+    assert control.draws_for(0) == [forced, forced]
+    assert control.draws_for(1) == [forced, forced]
+    assert len(control.draw_log) == 2
+    _assert_id_format(control)
 
 
 def test_row_request_mapping_staggered(vlm):
@@ -247,47 +245,44 @@ def test_row_request_mapping_staggered(vlm):
     row i draws its own token exactly ``quota[i]`` times, never another's."""
     token_of = {0: 100, 1: 200, 2: 300}
     quota = {0: 1, 1: 2, 2: 3}  # rows pop after 1 / 2 / 3 draws
-    hub = RecordingHub(token_of=token_of, quota=quota)
+    control = RecordingControl(token_of=token_of, quota=quota)
     vlm.run_burst(
         prompts=[[EOS, 11], [EOS, 12], [EOS, 13]],
-        control=hub,
+        control=control,
         max_steps=8,
-        temperature=1.0,
     )
     # Per-row draw counts match the quotas, and each row only ever drew its token.
-    assert hub.draws_for(0) == [100]
-    assert hub.draws_for(1) == [200, 200]
-    assert hub.draws_for(2) == [300, 300, 300]
+    assert control.draws_for(0) == [100]
+    assert control.draws_for(1) == [200, 200]
+    assert control.draws_for(2) == [300, 300, 300]
     # A row never appears in a step after it has been aborted.
-    assert len(hub.draw_log) == 3
-    assert [len(step) for step in hub.draw_log] == [3, 2, 1]
-    for step in hub.draw_log:
+    assert len(control.draw_log) == 3
+    assert [len(step) for step in control.draw_log] == [3, 2, 1]
+    for step in control.draw_log:
         for _, ext, tok in step:
             assert tok == token_of[ext], (ext, tok)
-    _assert_id_format(hub)
+    _assert_id_format(control)
 
 
 def test_drain_adds_readds_row_midburst(vlm):
-    """(e) The Plan-B ``drain_adds`` seam: a hub re-adds a fresh row mid-burst and
+    """(e) The Plan-B ``drain_adds`` seam: a control re-adds a fresh row mid-burst and
     ``run_burst`` adds it to the live batch (it shows up in a later draw step) and
     drives it like any other -- the other rows never paused."""
     # Two initial rows (ext 0, 1) drawing >max_steps so they stay live; after the
     # first step, re-add a fresh row ext 99 that draws twice then pops.
-    hub = RecordingHub(
+    control = RecordingControl(
         token_of={0: 111, 1: 222},
         quota={0: 99, 1: 99},
         adds={0: [(99, [EOS, 14], 333, 2)]},
     )
-    vlm.run_burst(
-        prompts=[[EOS, 11], [EOS, 12]], control=hub, max_steps=6, temperature=1.0
-    )
+    vlm.run_burst(prompts=[[EOS, 11], [EOS, 12]], control=control, max_steps=6)
     # The re-added row was driven (drew its token), proving drain_adds plumbing.
-    assert hub.draws_for(99) == [333, 333]
+    assert control.draws_for(99) == [333, 333]
     # It first appears strictly after step 0 (it was added after the first draw).
     first_99 = next(
-        i for i, step in enumerate(hub.draw_log) if any(e == 99 for _, e, _ in step)
+        i for i, step in enumerate(control.draw_log) if any(e == 99 for _, e, _ in step)
     )
     assert first_99 >= 1
     # The original rows kept being drawn across the whole burst (never paused).
-    assert hub.draws_for(0) == [111] * len(hub.draw_log)
-    _assert_id_format(hub)
+    assert control.draws_for(0) == [111] * len(control.draw_log)
+    _assert_id_format(control)
