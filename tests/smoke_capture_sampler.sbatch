@@ -15,7 +15,7 @@ source /cluster/home/cpasti/miniconda3/bin/activate genlm-latent
 cd /cluster/scratch/cpasti/genlm-backend
 
 export HF_HOME=/cluster/scratch/cpasti/.cache/huggingface
-export HF_HUB_CACHE=$HF_HOME
+export HF_HUB_CACHE=${HF_HOME}/hub
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
