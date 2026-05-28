@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --partition=cuda13pr.24h
-#SBATCH --gres=gpu:nvidia_rtx_pro_6000:1
+#SBATCH --gpus=nvidia_rtx_pro_6000:1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem-per-cpu=20G
+#SBATCH --mem-per-cpu=16G
 #SBATCH --time=00:45:00
 #SBATCH --job-name=capture-fix
 #SBATCH --output=/cluster/scratch/cpasti/smoke-capture/%x.%j.out
