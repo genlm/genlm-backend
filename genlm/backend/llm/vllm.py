@@ -36,7 +36,7 @@ try:
         destroy_model_parallel,
         destroy_distributed_environment,
     )
-    from vllm.v1.sample.logits_processor import LogitsProcessor
+    from vllm.v1.sample.sampler import Sampler
 
     HAS_VLLM = True
 except ImportError:  # pragma: no cover
@@ -63,78 +63,41 @@ if not HAS_VLLM:
 else:
     logging.getLogger("vllm").setLevel(logging.WARNING)
 
-    class GlobalLogprobsCapture(LogitsProcessor):  # pragma: no cover
-        """A global logits processor that captures full vocabulary logprobs.
+    class CaptureSampler(Sampler):  # pragma: no cover
+        """Sampler subclass that captures per-row logprobs keyed by request_id.
 
-        This processor is injected once into the vLLM v1 engine and records
-        the log probabilities for *the most recent* sampling step, as a
-        single ``[batch_size, vocab_size]`` tensor.
-
-        Semantics:
-
-        * :meth:`apply` is invoked by the v1 sampler exactly once per decode
-          step across a batch of prompts, so the captured tensor always
-          reflects the final token-position logprobs for every prompt in
-          that batch.
-        * It does NOT retain history. Each :meth:`apply` call overwrites
-          ``_captured_batch``. This is intentional: for the
-          ``next_token_logprobs`` paths in :class:`AsyncVirtualLM`, every
-          ``generate`` is issued with ``max_tokens=1`` and preceded by
-          :meth:`clear`, so exactly one decode step runs and the overwrite
-          never hides information. For sampling paths (:meth:`sample`,
-          :meth:`batch_sample`) ``max_tokens > 1``, :meth:`apply` fires
-          once per step, and the final-step capture is correct but earlier
-          steps are discarded - callers of those methods don't read
-          ``_captured_batch`` anyway.
-        * Concurrent reads/writes are serialized by ``_lock``, so a
-          consumer thread calling :meth:`get_logprobs` never observes a
-          half-written tensor.
+        Replaces the old ``GlobalLogprobsCapture`` LogitsProcessor, which could
+        not distinguish a real submission from a vLLM-internal warmup forward
+        (no request_id is visible at the LogitsProcessor layer). Here capture
+        lives at the sampler layer where ``model_runner.input_batch.req_ids``
+        is the authoritative row -> request_id mapping; ``take(ids)`` reads
+        back only the rows for the request_ids the caller submitted, so a
+        warmup row lands in a dict slot we never read.
         """
 
-        def __init__(self):
-            self._captured_batch = None  # [batch_size, vocab_size] tensor
-            self._lock = threading.Lock()
+        def __init__(self, logprobs_mode, model_runner):
+            super().__init__(logprobs_mode=logprobs_mode)
+            self._model_runner = model_runner
+            self._captured = {}
 
-        def apply(self, logits: torch.Tensor) -> torch.Tensor:
-            """Capture logprobs and pass through logits unchanged.
+        def forward(self, logits, sampling_metadata, **kwargs):
+            req_ids = list(self._model_runner.input_batch.req_ids[: logits.shape[0]])
+            lp = torch.log_softmax(logits.float(), dim=-1).clone()
+            for i, rid in enumerate(req_ids):
+                self._captured[rid] = lp[i]
+            if os.environ.get("GENLM_CAPTURE_DIAG"):
+                print(
+                    f"[CAPTURE-DIAG] req_ids[:3]={req_ids[:3]} "
+                    f"N={len(req_ids)} shape={tuple(lp.shape)}",
+                    flush=True,
+                )
+            return super().forward(logits, sampling_metadata, **kwargs)
 
-            Overwrites any previously captured batch; see class docstring.
-            """
-            # Do the clone outside the critical section so readers aren't blocked
-            # on the full [batch, vocab] copy.
-            captured = torch.log_softmax(logits, dim=-1, dtype=logits.dtype).clone()
-            with self._lock:
-                self._captured_batch = captured
-            return logits
-
-        def is_argmax_invariant(self) -> bool:
-            """Return True since we don't modify logits."""
-            return True
-
-        def update_state(self, batch_update) -> None:
-            """No state updates needed."""
-            pass
-
-        def get_logprobs(self, batch_index=0):
-            """Get captured logprobs for a batch index."""
-            with self._lock:
-                if self._captured_batch is None:
-                    return None
-                if batch_index >= self._captured_batch.shape[0]:
-                    return None
-                return self._captured_batch[batch_index].clone()
-
-        def get_all_logprobs(self):
-            """Get all captured logprobs as a batch tensor."""
-            with self._lock:
-                if self._captured_batch is None:
-                    return None
-                return self._captured_batch.clone()
+        def take(self, request_ids):
+            return torch.stack([self._captured.pop(rid) for rid in request_ids])
 
         def clear(self):
-            """Clear captured logprobs."""
-            with self._lock:
-                self._captured_batch = None
+            self._captured.clear()
 
     class AsyncVirtualLM(AsyncLM):  # pragma: no cover
         """Async language model using vLLM v1 with global logits processor.
@@ -154,7 +117,7 @@ else:
         def __init__(
             self,
             llm_engine,
-            logprobs_capture,
+            capture_sampler,
             cache_size=0,
             cache_opts=None,
             batch_size=20,
@@ -164,7 +127,7 @@ else:
 
             Args:
                 llm_engine (LLM): The vLLM engine instance.
-                logprobs_capture (GlobalLogprobsCapture): The global logprobs capture processor.
+                capture_sampler (CaptureSampler): The sampler subclass that records per-row logprobs keyed by request_id.
                 cache_size (int, optional): Maximum size of the output cache. If 0, caching is disabled. Defaults to 0.
                 cache_opts (dict, optional): Additional options to pass to the [`OutputCache`][genlm.backend.cache.OutputCache] constructor. Defaults to None (no extra options).
                 batch_size (int, optional): Maximum queries to process in one batch during auto-batching. Defaults to 20.
@@ -175,7 +138,7 @@ else:
                 ``batch_next_token_logprobs_sync`` bypasses this cache and always re-evaluates; the other three logprobs methods consult it.
             """
             self.llm_engine = llm_engine
-            self.logprobs_capture = logprobs_capture
+            self.capture_sampler = capture_sampler
             self.tokenizer = llm_engine.get_tokenizer()
             self.cache = (
                 OutputCache(maxsize=cache_size, **(cache_opts or {}))
@@ -221,13 +184,14 @@ else:
 
             llm = LLM(model=model_name, tokenizer=model_name, **engine_opts)
 
-            logprobs_capture = GlobalLogprobsCapture()
             model_runner = cls._get_model_runner(llm)
-            model_runner.input_batch.logitsprocs.argmax_invariant.append(
-                logprobs_capture
+            capture_sampler = CaptureSampler(
+                logprobs_mode=model_runner.model_config.logprobs_mode,
+                model_runner=model_runner,
             )
+            model_runner.sampler = capture_sampler
 
-            return cls(llm, logprobs_capture, **kwargs)
+            return cls(llm, capture_sampler, **kwargs)
 
         @staticmethod
         def _get_model_runner(llm):
@@ -351,7 +315,7 @@ else:
                 self.timer.cancel()
                 self.timer = None
 
-            if self.logprobs_capture is None:
+            if self.capture_sampler is None:
                 exc = RuntimeError("Cannot use model after cleanup() has been called")
                 for _, future in queries:
                     future.set_exception(exc)
@@ -364,7 +328,7 @@ else:
 
             unique_token_ids = list(query_groups.keys())
 
-            self.logprobs_capture.clear()
+            self.capture_sampler.clear()
 
             prompts = [
                 TokensPrompt(prompt_token_ids=list(token_ids))
@@ -372,17 +336,14 @@ else:
             ]
 
             try:
-                self.llm_engine.generate(
+                outputs = self.llm_engine.generate(
                     prompts=prompts,
                     sampling_params=SamplingParams(**self.default_params),
                     lora_request=self.lora_request,
                     use_tqdm=False,
                 )
-
-                all_logprobs = self.logprobs_capture.get_all_logprobs()
-                assert all_logprobs is not None, "Logprobs should be captured"
-                assert all_logprobs.shape[0] == len(unique_token_ids), (
-                    f"Expected {len(unique_token_ids)} logprobs, got {all_logprobs.shape[0]}"
+                all_logprobs = self.capture_sampler.take(
+                    [o.request_id for o in outputs]
                 )
 
                 for i, key in enumerate(unique_token_ids):
@@ -432,20 +393,19 @@ else:
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
 
-            if self.logprobs_capture is None:
+            if self.capture_sampler is None:
                 raise RuntimeError("Cannot use model after cleanup() has been called")
 
-            self.logprobs_capture.clear()
+            self.capture_sampler.clear()
 
-            self.llm_engine.generate(
+            outputs = self.llm_engine.generate(
                 prompts=TokensPrompt(prompt_token_ids=list(token_ids)),
                 sampling_params=SamplingParams(**self.default_params),
                 lora_request=self.lora_request,
                 use_tqdm=False,
             )
 
-            result = self.logprobs_capture.get_logprobs(batch_index=0)
-            assert result is not None, "Logprobs should be captured by global processor"
+            result = self.capture_sampler.take([outputs[0].request_id])[0]
 
             if self.cache is not None:
                 self.cache[key] = result
@@ -467,33 +427,23 @@ else:
                 which delegates to the cached ``next_token_logprobs``). Every prompt is
                 re-evaluated.
             """
-            if self.logprobs_capture is None:
+            if self.capture_sampler is None:
                 raise RuntimeError("Cannot use model after cleanup() has been called")
-            # Clear any stale captured logprobs
-            self.logprobs_capture.clear()
+            self.capture_sampler.clear()
 
-            # Create prompts for batch
             prompts = [
                 TokensPrompt(prompt_token_ids=list(token_ids))
                 for token_ids in token_ids_list
             ]
 
-            # Generate one token for each prompt
-            self.llm_engine.generate(
+            outputs = self.llm_engine.generate(
                 prompts=prompts,
                 sampling_params=SamplingParams(**self.default_params),
                 lora_request=self.lora_request,
                 use_tqdm=False,
             )
 
-            # Get all captured logprobs at once (optimized - single clone)
-            all_logprobs = self.logprobs_capture.get_all_logprobs()
-            assert all_logprobs is not None, "Logprobs should be captured"
-            assert all_logprobs.shape[0] == len(token_ids_list), (
-                f"Expected {len(token_ids_list)} logprobs, got {all_logprobs.shape[0]}"
-            )
-
-            return all_logprobs
+            return self.capture_sampler.take([o.request_id for o in outputs])
 
         def clear_cache(self):
             """Clear output cache."""
@@ -547,10 +497,10 @@ else:
                 import gc
 
                 # Clear our references
-                if hasattr(self, "logprobs_capture"):
-                    if self.logprobs_capture is not None:
-                        self.logprobs_capture.clear()
-                    self.logprobs_capture = None
+                if hasattr(self, "capture_sampler"):
+                    if self.capture_sampler is not None:
+                        self.capture_sampler.clear()
+                    self.capture_sampler = None
 
                 # Delete the engine to free GPU memory
                 if hasattr(self, "llm_engine") and self.llm_engine is not None:
@@ -604,7 +554,7 @@ else:
             if self.sample_timer:
                 self.sample_timer.cancel()
                 self.sample_timer = None
-            if self.logprobs_capture is None:
+            if self.capture_sampler is None:
                 exc = RuntimeError("Cannot use model after cleanup() has been called")
                 for _, _, future in queries:
                     future.set_exception(exc)
