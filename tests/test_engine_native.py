@@ -2,6 +2,17 @@
 
 These exercise the backend seams only -- no SMC logic. They require CUDA + vLLM
 and are skipped otherwise.
+
+The shipped contract under test (genlm/backend/llm/vllm.py):
+  * ``ControlSampler.forward`` defers to the stock sampler when no hub is attached,
+    and otherwise calls ``hub.draw(logits, request_ids)`` (TWO args -- no ``shape``,
+    no ``sampling_metadata``). The hub forms its own proposal from ``logits``.
+  * ``run_burst(prompts, control, max_steps, temperature=1.0)`` submits one request
+    per prompt (ids ``str(0..N-1)``, ``ignore_eos=True``), drives the decode loop,
+    and -- after each step -- aborts the rows ``control.drain_aborts()`` names and
+    (re-)adds the rows ``control.drain_adds()`` names. Pop-out is the explicit
+    abort, NOT an EOS draw. ``run_burst`` returns ``[[] for _ in prompts]`` --
+    committed tokens live control-side -- so tests assert on hub-recorded state.
 """
 
 import pytest
@@ -21,6 +32,7 @@ except ImportError:
 pytestmark = v1_capable
 
 MODEL = "gpt2"
+EOS = 50256
 
 
 @pytest.fixture(autouse=True, scope="function")
@@ -72,89 +84,93 @@ def vlm(engine):
     yield inst
 
 
-# ----- trivial hubs implementing EngineControl -----------------------------
+# ----- trivial hubs implementing the real EngineControl contract -------------
 
 
-class ForceTokenHub:
-    """Masks every row to a single forced token id (proposal is a point mass)."""
+class RecordingHub:
+    """Minimal ``EngineControl``: forces a per-row token, records every draw, and
+    pops a row out (via ``drain_aborts``) once it has drawn its quota.
 
-    def __init__(self, token_id):
-        self.token_id = token_id
-        self.shape_calls = 0
-        self.seen_rows = []
+    Implements exactly what ``ControlSampler.forward`` / ``run_burst`` call:
+    ``draw(logits, request_ids)`` and ``drain_aborts()`` (and optionally
+    ``drain_adds()``). No ``shape``, no ``sampling_metadata`` -- the hub forms its
+    proposal inside ``draw`` (here: a point mass on the forced token).
+    """
 
-    def shape(self, logits, request_ids):
-        self.shape_calls += 1
-        self.seen_rows.append(list(request_ids))
-        logits.fill_(float("-inf"))
-        logits[:, self.token_id] = 0.0
-
-    def draw(self, logits, request_ids, sampling_metadata):
-        return logits.argmax(dim=-1)
-
-
-class ForceEosAtStepHub:
-    """Forces a fixed token, then forces EOS once a request has drawn ``trigger``
-    tokens (so that request pops out mid-window)."""
-
-    def __init__(self, token_id, eos_id, trigger):
-        self.token_id = token_id
-        self.eos_id = eos_id
-        self.trigger = trigger
-        # internal request id -> number of draws so far
-        self.counts = {}
-
-    def shape(self, logits, request_ids):
-        logits.fill_(float("-inf"))
-        logits[:, self.token_id] = 0.0
-
-    def draw(self, logits, request_ids, sampling_metadata):
-        out = []
-        for rid in request_ids:
-            n = self.counts.get(rid, 0)
-            self.counts[rid] = n + 1
-            out.append(self.eos_id if n >= self.trigger else self.token_id)
-        return torch.tensor(out, dtype=torch.int64, device=logits.device)
-
-
-class RecordRowsHub:
-    """Forces a per-particle distinct token and records the row->id ordering so we
-    can verify the mapping stays correct as requests finish at different steps."""
-
-    def __init__(self, id_to_token, eos_id, finish_after):
-        # id_to_token: external particle index -> forced token
-        self.id_to_token = id_to_token
-        self.eos_id = eos_id
-        # external index -> step at which to emit EOS
-        self.finish_after = finish_after
-        self.counts = {}
-        # records, per step: list of (internal_rid_suffix_stripped, drawn_token)
-        self.draw_log = []
+    def __init__(self, token_of, quota, adds=None):
+        # token_of: external-int id -> the token id to force for that row.
+        # quota:    external-int id -> #draws after which the row pops out.
+        # adds:     optional {after_step: [(ext_id, prompt_ids, token, quota)]} to
+        #           re-add mid-burst (the Plan-B drain_adds seam).
+        self.token_of = dict(token_of)
+        self.quota = dict(quota)
+        self._adds = adds or {}
+        self.counts = {}  # external-int id -> draws so far
+        self.draw_log = []  # per step: [(raw_request_id, ext_int, token), ...]
+        self.seen_ids = []  # every raw request id seen, for the id-format check
+        self._pending_abort = []  # raw request ids to abort on the next drain
+        self._pending_add = []  # (ext_id, prompt_ids) queued for the next drain
+        self._step = 0
 
     @staticmethod
-    def _external(rid):
-        # internal id is "{external}-{8 chars}"; strip the suffix.
-        return rid.rsplit("-", 1)[0]
+    def _ext(rid):
+        """External index for a vLLM request id. ``run_burst`` submits ``str(i)`` but
+        ``input_batch.req_ids`` (what the hub sees) carries a ``"{ext}-{suffix}"``
+        form, while ``abort_request`` / ``output.request_id`` use the plain ``"{ext}"``.
+        So drain_aborts MUST return the stripped external -- exactly what the real
+        Controller's ``_burst_external`` does -- or the abort won't match the engine's
+        request id. Mirroring it here is the point of the test."""
+        return int(str(rid).rsplit("-", 1)[0])
 
-    def shape(self, logits, request_ids):
-        logits.fill_(0.0)
-
-    def draw(self, logits, request_ids, sampling_metadata):
-        out = []
+    def draw(self, logits, request_ids):
         step_record = []
+        out = []
         for rid in request_ids:
-            ext = self._external(rid)
-            idx = int(ext)
-            n = self.counts.get(idx, 0)
-            self.counts[idx] = n + 1
-            if n >= self.finish_after[idx]:
-                tok = self.eos_id
-            else:
-                tok = self.id_to_token[idx]
+            self.seen_ids.append(str(rid))
+            ext = self._ext(rid)
+            n = self.counts.get(ext, 0) + 1
+            self.counts[ext] = n
+            tok = self.token_of[ext]
             out.append(tok)
-            step_record.append((idx, tok))
+            step_record.append((rid, ext, tok))
+            # Once a row has drawn its quota, queue it for out-of-band pop-out. Return
+            # the STRIPPED external id (run_burst does ``str(ext)``, which matches the
+            # plain submitted request id) -- the suffixed ``rid`` would not match.
+            if n >= self.quota[ext]:
+                self._pending_abort.append(ext)
         self.draw_log.append(step_record)
+        # Queue any scheduled mid-burst re-adds for this step.
+        for ext_id, prompt_ids, token, quota in self._adds.get(self._step, []):
+            self.token_of[ext_id] = token
+            self.quota[ext_id] = quota
+            self._pending_add.append((ext_id, list(prompt_ids)))
+        self._step += 1
         return torch.tensor(out, dtype=torch.int64, device=logits.device)
+
+    def drain_aborts(self):
+        rows, self._pending_abort = self._pending_abort, []
+        return rows
+
+    def drain_adds(self):
+        adds, self._pending_add = self._pending_add, []
+        return adds
+
+    # -- assertions helpers --
+    def draws_for(self, ext):
+        return [tok for step in self.draw_log for (_, e, tok) in step if e == ext]
+
+
+def _assert_id_format(hub):
+    """The control side maps a row via ``int(rid.rsplit('-', 1)[0])`` AND
+    ``run_burst`` dedups aborts via ``str(ext) in gone`` (verbatim). Both hold iff
+    every request id is either the plain external string or ``"{ext}-{suffix}"``.
+    This is the #8 consistency assumption -- assert it directly on the box."""
+    for rid in hub.seen_ids:
+        ext = int(rid.rsplit("-", 1)[0])
+        assert rid == str(ext) or rid.startswith(f"{ext}-"), (
+            f"request id {rid!r} breaks the '{{ext}}' / '{{ext}}-{{suffix}}' "
+            "assumption shared by _burst_external and run_burst's gone-filter"
+        )
 
 
 # ----- tests ----------------------------------------------------------------
@@ -165,8 +181,8 @@ def test_no_hub_matches_stock(vlm):
     from vllm.v1.sample.sampler import Sampler
 
     prompts = [
-        TokensPrompt(prompt_token_ids=[50256, 11, 12]),
-        TokensPrompt(prompt_token_ids=[50256, 13]),
+        TokensPrompt(prompt_token_ids=[EOS, 11, 12]),
+        TokensPrompt(prompt_token_ids=[EOS, 13]),
     ]
     sp = SamplingParams(
         n=1, max_tokens=4, temperature=0.0, detokenize=False, ignore_eos=True
@@ -193,60 +209,85 @@ def test_no_hub_matches_stock(vlm):
     assert hub_toks == stock_toks
 
 
-def test_force_single_token(vlm):
-    """(b) A hub that masks to one forced token: run_burst returns that token
-    every step."""
+def test_draw_drives_every_step(vlm):
+    """(b) ``hub.draw`` (2-arg) drives the token for every row, every step; with a
+    quota above ``max_steps`` the rows never pop and ``max_steps`` caps the burst."""
     forced = 198
-    hub = ForceTokenHub(forced)
-    out = vlm.run_burst(
-        prompts=[[50256, 11, 12], [50256, 13]],
-        control=hub,
-        max_steps=4,
-        eos_token_ids=[50256],
-        temperature=1.0,
+    hub = RecordingHub(token_of={0: forced, 1: forced}, quota={0: 99, 1: 99})
+    ret = vlm.run_burst(
+        prompts=[[EOS, 11, 12], [EOS, 13]], control=hub, max_steps=4, temperature=1.0
     )
-    assert out == [[forced] * 4, [forced] * 4]
-    assert hub.shape_calls == 4
-    # row count per step matches number of live particles
-    assert all(len(rows) == 2 for rows in hub.seen_rows)
+    # run_burst returns empty lists (tokens are control-side).
+    assert ret == [[], []]
+    # Exactly max_steps draws, both rows present each step, all forced.
+    assert len(hub.draw_log) == 4
+    assert all(len(step) == 2 for step in hub.draw_log)
+    assert hub.draws_for(0) == [forced] * 4
+    assert hub.draws_for(1) == [forced] * 4
+    _assert_id_format(hub)
 
 
-def test_force_eos_pops_out(vlm):
-    """(c) A hub that forces EOS mid-window: the request finishes early and
-    run_burst returns the truncated (EOS-stripped) tokens."""
+def test_pop_out_via_abort(vlm):
+    """(c) A row pops out via ``drain_aborts`` (NOT an EOS draw): once it draws its
+    quota it is aborted, so it is never drawn again and the burst ends when empty."""
     forced = 198
-    eos = 50256
-    hub = ForceEosAtStepHub(forced, eos, trigger=2)
-    out = vlm.run_burst(
-        prompts=[[50256, 11, 12], [50256, 13]],
-        control=hub,
-        max_steps=8,
-        eos_token_ids=[eos],
-        temperature=1.0,
+    hub = RecordingHub(token_of={0: forced, 1: forced}, quota={0: 2, 1: 2})
+    vlm.run_burst(
+        prompts=[[EOS, 11, 12], [EOS, 13]], control=hub, max_steps=8, temperature=1.0
     )
-    # 2 forced tokens, then EOS (stripped) -> exactly 2 tokens each
-    assert out == [[forced, forced], [forced, forced]]
+    # Each row drawn exactly twice (aborted after the 2nd), burst ended early.
+    assert hub.draws_for(0) == [forced, forced]
+    assert hub.draws_for(1) == [forced, forced]
+    assert len(hub.draw_log) == 2
+    _assert_id_format(hub)
 
 
 def test_row_request_mapping_staggered(vlm):
-    """(d) Mapping stays correct when requests finish at different steps."""
-    eos = 50256
-    # particle 0 -> token 100, particle 1 -> token 200, particle 2 -> token 300
-    id_to_token = {0: 100, 1: 200, 2: 300}
-    # particle 0 finishes after 1 token, 1 after 2, 2 after 3
-    finish_after = {0: 1, 1: 2, 2: 3}
-    hub = RecordRowsHub(id_to_token, eos, finish_after)
-    out = vlm.run_burst(
-        prompts=[[50256, 11], [50256, 12], [50256, 13]],
+    """(d) Row->request mapping stays correct as rows pop out at different steps:
+    row i draws its own token exactly ``quota[i]`` times, never another's."""
+    token_of = {0: 100, 1: 200, 2: 300}
+    quota = {0: 1, 1: 2, 2: 3}  # rows pop after 1 / 2 / 3 draws
+    hub = RecordingHub(token_of=token_of, quota=quota)
+    vlm.run_burst(
+        prompts=[[EOS, 11], [EOS, 12], [EOS, 13]],
         control=hub,
         max_steps=8,
-        eos_token_ids=[eos],
         temperature=1.0,
     )
-    # EOS stripped: particle i emits finish_after[i] copies of its token
-    assert out == [[100], [200, 200], [300, 300, 300]]
+    # Per-row draw counts match the quotas, and each row only ever drew its token.
+    assert hub.draws_for(0) == [100]
+    assert hub.draws_for(1) == [200, 200]
+    assert hub.draws_for(2) == [300, 300, 300]
+    # A row never appears in a step after it has been aborted.
+    assert len(hub.draw_log) == 3
+    assert [len(step) for step in hub.draw_log] == [3, 2, 1]
+    for step in hub.draw_log:
+        for _, ext, tok in step:
+            assert tok == token_of[ext], (ext, tok)
+    _assert_id_format(hub)
 
-    # The draw log must never assign a particle a token that isn't its own.
-    for step_record in hub.draw_log:
-        for idx, tok in step_record:
-            assert tok in (id_to_token[idx], eos), (idx, tok)
+
+def test_drain_adds_readds_row_midburst(vlm):
+    """(e) The Plan-B ``drain_adds`` seam: a hub re-adds a fresh row mid-burst and
+    ``run_burst`` adds it to the live batch (it shows up in a later draw step) and
+    drives it like any other -- the other rows never paused."""
+    # Two initial rows (ext 0, 1) drawing >max_steps so they stay live; after the
+    # first step, re-add a fresh row ext 99 that draws twice then pops.
+    hub = RecordingHub(
+        token_of={0: 111, 1: 222},
+        quota={0: 99, 1: 99},
+        adds={0: [(99, [EOS, 14], 333, 2)]},
+    )
+    vlm.run_burst(
+        prompts=[[EOS, 11], [EOS, 12]], control=hub, max_steps=6, temperature=1.0
+    )
+    # The re-added row was driven (drew its token), proving drain_adds plumbing.
+    assert hub.draws_for(99) == [333, 333]
+    # It first appears strictly after step 0 (it was added after the first draw).
+    first_99 = next(
+        i for i, step in enumerate(hub.draw_log) if any(e == 99 for _, e, _ in step)
+    )
+    assert first_99 >= 1
+    # The original rows kept being drawn across the whole burst (never paused).
+    assert hub.draws_for(0) == [111] * len(hub.draw_log)
+    _assert_id_format(hub)
