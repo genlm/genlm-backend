@@ -309,6 +309,8 @@ else:
             )
             self.lora_request = None
             self.lora_name_to_ids = {}
+            # name -> LoRARequest, for per-request LoRA in run_burst (multi-view).
+            self._lora_requests = {}
 
             self.queries = []
             self.batch_size = batch_size
@@ -398,7 +400,13 @@ else:
             Notes:
                 This does not activate the adapter immediately. Call `set_lora()` to enable the adapter.
             """
-            self.lora_name_to_ids[lora_name] = self.hash_to_int(lora_name)
+            lid = self.hash_to_int(lora_name)
+            self.lora_name_to_ids[lora_name] = lid
+            self._lora_requests[lora_name] = LoRARequest(lora_name, lid, lora_path)
+
+        def _lora_request_for(self, lora_name):
+            """Per-request LoRARequest for ``lora_name`` (``None`` = base, LoRA off)."""
+            return None if lora_name is None else self._lora_requests[lora_name]
 
         def hash_to_int(self, value):
             """Generates a deterministic unique id for a LoRA adapter from its name.
@@ -803,14 +811,14 @@ else:
 
         def run_burst(
             self,
-            prompts,
+            requests,
             control,
             max_steps,
         ):  # pragma: no cover
             """Run one engine-native decode burst driven by an SMC ``control`` (an ``EngineControl``).
 
-            Submits one request per prompt, attaches ``control`` to the persistent
-            :class:`ControlSampler` for the burst, and drives the engine's decode
+            Submits one engine request per substream, attaches ``control`` to the
+            persistent :class:`ControlSampler` for the burst, and drives the engine's decode
             loop for up to ``max_steps`` steps. Each step the control draws the next
             token for every live request (via :meth:`EngineControl.draw`); after the step
             the control's :meth:`EngineControl.drain_aborts` names the rows to drop, which
@@ -821,7 +829,11 @@ else:
             Those all live in ``control``.
 
             Args:
-                prompts (list[list[int]]): one token-id prefix per particle.
+                requests (list[tuple]): ``(ext_id, prompt_token_ids, lora_name)`` per
+                    substream. ``ext_id`` is the control's request handle; ``lora_name``
+                    is ``None`` for the base model. A particle owns K substreams
+                    (multi-view); the control maps each ``ext_id`` back to its
+                    (particle, view).
                 control (EngineControl): the SMC control object.
                 max_steps (int): maximum decode steps for the burst.
 
@@ -846,21 +858,23 @@ else:
                 output_kind=RequestOutputKind.FINAL_ONLY,
             )
 
-            # External request id is str(i); the control's drain_aborts() returns these
-            # same indices. Attach the control object to the persistent ControlSampler
+            # External request id is the control's ext_id (str); drain_aborts() returns
+            # these same ids. Attach the control object to the persistent ControlSampler
             # for this burst only; the finally below detaches it so normal
             # generation stays stock even if the burst raises.
             sampler.attach(control)
             gone = set()
             added = set()  # every request id ever added (initial + in-place re-adds)
             try:
-                for i, prompt in enumerate(prompts):
+                for ext_id, prompt, lora_name in requests:
+                    rid = str(ext_id)
                     engine.add_request(
-                        str(i),
+                        rid,
                         TokensPrompt(prompt_token_ids=list(prompt)),
                         sampling_params,
+                        lora_request=self._lora_request_for(lora_name),
                     )
-                    added.add(str(i))
+                    added.add(rid)
                 # Drive the decode loop. Each engine.step() runs the forward + the
                 # control's draw (which banks the SMC step and flags rows to drop via
                 # abort_rows); after the step we abort the flagged requests. The burst
@@ -884,12 +898,15 @@ else:
                     # Each is a FRESH request id (the control maps it back to its
                     # population slot), so there's no abort/add id race. Empty for the
                     # pop+relaunch path and for controls without ``drain_adds``.
-                    for ext_id, prompt in getattr(control, "drain_adds", lambda: [])():
+                    for ext_id, prompt, lora_name in getattr(
+                        control, "drain_adds", lambda: []
+                    )():
                         rid = str(ext_id)
                         engine.add_request(
                             rid,
                             TokensPrompt(prompt_token_ids=list(prompt)),
                             sampling_params,
+                            lora_request=self._lora_request_for(lora_name),
                         )
                         added.add(rid)
                         gone.discard(rid)
@@ -904,4 +921,4 @@ else:
 
             # The committed tokens are tracked control-side (the control banks each draw
             # into its particle contexts), so run_burst returns nothing useful.
-            return [[] for _ in prompts]
+            return [[] for _ in requests]
