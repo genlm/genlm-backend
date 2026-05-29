@@ -16,6 +16,8 @@ class AsyncLM(ABC):
         tokenizer: A Hugging Face tokenizer instance compatible with the language model
     """
 
+    supports_burst = False  # overridden True by backends with run_burst
+
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
         self.byte_vocab, self.str_vocab = decode_vocab(self.tokenizer)

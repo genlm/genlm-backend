@@ -182,10 +182,10 @@ else:
             """Unbind any control; subsequent steps behave like the stock sampler."""
             self._control = None
 
-        def _row_request_ids(self, num_rows):
-            """Row index -> vLLM internal request id for the current step."""
+        def _row_handles(self, num_rows):
+            """Row -> control handle (int); strips vLLM's ``{ext}-{8char}`` internal id."""
             req_ids = self._model_runner.input_batch.req_ids
-            return list(req_ids[:num_rows])
+            return [int(r.rsplit("-", 1)[0]) for r in req_ids[:num_rows]]
 
         def forward(
             self,
@@ -230,7 +230,7 @@ else:
             for processor in sampling_metadata.logitsprocs.argmax_invariant:
                 logits = processor.apply(logits)
 
-            rows = self._row_request_ids(logits.shape[0])
+            rows = self._row_handles(logits.shape[0])
 
             # Hand the draw to the control (it forms its own proposal from the logits).
             sampled = control.draw(logits, rows)
@@ -261,6 +261,8 @@ else:
         This implementation uses vLLM v1's in-process mode with a global
         logits processor to efficiently capture full vocabulary log probabilities.
         """
+
+        supports_burst = True  # has run_burst; drives the engine-native burst lane
 
         default_params = {
             "max_tokens": 1,
