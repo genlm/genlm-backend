@@ -105,6 +105,16 @@ class AsyncLM(ABC):
             "clear_lora must be implemented by subclasses"
         )  # pragma: no cover
 
+    def lora_view(self, lora_name):
+        """A forward handle whose ``next_token_logprobs``/``batch_next_token_logprobs``
+        run under LoRA adapter ``lora_name``. ``None`` returns ``self`` (base model);
+        LoRA-capable backends override to bind a non-None adapter."""
+        if lora_name is None:
+            return self
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support LoRA"
+        )  # pragma: no cover
+
     def clear_cache(self):
         """Clear any caches used by the language model. No-op in base class."""
         pass  # pragma: no cover

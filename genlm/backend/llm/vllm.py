@@ -12,6 +12,25 @@ from collections import defaultdict
 from genlm.backend.llm.base import AsyncLM
 from genlm.backend.cache import OutputCache
 
+
+class _LoRABoundLM:
+    """Forward handle that runs every logprobs call under a fixed LoRA adapter.
+    Returned by ``AsyncVirtualLM.lora_view(name)``; duck-typed to the forward subset
+    of ``AsyncLM`` that ``PromptedLLM`` uses on the slow lane."""
+
+    def __init__(self, lm, lora_name):
+        self._lm = lm
+        self._lora_name = lora_name
+
+    async def next_token_logprobs(self, token_ids):
+        return await self._lm.next_token_logprobs(token_ids, lora_name=self._lora_name)
+
+    async def batch_next_token_logprobs(self, token_ids_list):
+        return torch.stack(
+            await asyncio.gather(*[self.next_token_logprobs(t) for t in token_ids_list])
+        )
+
+
 try:
     # Enable vLLM v1 with in-process mode (no multiprocessing). These env vars
     # must be set BEFORE vllm is imported for the first time in this process;
@@ -408,6 +427,10 @@ else:
             """Per-request LoRARequest for ``lora_name`` (``None`` = base, LoRA off)."""
             return None if lora_name is None else self._lora_requests[lora_name]
 
+        def lora_view(self, lora_name):
+            """Forward handle bound to LoRA ``lora_name`` (``None`` = base/self)."""
+            return self if lora_name is None else _LoRABoundLM(self, lora_name)
+
         def hash_to_int(self, value):
             """Generates a deterministic unique id for a LoRA adapter from its name.
 
@@ -436,25 +459,26 @@ else:
                 lora_name, self.lora_name_to_ids[lora_name], lora_path
             )
 
-        async def next_token_logprobs(self, token_ids):
+        async def next_token_logprobs(self, token_ids, lora_name=None):
             """Request log probabilities of next token asynchronously with auto-batching.
 
-            Concurrent calls to this method are automatically batched into a single
-            ``LLM.generate()`` call for efficiency. Use with ``await``.
+            Concurrent calls are auto-batched into ``LLM.generate()`` calls (one per
+            distinct LoRA adapter) for efficiency. Use with ``await``.
 
             Args:
                 token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
+                lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
 
             Returns:
                 result (torch.Tensor): Normalized log probability tensor.
             """
-            key = tuple(token_ids)
+            key = (tuple(token_ids), lora_name)
 
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
 
             future = asyncio.get_running_loop().create_future()
-            self._add_query(token_ids, future)
+            self._add_query(token_ids, future, lora_name)
             result = await future
 
             if self.cache is not None:
@@ -462,7 +486,7 @@ else:
 
             return result
 
-        def _add_query(self, token_ids, future):
+        def _add_query(self, token_ids, future, lora_name=None):
             """Add a query to be evaluated in the next batch.
 
             The timeout is measured from the *first* queued query, not the most
@@ -474,7 +498,7 @@ else:
                 token_ids (list[int]): Token IDs representing the query prompt.
                 future (asyncio.Future): Future to store the result in.
             """
-            self.queries.append((token_ids, future))
+            self.queries.append((token_ids, future, lora_name))
 
             if len(self.queries) >= self.batch_size:
                 if self.timer:
@@ -487,7 +511,8 @@ else:
                 )
 
         def _batch_evaluate(self):
-            """Process all queued queries in a single batched ``generate()`` call."""
+            """Process all queued queries, one batched ``generate()`` per distinct LoRA
+            adapter (a single ``generate`` applies one adapter to all its prompts)."""
             queries, self.queries = self.queries, []
             if not queries:
                 return
@@ -498,51 +523,47 @@ else:
 
             if self.logprobs_capture is None:
                 exc = RuntimeError("Cannot use model after cleanup() has been called")
-                for _, future in queries:
+                for _, future, _ in queries:
                     future.set_exception(exc)
                 return
 
-            # Deduplicate: group futures by identical prompts
-            query_groups = defaultdict(list)
-            for token_ids, future in queries:
-                query_groups[tuple(token_ids)].append(future)
+            # Group by LoRA (one generate each), and dedup identical prompts within each.
+            by_lora = defaultdict(lambda: defaultdict(list))
+            for token_ids, future, lora_name in queries:
+                by_lora[lora_name][tuple(token_ids)].append(future)
 
-            unique_token_ids = list(query_groups.keys())
-
-            self.logprobs_capture.clear()
-
-            prompts = [
-                TokensPrompt(prompt_token_ids=list(token_ids))
-                for token_ids in unique_token_ids
-            ]
-
-            try:
-                self.llm_engine.generate(
-                    prompts=prompts,
-                    sampling_params=SamplingParams(**self.default_params),
-                    lora_request=self.lora_request,
-                    use_tqdm=False,
-                )
-
-                all_logprobs = self.logprobs_capture.get_all_logprobs()
-                assert all_logprobs is not None, "Logprobs should be captured"
-                assert all_logprobs.shape[0] == len(unique_token_ids), (
-                    f"Expected {len(unique_token_ids)} logprobs, got {all_logprobs.shape[0]}"
-                )
-
-                for i, key in enumerate(unique_token_ids):
-                    logprobs = all_logprobs[i]
-                    futures = query_groups[key]
-                    if len(futures) == 1:
-                        futures[0].set_result(logprobs)
-                    else:
+            for lora_name, query_groups in by_lora.items():
+                unique_token_ids = list(query_groups.keys())
+                self.logprobs_capture.clear()
+                prompts = [
+                    TokensPrompt(prompt_token_ids=list(token_ids))
+                    for token_ids in unique_token_ids
+                ]
+                try:
+                    self.llm_engine.generate(
+                        prompts=prompts,
+                        sampling_params=SamplingParams(**self.default_params),
+                        lora_request=self._lora_request_for(lora_name),
+                        use_tqdm=False,
+                    )
+                    all_logprobs = self.logprobs_capture.get_all_logprobs()
+                    assert all_logprobs is not None, "Logprobs should be captured"
+                    assert all_logprobs.shape[0] == len(unique_token_ids), (
+                        f"Expected {len(unique_token_ids)} logprobs, got {all_logprobs.shape[0]}"
+                    )
+                    for i, key in enumerate(unique_token_ids):
+                        logprobs = all_logprobs[i]
+                        futures = query_groups[key]
+                        if len(futures) == 1:
+                            futures[0].set_result(logprobs)
+                        else:
+                            for future in futures:
+                                future.set_result(logprobs.clone())
+                except Exception as exc:
+                    for futures in query_groups.values():
                         for future in futures:
-                            future.set_result(logprobs.clone())
-            except Exception as exc:
-                for futures in query_groups.values():
-                    for future in futures:
-                        if not future.done():
-                            future.set_exception(exc)
+                            if not future.done():
+                                future.set_exception(exc)
 
         def reset_async_queries(self):
             """Clear any pending queries from the queue.
