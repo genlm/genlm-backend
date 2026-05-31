@@ -896,29 +896,20 @@ else:
                         lora_request=self._lora_request_for(lora_name),
                     )
                     added.add(rid)
-                # Drive the decode loop. Each engine.step() runs the forward + the
-                # control's draw (which banks the SMC step and flags rows to drop via
-                # abort_rows); after the step we abort the flagged requests. The burst
-                # ends when no request remains -- each row is aborted at its particle's
-                # termination, or all at once when the ESS test crosses (the pop-out).
-                # No SMC logic (ESS/resample/weights) lives here -- only abort plumbing.
-                while engine.has_unfinished_requests():
-                    step_outputs = engine.step()
-                    for output in step_outputs:
-                        if output.finished:
-                            gone.add(output.request_id)
+
+                # Drive the decode loop. Each engine.step() forwards + selects (control.draw
+                # returns the token now; it banks/resamples the PREVIOUS step inside this
+                # call -- the prior bank ran on the main loop during this forward, the
+                # overlap). After the step we apply what that resample/termination flagged:
+                # abort the dropped rows, re-prefill the forked/flushed ones. No SMC logic
+                # (ESS/resample/weights) lives here -- only abort/add plumbing.
+                def _drain():
                     aborts = [
-                        str(i) for i in control.drain_aborts() if str(i) not in gone
+                        s for i in control.drain_aborts() if (s := str(i)) not in gone
                     ]
                     if aborts:
                         engine.abort_request(aborts)
                         gone.update(aborts)
-                    # In-place per-group resample (Plan B): the control re-adds forked
-                    # rows mid-burst so a resampled group rejoins the live batch
-                    # WITHOUT draining the engine -- the other groups keep decoding.
-                    # Each is a FRESH request id (the control maps it back to its
-                    # population slot), so there's no abort/add id race. Empty for the
-                    # pop+relaunch path and for controls without ``drain_adds``.
                     for ext_id, prompt, lora_name in getattr(
                         control, "drain_adds", lambda: []
                     )():
@@ -931,6 +922,18 @@ else:
                         )
                         added.add(rid)
                         gone.discard(rid)
+
+                while engine.has_unfinished_requests():
+                    step_outputs = engine.step()
+                    for output in step_outputs:
+                        if output.finished:
+                            gone.add(output.request_id)
+                    _drain()
+                # Join + resample the final step's deferred bank (no next draw to do it),
+                # then drain whatever it flagged.
+                if hasattr(control, "flush_bank"):
+                    control.flush_bank()
+                    _drain()
             finally:
                 sampler.detach()
                 # Safety net: drop anything still running (an exception mid-burst, or
