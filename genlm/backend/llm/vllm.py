@@ -867,13 +867,13 @@ else:
                 output_kind=RequestOutputKind.FINAL_ONLY,
             )
 
-            # External request id is the control's ext_id (str); drain_aborts() returns
-            # these same ids. Attach the control object to the persistent ControlSampler
-            # for this burst only; the finally below detaches it so normal
-            # generation stays stock even if the burst raises.
+            # Engine request id is str(handle); track int handles, str<->int at the vLLM
+            # boundary only ({handle}-{8hex} is parsed only in ControlSampler._row_handles).
             sampler.attach(control)
-            gone = set()
-            added = set()  # every request id ever added (initial + in-place re-adds)
+            gone = set()  # handles finished by the engine or aborted
+            added = (
+                set()
+            )  # handles ever added (initial + mid-burst re-adds); finally net
             try:
                 # The control owns what requests exist: drain its add-stream (initial
                 # population + mid-burst re-adds) and its abort-stream uniformly. Each
@@ -882,29 +882,25 @@ else:
                 # the overlap). After the step we apply what that flagged: abort dropped
                 # rows, (re-)prefill added ones. No SMC logic here -- only abort/add plumbing.
                 def _drain():
-                    aborts = [
-                        s for i in control.drain_aborts() if (s := str(i)) not in gone
-                    ]
+                    aborts = [h for h in control.drain_aborts() if h not in gone]
                     if aborts:
-                        engine.abort_request(aborts)
+                        engine.abort_request([str(h) for h in aborts])
                         gone.update(aborts)
-                    for ext_id, prompt, lora_name in control.drain_adds():
-                        rid = str(ext_id)
+                    for handle, prompt, lora_name in control.drain_adds():
                         engine.add_request(
-                            rid,
+                            str(handle),
                             TokensPrompt(prompt_token_ids=list(prompt)),
                             sampling_params,
                             lora_request=self._lora_request_for(lora_name),
                         )
-                        added.add(rid)
-                        gone.discard(rid)
+                        added.add(handle)
 
                 _drain()  # seed the initial population (the control's first adds)
                 while engine.has_unfinished_requests():
                     step_outputs = engine.step()
                     for output in step_outputs:
                         if output.finished:
-                            gone.add(output.request_id)
+                            gone.add(int(output.request_id))
                     _drain()
                 # Decode loop drained: let the control settle work deferred past the last
                 # step (the final bank), then drain whatever that flags.
@@ -914,7 +910,7 @@ else:
                 sampler.detach()
                 # Safety net: drop anything still running (an exception mid-burst, or
                 # a row that hit the max_steps length cap before the control aborted).
-                remaining = [r for r in added if r not in gone]
+                remaining = [str(h) for h in added if h not in gone]
                 if remaining and engine.has_unfinished_requests():
                     with contextlib.suppress(Exception):
                         engine.abort_request(remaining)
