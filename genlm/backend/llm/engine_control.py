@@ -3,9 +3,13 @@
 This module defines the *only* contract the SMC "controller" (which lives entirely in
 genlm-control) needs to implement in order to drive a vLLM engine step-locked
 from inside the sampler. The backend owns NO algorithm logic: there is no
-driver, no ESS, no resampling, no weight bookkeeping here. The engine exposes
-one callback -- :meth:`EngineControl.draw` -- plus a way to learn which particle
-each batch row corresponds to.
+driver, no ESS, no resampling, no weight bookkeeping here. The contract is four
+methods -- :meth:`EngineControl.draw` (select a token per row),
+:meth:`EngineControl.drain_aborts` / :meth:`EngineControl.drain_adds` (the abort
+and add streams the control drives the engine with -- the initial population is
+just the first adds), and :meth:`EngineControl.on_burst_end` (settle work the
+control deferred past the last step) -- plus a way to learn which particle each
+batch row corresponds to.
 
 The arm that consumes this contract is :class:`genlm.backend.llm.vllm.ControlSampler`,
 a swapped-in ``vllm.v1.sample.sampler.Sampler`` whose ``forward`` calls back into
@@ -53,5 +57,24 @@ class EngineControl(Protocol):
         ``abort_request`` for the returned rows -- the out-of-band pop-out that
         replaces an EOS-stop draw. The controller flags a row when its particle
         terminates (staggered) or, all live rows at once, when its ESS test crosses.
+        """
+        ...
+
+    def drain_adds(self):
+        """``(ext_id, prompt_token_ids, lora_name)`` requests to (re-)add to the
+        engine, accumulated since the last call and cleared on read.
+
+        ``run_burst`` calls this once before the loop (seeding the initial population)
+        and after every ``engine.step()``, issuing ``add_request`` for each. ``ext_id``
+        is a fresh control handle (so there is no abort/add id race); the control maps
+        it back to its (particle, view). Empty for a step with nothing to add.
+        """
+        ...
+
+    def on_burst_end(self):
+        """Settle any work the control deferred past the last decode step (e.g. a
+        deferred bank), called once after the loop drains and before the final
+        ``drain_aborts`` / ``drain_adds``. The backend stays oblivious to what is
+        settled; it only drains what this flags.
         """
         ...

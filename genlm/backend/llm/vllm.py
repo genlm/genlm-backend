@@ -832,35 +832,23 @@ else:
 
         def run_burst(
             self,
-            requests,
             control,
             max_steps,
         ):  # pragma: no cover
             """Run one engine-native decode burst driven by an SMC ``control`` (an ``EngineControl``).
 
-            Submits one engine request per substream, attaches ``control`` to the
-            persistent :class:`ControlSampler` for the burst, and drives the engine's decode
-            loop for up to ``max_steps`` steps. Each step the control draws the next
-            token for every live request (via :meth:`EngineControl.draw`); after the step
-            the control's :meth:`EngineControl.drain_aborts` names the rows to drop, which
-            we ``abort_request`` -- the out-of-band pop-out (a particle terminating,
-            or all rows at the ESS crossing). No EOS stop tokens, no discard forward.
-
-            This method owns NO SMC logic -- no ESS, no resampling, no weights.
-            Those all live in ``control``.
+            Attaches ``control`` to the persistent :class:`ControlSampler` and drives the
+            engine's decode loop for up to ``max_steps`` steps. The control owns what
+            requests exist: it queues the initial population and every mid-burst re-add via
+            :meth:`EngineControl.drain_adds`, and names rows to drop via
+            :meth:`EngineControl.drain_aborts`; we just (re-)prefill and abort accordingly
+            (the out-of-band pop-out -- a particle terminating, or rows at an ESS crossing).
+            Each step the control draws via :meth:`EngineControl.draw`. No EOS stop tokens,
+            no discard forward, and NO SMC logic (ESS/resample/weights all live in ``control``).
 
             Args:
-                requests (list[tuple]): ``(ext_id, prompt_token_ids, lora_name)`` per
-                    substream. ``ext_id`` is the control's request handle; ``lora_name``
-                    is ``None`` for the base model. A particle owns K substreams
-                    (multi-view); the control maps each ``ext_id`` back to its
-                    (particle, view).
                 control (EngineControl): the SMC control object.
                 max_steps (int): maximum decode steps for the burst.
-
-            Returns:
-                (list[list[int]]): empty lists -- committed tokens are tracked
-                control-side, so the return is unused by the caller.
             """
             from vllm.sampling_params import RequestOutputKind
 
@@ -887,22 +875,12 @@ else:
             gone = set()
             added = set()  # every request id ever added (initial + in-place re-adds)
             try:
-                for ext_id, prompt, lora_name in requests:
-                    rid = str(ext_id)
-                    engine.add_request(
-                        rid,
-                        TokensPrompt(prompt_token_ids=list(prompt)),
-                        sampling_params,
-                        lora_request=self._lora_request_for(lora_name),
-                    )
-                    added.add(rid)
-
-                # Drive the decode loop. Each engine.step() forwards + selects (control.draw
-                # returns the token now; it banks/resamples the PREVIOUS step inside this
-                # call -- the prior bank ran on the main loop during this forward, the
-                # overlap). After the step we apply what that resample/termination flagged:
-                # abort the dropped rows, re-prefill the forked/flushed ones. No SMC logic
-                # (ESS/resample/weights) lives here -- only abort/add plumbing.
+                # The control owns what requests exist: drain its add-stream (initial
+                # population + mid-burst re-adds) and its abort-stream uniformly. Each
+                # engine.step() forwards + selects (control.draw returns the token now; it
+                # banks/resamples the PREVIOUS step on the main loop during this forward,
+                # the overlap). After the step we apply what that flagged: abort dropped
+                # rows, (re-)prefill added ones. No SMC logic here -- only abort/add plumbing.
                 def _drain():
                     aborts = [
                         s for i in control.drain_aborts() if (s := str(i)) not in gone
@@ -910,9 +888,7 @@ else:
                     if aborts:
                         engine.abort_request(aborts)
                         gone.update(aborts)
-                    for ext_id, prompt, lora_name in getattr(
-                        control, "drain_adds", lambda: []
-                    )():
+                    for ext_id, prompt, lora_name in control.drain_adds():
                         rid = str(ext_id)
                         engine.add_request(
                             rid,
@@ -923,17 +899,17 @@ else:
                         added.add(rid)
                         gone.discard(rid)
 
+                _drain()  # seed the initial population (the control's first adds)
                 while engine.has_unfinished_requests():
                     step_outputs = engine.step()
                     for output in step_outputs:
                         if output.finished:
                             gone.add(output.request_id)
                     _drain()
-                # Join + resample the final step's deferred bank (no next draw to do it),
-                # then drain whatever it flagged.
-                if hasattr(control, "flush_bank"):
-                    control.flush_bank()
-                    _drain()
+                # Decode loop drained: let the control settle work deferred past the last
+                # step (the final bank), then drain whatever that flags.
+                control.on_burst_end()
+                _drain()
             finally:
                 sampler.detach()
                 # Safety net: drop anything still running (an exception mid-burst, or
@@ -942,7 +918,5 @@ else:
                 if remaining and engine.has_unfinished_requests():
                     with contextlib.suppress(Exception):
                         engine.abort_request(remaining)
-
-            # The committed tokens are tracked control-side (the control banks each draw
-            # into its particle contexts), so run_burst returns nothing useful.
-            return [[] for _ in requests]
+            # Committed tokens are tracked control-side (the control banks each draw into
+            # its particle contexts), so run_burst returns nothing.

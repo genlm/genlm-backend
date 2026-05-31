@@ -7,12 +7,13 @@ The shipped contract under test (genlm/backend/llm/vllm.py):
   * ``ControlSampler.forward`` defers to the stock sampler when no control is attached,
     and otherwise calls ``control.draw(logits, request_ids)`` (TWO args -- no ``shape``,
     no ``sampling_metadata``). The control forms its own proposal from ``logits``.
-  * ``run_burst(prompts, control, max_steps)`` submits one request
-    per prompt (ids ``str(0..N-1)``, ``ignore_eos=True``), drives the decode loop,
-    and -- after each step -- aborts the rows ``control.drain_aborts()`` names and
-    (re-)adds the rows ``control.drain_adds()`` names. Pop-out is the explicit
-    abort, NOT an EOS draw. ``run_burst`` returns ``[[] for _ in prompts]`` --
-    committed tokens live control-side -- so tests assert on control-recorded state.
+  * ``run_burst(control, max_steps)`` drives the decode loop: the control owns what
+    requests exist -- ``control.drain_adds()`` names the initial population (first call)
+    and any mid-burst re-adds (as ``(ext_id, prompt_ids, lora_name)``), and
+    ``control.drain_aborts()`` names rows to drop; ``control.on_burst_end()`` settles
+    work deferred past the last step. Pop-out is the explicit abort, NOT an EOS draw.
+    ``run_burst`` returns nothing -- committed tokens live control-side -- so tests
+    assert on control-recorded state.
 """
 
 import pytest
@@ -91,17 +92,20 @@ class RecordingControl:
     """Minimal ``EngineControl``: forces a per-row token, records every draw, and
     pops a row out (via ``drain_aborts``) once it has drawn its quota.
 
-    Implements exactly what ``ControlSampler.forward`` / ``run_burst`` call:
-    ``draw(logits, request_ids)`` and ``drain_aborts()`` (and optionally
-    ``drain_adds()``). No ``shape``, no ``sampling_metadata`` -- the control forms its
-    proposal inside ``draw`` (here: a point mass on the forced token).
+    Implements exactly the ``EngineControl`` contract ``run_burst`` calls:
+    ``draw(logits, request_ids)``, ``drain_aborts()``, ``drain_adds()`` (initial
+    population + mid-burst re-adds), and ``on_burst_end()``. No ``shape``, no
+    ``sampling_metadata`` -- the control forms its proposal inside ``draw`` (here: a
+    point mass on the forced token).
     """
 
-    def __init__(self, token_of, quota, adds=None):
+    def __init__(self, token_of, quota, prompts, adds=None):
         # token_of: external-int id -> the token id to force for that row.
         # quota:    external-int id -> #draws after which the row pops out.
+        # prompts:  [prompt_ids, ...] -- the initial population (ext id = index),
+        #           queued as the first drain_adds() (the control owns initial requests).
         # adds:     optional {after_step: [(ext_id, prompt_ids, token, quota)]} to
-        #           re-add mid-burst (the Plan-B drain_adds seam).
+        #           re-add mid-burst (the drain_adds seam).
         self.token_of = dict(token_of)
         self.quota = dict(quota)
         self._adds = adds or {}
@@ -109,7 +113,9 @@ class RecordingControl:
         self.draw_log = []  # per step: [(raw_request_id, ext_int, token), ...]
         self.seen_ids = []  # every raw request id seen, for the id-format check
         self._pending_abort = []  # raw request ids to abort on the next drain
-        self._pending_add = []  # (ext_id, prompt_ids) queued for the next drain
+        # (ext_id, prompt_ids, lora_name) queued for the next drain; seeded with the
+        # initial population so the first drain_adds() submits it.
+        self._pending_add = [(i, list(ids), None) for i, ids in enumerate(prompts)]
         self._step = 0
 
     @staticmethod
@@ -143,7 +149,7 @@ class RecordingControl:
         for ext_id, prompt_ids, token, quota in self._adds.get(self._step, []):
             self.token_of[ext_id] = token
             self.quota[ext_id] = quota
-            self._pending_add.append((ext_id, list(prompt_ids)))
+            self._pending_add.append((ext_id, list(prompt_ids), None))
         self._step += 1
         return torch.tensor(out, dtype=torch.int64, device=logits.device)
 
@@ -154,6 +160,9 @@ class RecordingControl:
     def drain_adds(self):
         adds, self._pending_add = self._pending_add, []
         return adds
+
+    def on_burst_end(self):
+        pass  # no work deferred past the last step in this trivial control
 
     # -- assertions helpers --
     def draws_for(self, ext):
@@ -213,12 +222,12 @@ def test_draw_drives_every_step(vlm):
     """(b) ``control.draw`` (2-arg) drives the token for every row, every step; with a
     quota above ``max_steps`` the rows never pop and ``max_steps`` caps the burst."""
     forced = 198
-    control = RecordingControl(token_of={0: forced, 1: forced}, quota={0: 99, 1: 99})
-    ret = vlm.run_burst(
-        prompts=[[EOS, 11, 12], [EOS, 13]], control=control, max_steps=4
+    control = RecordingControl(
+        token_of={0: forced, 1: forced},
+        quota={0: 99, 1: 99},
+        prompts=[[EOS, 11, 12], [EOS, 13]],
     )
-    # run_burst returns empty lists (tokens are control-side).
-    assert ret == [[], []]
+    vlm.run_burst(control=control, max_steps=4)
     # Exactly max_steps draws, both rows present each step, all forced.
     assert len(control.draw_log) == 4
     assert all(len(step) == 2 for step in control.draw_log)
@@ -231,8 +240,12 @@ def test_pop_out_via_abort(vlm):
     """(c) A row pops out via ``drain_aborts`` (NOT an EOS draw): once it draws its
     quota it is aborted, so it is never drawn again and the burst ends when empty."""
     forced = 198
-    control = RecordingControl(token_of={0: forced, 1: forced}, quota={0: 2, 1: 2})
-    vlm.run_burst(prompts=[[EOS, 11, 12], [EOS, 13]], control=control, max_steps=8)
+    control = RecordingControl(
+        token_of={0: forced, 1: forced},
+        quota={0: 2, 1: 2},
+        prompts=[[EOS, 11, 12], [EOS, 13]],
+    )
+    vlm.run_burst(control=control, max_steps=8)
     # Each row drawn exactly twice (aborted after the 2nd), burst ended early.
     assert control.draws_for(0) == [forced, forced]
     assert control.draws_for(1) == [forced, forced]
@@ -245,12 +258,12 @@ def test_row_request_mapping_staggered(vlm):
     row i draws its own token exactly ``quota[i]`` times, never another's."""
     token_of = {0: 100, 1: 200, 2: 300}
     quota = {0: 1, 1: 2, 2: 3}  # rows pop after 1 / 2 / 3 draws
-    control = RecordingControl(token_of=token_of, quota=quota)
-    vlm.run_burst(
+    control = RecordingControl(
+        token_of=token_of,
+        quota=quota,
         prompts=[[EOS, 11], [EOS, 12], [EOS, 13]],
-        control=control,
-        max_steps=8,
     )
+    vlm.run_burst(control=control, max_steps=8)
     # Per-row draw counts match the quotas, and each row only ever drew its token.
     assert control.draws_for(0) == [100]
     assert control.draws_for(1) == [200, 200]
@@ -273,9 +286,10 @@ def test_drain_adds_readds_row_midburst(vlm):
     control = RecordingControl(
         token_of={0: 111, 1: 222},
         quota={0: 99, 1: 99},
+        prompts=[[EOS, 11], [EOS, 12]],
         adds={0: [(99, [EOS, 14], 333, 2)]},
     )
-    vlm.run_burst(prompts=[[EOS, 11], [EOS, 12]], control=control, max_steps=6)
+    vlm.run_burst(control=control, max_steps=6)
     # The re-added row was driven (drew its token), proving drain_adds plumbing.
     assert control.draws_for(99) == [333, 333]
     # It first appears strictly after step 0 (it was added after the first draw).
