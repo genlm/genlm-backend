@@ -93,7 +93,7 @@ class TokenTrie:
         for j in range(next_token_index, len(token_ids)):
             token_id = token_ids[j]
             token_logits = logits[j - base]
-            token_logprobs = torch.log_softmax(token_logits, 0)
+            token_logprobs = torch.log_softmax(token_logits, 0, dtype=torch.float32)
 
             node = node.add_token(token_id, token_logprobs.cpu())
 
