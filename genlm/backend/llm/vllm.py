@@ -6,29 +6,10 @@ import warnings
 import torch
 import logging
 import threading
-import hashlib
 from collections import defaultdict
 
 from genlm.backend.llm.base import AsyncLM
 from genlm.backend.cache import OutputCache
-
-
-class _LoRABoundLM:
-    """Forward handle that runs every logprobs call under a fixed LoRA adapter.
-    Returned by ``AsyncVirtualLM.lora_view(name)``; duck-typed to the forward subset
-    of ``AsyncLM`` that ``PromptedLLM`` uses on the slow lane."""
-
-    def __init__(self, lm, lora_name):
-        self._lm = lm
-        self._lora_name = lora_name
-
-    async def next_token_logprobs(self, token_ids):
-        return await self._lm.next_token_logprobs(token_ids, lora_name=self._lora_name)
-
-    async def batch_next_token_logprobs(self, token_ids_list):
-        return torch.stack(
-            await asyncio.gather(*[self.next_token_logprobs(t) for t in token_ids_list])
-        )
 
 
 try:
@@ -326,10 +307,12 @@ else:
                 if cache_size > 0
                 else None
             )
-            self.lora_request = None
-            self.lora_name_to_ids = {}
-            # name -> LoRARequest, for per-request LoRA in run_burst (multi-view).
+            # name -> LoRARequest; every forward selects its adapter per request
+            # via ``lora_name`` (``None`` = base). Ids are monotonic: vLLM caches
+            # adapter weights by int id, so an id must never be reused for
+            # different weights (re-registering a name gets a fresh id).
             self._lora_requests = {}
+            self._next_lora_id = 1
 
             self.queries = []
             self.batch_size = batch_size
@@ -403,61 +386,36 @@ else:
             """Access the underlying model for advanced use cases."""
             return self._get_model_runner(self.llm_engine).model
 
-        def clear_lora(self):
-            """
-            Disable any active LoRA adapter for the vLLM engine.
-            """
-            self.lora_request = None
-
         def add_new_lora(self, lora_path, lora_name="lora_1"):
-            """Load a LoRA adapter into the base model by creating a unique id for it.
+            """Register a LoRA adapter under ``lora_name``.
+
+            Re-registering an existing name evicts the old weights and binds the
+            name to ``lora_path`` under a fresh id — a training loop pushes updated
+            weights with this one call. Forwards select the adapter per call via
+            ``lora_name=`` (or ``lora_view``).
 
             Args:
                 lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
                 lora_name (str): Name to assign to the loaded adapter.
-
-            Notes:
-                This does not activate the adapter immediately. Call `set_lora()` to enable the adapter.
             """
-            lid = self.hash_to_int(lora_name)
-            self.lora_name_to_ids[lora_name] = lid
+            if lora_name in self._lora_requests:
+                self.remove_lora(lora_name)
+            lid = self._next_lora_id
+            self._next_lora_id += 1
             self._lora_requests[lora_name] = LoRARequest(lora_name, lid, lora_path)
+
+        def remove_lora(self, lora_name):
+            """Unregister ``lora_name`` and evict its weights from the engine."""
+            req = self._lora_requests.pop(lora_name)
+            self.llm_engine.llm_engine.remove_lora(req.lora_int_id)
+            # OutputCache keys are (ids, lora_name); a later re-register under this
+            # name must not serve the old adapter's logprobs.
+            if self.cache is not None:
+                self.cache.clear()
 
         def _lora_request_for(self, lora_name):
             """Per-request LoRARequest for ``lora_name`` (``None`` = base, LoRA off)."""
             return None if lora_name is None else self._lora_requests[lora_name]
-
-        def lora_view(self, lora_name):
-            """Forward handle bound to LoRA ``lora_name`` (``None`` = base/self)."""
-            return self if lora_name is None else _LoRABoundLM(self, lora_name)
-
-        def hash_to_int(self, value):
-            """Generates a deterministic unique id for a LoRA adapter from its name.
-
-            Args:
-                value (str): The name of the LoRA adapter to hash.
-
-            Returns:
-                An integer ID corresponding to the LoRA adapter, in the range 0–255.
-            """
-            hash_bytes = hashlib.shake_128(value.encode("utf-8")).digest(1)
-            return int.from_bytes(hash_bytes, "big")
-
-        def set_lora(self, lora_path, lora_name="lora_1"):
-            """Configure a LoRA adapter request for the vLLM engine.
-
-            Args:
-                lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
-                lora_name (str): Identifier name to associate with this LoRA adapter within vLLM.
-                lora_id (int): Globally unique ID for the adapter.
-            """
-            if lora_name not in self.lora_name_to_ids:
-                raise ValueError(
-                    f"A LoRA adapter named '{lora_name}' has not been loaded yet. Please call add_new_lora() first to load and name your LoRA adapters."
-                )
-            self.lora_request = LoRARequest(
-                lora_name, self.lora_name_to_ids[lora_name], lora_path
-            )
 
         async def next_token_logprobs(self, token_ids, lora_name=None):
             """Request log probabilities of next token asynchronously with auto-batching.
@@ -581,7 +539,7 @@ else:
                 self.sample_timer.cancel()
                 self.sample_timer = None
 
-        def next_token_logprobs_sync(self, token_ids):
+        def next_token_logprobs_sync(self, token_ids, lora_name=None):
             """Request log probabilities of next token synchronously.
 
             Does not support auto-batching. For batched sync calls, use
@@ -589,11 +547,12 @@ else:
 
             Args:
                 token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
+                lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
 
             Returns:
                 (torch.Tensor): Normalized log probability tensor.
             """
-            key = tuple(token_ids)
+            key = (tuple(token_ids), lora_name)
 
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
@@ -606,7 +565,7 @@ else:
             self.llm_engine.generate(
                 prompts=TokensPrompt(prompt_token_ids=list(token_ids)),
                 sampling_params=SamplingParams(**self.default_params),
-                lora_request=self.lora_request,
+                lora_request=self._lora_request_for(lora_name),
                 use_tqdm=False,
             )
 
@@ -618,12 +577,13 @@ else:
 
             return result
 
-        def batch_next_token_logprobs_sync(self, token_ids_list):
+        def batch_next_token_logprobs_sync(self, token_ids_list, lora_name=None):
             """
             Request log probabilities of next tokens in a batch synchronously.
 
             Args:
                 token_ids_list (list[list[int]]): A list of token ID lists, each representing a prompt to the language model.
+                lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
 
             Returns:
                 (torch.Tensor): A tensor of normalized log probability tensors, one for each prompt in the input list.
@@ -648,7 +608,7 @@ else:
             self.llm_engine.generate(
                 prompts=prompts,
                 sampling_params=SamplingParams(**self.default_params),
-                lora_request=self.lora_request,
+                lora_request=self._lora_request_for(lora_name),
                 use_tqdm=False,
             )
 
@@ -749,9 +709,13 @@ else:
                         e,
                     )
 
-        def _add_sample_query(self, prompt_token_ids, sampling_params, future):
+        def _add_sample_query(
+            self, prompt_token_ids, sampling_params, future, lora_name=None
+        ):
             """Enqueue a ``sample()`` request; mirrors ``_add_query`` for the logprobs path."""
-            self.sample_queries.append((prompt_token_ids, sampling_params, future))
+            self.sample_queries.append(
+                (prompt_token_ids, sampling_params, future, lora_name)
+            )
             if len(self.sample_queries) >= self.batch_size:
                 if self.sample_timer:
                     self.sample_timer.cancel()
@@ -763,7 +727,8 @@ else:
                 )
 
         def _batch_sample_evaluate(self):
-            """Dispatch queued ``sample()`` requests in one batched ``generate()`` call."""
+            """Dispatch queued ``sample()`` requests, one batched ``generate()`` call
+            per distinct LoRA adapter."""
             queries, self.sample_queries = self.sample_queries, []
             if not queries:
                 return
@@ -772,23 +737,29 @@ else:
                 self.sample_timer = None
             if self.logprobs_capture is None:
                 exc = RuntimeError("Cannot use model after cleanup() has been called")
-                for _, _, future in queries:
+                for _, _, future, _ in queries:
                     future.set_exception(exc)
                 return
-            try:
-                outputs = self.llm_engine.generate(
-                    prompts=[TokensPrompt(prompt_token_ids=t) for t, _, _ in queries],
-                    sampling_params=[sp for _, sp, _ in queries],
-                    lora_request=self.lora_request,
-                    use_tqdm=False,
-                )
-                assert len(outputs) == len(queries)
-                for output, (_, _, future) in zip(outputs, queries):
-                    future.set_result(list(output.outputs[0].token_ids))
-            except Exception as exc:
-                for _, _, future in queries:
-                    if not future.done():
-                        future.set_exception(exc)
+            by_lora = defaultdict(list)
+            for query in queries:
+                by_lora[query[3]].append(query)
+            for lora_name, group in by_lora.items():
+                try:
+                    outputs = self.llm_engine.generate(
+                        prompts=[
+                            TokensPrompt(prompt_token_ids=t) for t, _, _, _ in group
+                        ],
+                        sampling_params=[sp for _, sp, _, _ in group],
+                        lora_request=self._lora_request_for(lora_name),
+                        use_tqdm=False,
+                    )
+                    assert len(outputs) == len(group)
+                    for output, (_, _, future, _) in zip(outputs, group):
+                        future.set_result(list(output.outputs[0].token_ids))
+                except Exception as exc:
+                    for _, _, future, _ in group:
+                        if not future.done():
+                            future.set_exception(exc)
 
         async def sample(
             self,
@@ -797,6 +768,7 @@ else:
             eos_token_ids,
             temperature=1.0,
             seed=None,
+            lora_name=None,
         ):
             """Sample from the language model.
 
@@ -809,6 +781,7 @@ else:
                 temperature (float, optional): The temperature to use to rescale the logits. Defaults to 1.0.
                 max_tokens (int): The maximum number of tokens to generate.
                 seed (int, optional): The seed for the random number generator. Defaults to None.
+                lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
 
             Returns:
                 (list[int]): The sampled token IDs.
@@ -824,6 +797,7 @@ else:
                     stop=[self.byte_vocab[i].decode() for i in eos_token_ids],
                 ),
                 future,
+                lora_name,
             )
             token_ids = await future
             if token_ids and token_ids[-1] in eos_token_ids:
