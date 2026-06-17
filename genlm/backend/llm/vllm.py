@@ -468,9 +468,32 @@ else:
                     self.timeout, self._batch_evaluate
                 )
 
+        def _prefill_step_limits(self):
+            """``(max_num_batched_tokens, max_num_seqs)`` from the scheduler (cached).
+
+            ``GlobalLogprobsCapture`` only captures one prefill step, so a ``generate``
+            batch must stay under both limits; ``_sub_batches`` uses these to do so."""
+            limits = getattr(self, "_cached_prefill_limits", None)
+            if limits is None:
+                max_tokens, max_seqs = 8192, 128  # vLLM defaults; floors on failure.
+                try:
+                    cfg = self.llm_engine.llm_engine.vllm_config.scheduler_config
+                    max_tokens = int(cfg.max_num_batched_tokens) or max_tokens
+                    max_seqs = int(cfg.max_num_seqs) or max_seqs
+                except Exception:
+                    logging.getLogger("genlm.backend").warning(
+                        "Could not read scheduler_config; using default prefill "
+                        "limits (%d tokens, %d seqs).", max_tokens, max_seqs,
+                    )
+                limits = (max_tokens, max_seqs)
+                self._cached_prefill_limits = limits
+            return limits
+
         def _batch_evaluate(self):
-            """Process all queued queries, one batched ``generate()`` per distinct LoRA
-            adapter (a single ``generate`` applies one adapter to all its prompts)."""
+            """Process all queued queries, batched ``generate()`` per distinct LoRA
+            adapter. Each adapter's prompts are split into one-prefill-step sub-batches
+            so ``GlobalLogprobsCapture`` captures exactly one row per prompt (otherwise a
+            large/long batch spans multiple steps and drops rows -> short logprobs)."""
             queries, self.queries = self.queries, []
             if not queries:
                 return
@@ -490,28 +513,31 @@ else:
             for token_ids, future, lora_name in queries:
                 by_lora[lora_name][tuple(token_ids)].append(future)
 
+            max_tokens, max_seqs = self._prefill_step_limits()
             for lora_name, query_groups in by_lora.items():
                 unique_token_ids = list(query_groups.keys())
-                self.logprobs_capture.clear()
-                prompts = [
-                    TokensPrompt(prompt_token_ids=list(token_ids))
-                    for token_ids in unique_token_ids
-                ]
                 try:
-                    self.llm_engine.generate(
-                        prompts=prompts,
-                        sampling_params=SamplingParams(**self.default_params),
-                        lora_request=self._lora_request_for(lora_name),
-                        use_tqdm=False,
-                    )
-                    all_logprobs = self.logprobs_capture.get_all_logprobs()
-                    assert all_logprobs is not None, "Logprobs should be captured"
-                    assert all_logprobs.shape[0] == len(unique_token_ids), (
-                        f"Expected {len(unique_token_ids)} logprobs, got {all_logprobs.shape[0]}"
-                    )
-                    for i, key in enumerate(unique_token_ids):
-                        logprobs = all_logprobs[i]
-                        futures = query_groups[key]
+                    # Collect first, resolve last: keeps each adapter all-or-nothing.
+                    captured = {}
+                    for sub in self._sub_batches(unique_token_ids, max_tokens, max_seqs):
+                        self.logprobs_capture.clear()
+                        self.llm_engine.generate(
+                            prompts=[
+                                TokensPrompt(prompt_token_ids=list(t)) for t in sub
+                            ],
+                            sampling_params=SamplingParams(**self.default_params),
+                            lora_request=self._lora_request_for(lora_name),
+                            use_tqdm=False,
+                        )
+                        all_logprobs = self.logprobs_capture.get_all_logprobs()
+                        assert all_logprobs is not None, "Logprobs should be captured"
+                        assert all_logprobs.shape[0] == len(sub), (
+                            f"Expected {len(sub)} logprobs, got {all_logprobs.shape[0]}"
+                        )
+                        for i, key in enumerate(sub):
+                            captured[key] = all_logprobs[i]
+                    for key, logprobs in captured.items():
+                        futures = [f for f in query_groups[key] if not f.done()]
                         if len(futures) == 1:
                             futures[0].set_result(logprobs)
                         else:
@@ -522,6 +548,21 @@ else:
                         for future in futures:
                             if not future.done():
                                 future.set_exception(exc)
+
+        @staticmethod
+        def _sub_batches(token_id_tuples, max_tokens, max_seqs):
+            """Greedily pack prompts into sub-batches of ``<= max_tokens`` total tokens
+            AND ``<= max_seqs`` prompts. A prompt longer than ``max_tokens`` becomes its
+            own sub-batch (one prompt always yields a single capture row)."""
+            batch, total = [], 0
+            for t in token_id_tuples:
+                if batch and (total + len(t) > max_tokens or len(batch) >= max_seqs):
+                    yield batch
+                    batch, total = [], 0
+                batch.append(t)
+                total += len(t)
+            if batch:
+                yield batch
 
         def reset_async_queries(self):
             """Clear any pending queries from the queue.
