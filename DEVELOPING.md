@@ -70,6 +70,12 @@ pytest tests/test_sgl.py
 
 **Recommended maintainer flow:** make your change → if it touches GPU paths and you have a GPU, run the GPU tests locally → open the PR → add `skip-gpu-tests` if you've validated locally or the change is GPU-irrelevant, otherwise let CI run them on `gpu-runners`.
 
+## Public API changes
+
+`griffe check` runs per PR, diffing the public surface vs `main`. It will report breaking API changes as a warning + sticky comments. However, it only catches signature-level breaks, not behavioral changes under an unchanged signature (e.g., a deprecation tombstone that accepts and raises).
+
+To surface those, put the change in the signature: annotate a removed method `-> NoReturn`; change the return annotation or a default when the contract changes.
+
 ## Documentation
 
 Documentation is generated using [mkdocs](https://www.mkdocs.org/) and hosted on GitHub Pages. To build the documentation, run:
@@ -118,9 +124,3 @@ following command:
 ```bash
 pre-commit run --all-files
 ```
-
-## Public API changes
-
-`griffe check` runs per PR, diffing the public surface vs `main`. It will report breaking API changes as a warning + sticky comments. However, it only catches signature-level breaks, not behavioral changes under an unchanged signature (e.g., a deprecation tombstone that accepts and raises).
-
-To surface those, put the change in the signature: annotate a removed method `-> NoReturn`; change the return annotation or a default when the contract changes.
