@@ -130,7 +130,7 @@ class AsyncLM(ABC):
         without LoRA support fails at the first forward."""
         return self if lora_name is None else _LoRABoundLM(self, lora_name)
 
-    def set_lora(self, *args, **kwargs):
+    def set_lora(self, lora_path, lora_name):
         """Removed: adapter selection is per-request now."""
         raise RuntimeError(
             "set_lora() was removed: there is no active-adapter global anymore. "
@@ -138,7 +138,7 @@ class AsyncLM(ABC):
             "view with lora_view(name)."
         )
 
-    def clear_lora(self, *args, **kwargs):
+    def clear_lora(self):
         """Removed: ``lora_name=None`` (the default) is the base model."""
         raise RuntimeError(
             "clear_lora() was removed: omit lora_name (None = base model)."
