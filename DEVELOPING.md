@@ -118,3 +118,9 @@ following command:
 ```bash
 pre-commit run --all-files
 ```
+
+## Public API changes
+
+`griffe check` runs per PR, diffing the public surface vs `main`. It will report breaking API changes as a warning + sticky comments. However, it only catches signature-level breaks, not behavioral changes under an unchanged signature (e.g., a deprecation tombstone that accepts and raises).
+
+To surface those, put the change in the signature: annotate a removed method `-> NoReturn`; change the return annotation or a default when the contract changes.
