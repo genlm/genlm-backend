@@ -46,6 +46,36 @@ To run the test suite with coverage, run:
 pytest tests --cov=genlm/backend --cov-report=term-missing
 ```
 
+## GPU tests & CI
+
+Some tests require a CUDA GPU (e.g. the vLLM and SGLang backends). They are **not** exercised by a plain `pytest tests` on a CPU-only machine.
+
+**Running GPU tests locally.** On a machine with a CUDA GPU, install the relevant extra and run the GPU-backed suite (this mirrors CI in `.github/workflows/coverage.yml`):
+
+```bash
+# vLLM backend
+uv pip install -e ".[vllm]"
+pytest tests --ignore=tests/test_mlx.py --ignore=tests/test_sgl.py
+
+# SGLang backend
+uv pip install -e ".[sgl]"
+pytest tests/test_sgl.py
+```
+
+**How GPU tests run in CI.** The GPU jobs (`test_vllm_coverage`, `test_sgl_coverage` in `.github/workflows/coverage.yml`) run on the self-hosted **`gpu-runners`** runner group. On every pull request and push to `main` they run **by default**.
+
+- **Opt out with the `skip-gpu-tests` label.** A maintainer (triage/write access) can add the `skip-gpu-tests` label to a PR to skip the GPU jobs — e.g. for a docs-only change, or when you've already run the GPU suite locally (on a cloud GPU). External/fork contributors can't add labels, so GPU tests always run for their PRs.
+- **`gpu-gate` is the required check.** It's a small aggregator job that passes when the GPU jobs succeed *or* are intentionally skipped, and fails only if they fail or are cancelled. Branch protection requires `gpu-gate` (not the individual GPU jobs), so a labeled-skip or a queue-stuck run never blocks a merge with a dangling `cancelled` check.
+- **Queue watchdog.** A scheduled `gpu-queue-watchdog` workflow cancels GPU runs stuck in `queued` for more than 20 minutes (e.g. if no runner is available), so a PR fails fast instead of hanging at GitHub's 24-hour queue limit. If that happens: re-run the job once a runner is free, or apply `skip-gpu-tests` to proceed.
+
+**Recommended maintainer flow:** make your change → if it touches GPU paths and you have a GPU, run the GPU tests locally → open the PR → add `skip-gpu-tests` if you've validated locally or the change is GPU-irrelevant, otherwise let CI run them on `gpu-runners`.
+
+## Public API changes
+
+`griffe check` runs per PR, diffing the public surface vs `main`. It will report breaking API changes as a warning + sticky comments. However, it only catches signature-level breaks, not behavioral changes under an unchanged signature (e.g., a deprecation tombstone that accepts and raises).
+
+To surface those, put the change in the signature: annotate a removed method `-> NoReturn`; change the return annotation or a default when the contract changes.
+
 ## Documentation
 
 Documentation is generated using [mkdocs](https://www.mkdocs.org/) and hosted on GitHub Pages. To build the documentation, run:

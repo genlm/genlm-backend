@@ -3,14 +3,21 @@ name: GPU tests + code coverage
 on:
   workflow_dispatch:
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches:
       - main
 
+concurrency:
+  group: gpu-coverage-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test_vllm_coverage:
-    runs-on: ParallelHoss
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-gpu-tests') }}
+    runs-on:
+      group: gpu-runners
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -45,7 +52,10 @@ jobs:
           slug: genlm/genlm-backend
 
   test_sgl_coverage:
-    runs-on: ParallelHoss
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-gpu-tests') }}
+    runs-on:
+      group: gpu-runners
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -109,3 +119,27 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.json
           slug: genlm/genlm-backend
+
+  gpu-gate:
+    # The single required status check for GPU tests.
+    # Passes when the GPU jobs succeed OR are intentionally skipped
+    # (skip-gpu-tests label, or non-PR paths); fails on failure/cancelled
+    # (including the watchdog cancel or GitHub's 24h queue cancel).
+    # Intentionally gates only the GPU jobs; test_mlx_coverage has its own check.
+    if: ${{ always() }}
+    needs: [test_vllm_coverage, test_sgl_coverage]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require GPU jobs to pass or be intentionally skipped
+        env:
+          VLLM_RESULT: ${{ needs.test_vllm_coverage.result }}
+          SGL_RESULT: ${{ needs.test_sgl_coverage.result }}
+        run: |
+          set -euo pipefail
+          echo "test_vllm_coverage=$VLLM_RESULT  test_sgl_coverage=$SGL_RESULT"
+          for r in "$VLLM_RESULT" "$SGL_RESULT"; do
+            case "$r" in
+              success|skipped) ;;
+              *) echo "::error::GPU job result '$r'. Re-run, or apply the 'skip-gpu-tests' label to merge without GPU CI."; exit 1 ;;
+            esac
+          done
