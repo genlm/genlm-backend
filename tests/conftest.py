@@ -29,6 +29,31 @@ v1_capable = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(scope="session")
+def lora_pair(tmp_path_factory):
+    """Two locally-built SmolLM adapters for re-registration tests: ``identity``
+    (lora_B zeros, default init -> output == base) and ``shifted`` (lora_B randn
+    -> output != base)."""
+    from peft import LoraConfig, get_peft_model
+    from transformers import AutoModelForCausalLM
+
+    base = AutoModelForCausalLM.from_pretrained(
+        "HuggingFaceTB/SmolLM-135M", torch_dtype=torch.float32
+    )
+    pm = get_peft_model(base, LoraConfig(r=8, target_modules=["q_proj", "v_proj"]))
+    root = tmp_path_factory.mktemp("lora_pair")
+    identity = root / "identity"
+    pm.save_pretrained(str(identity))
+    with torch.no_grad():
+        for name, p in pm.named_parameters():
+            if "lora_B" in name:
+                torch.nn.init.normal_(p, std=1.0)
+    shifted = root / "shifted"
+    pm.save_pretrained(str(shifted))
+    del pm, base
+    return str(identity), str(shifted)
+
+
 @pytest.fixture(autouse=True, scope="function")
 def cleanup_modules():
     yield

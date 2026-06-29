@@ -6,11 +6,11 @@ import warnings
 import torch
 import logging
 import threading
-import hashlib
 from collections import defaultdict
 
 from genlm.backend.llm.base import AsyncLM
 from genlm.backend.cache import OutputCache
+
 
 try:
     # Enable vLLM v1 with in-process mode (no multiprocessing). These env vars
@@ -37,6 +37,8 @@ try:
         destroy_distributed_environment,
     )
     from vllm.v1.sample.logits_processor import LogitsProcessor
+    from vllm.v1.sample.sampler import Sampler
+    from vllm.v1.outputs import SamplerOutput, LogprobsTensors
 
     HAS_VLLM = True
 except ImportError:  # pragma: no cover
@@ -136,12 +138,131 @@ else:
             with self._lock:
                 self._captured_batch = None
 
+    class ControlSampler(Sampler):  # pragma: no cover
+        """A ``Sampler`` whose decode step is driven by an SMC control object (an ``EngineControl``).
+
+        This is a thin engine *arm*: it owns no SMC logic. When a control object
+        (:class:`~genlm.backend.llm.engine_control.EngineControl`) is attached
+        for the current burst, :meth:`forward` reproduces the stock sampler's
+        logits-shaping pipeline and then hands off to it:
+
+        1. compute raw logprobs if requested (stock behavior),
+        2. cast logits to float32 (stock behavior),
+        3. ``apply_logits_processors(...)`` -- the non-argmax-invariant
+           processors and penalties (stock behavior),
+        4. apply the argmax-invariant processors -- this is where
+           :class:`GlobalLogprobsCapture` lives, so full-vocab logprob capture
+           keeps working and reflects the post-processor logits,
+        5. ``control.draw(logits, rows)`` -- the control forms its own proposal from the
+           logits and draws one token per row,
+        6. package the drawn ids into a :class:`SamplerOutput`.
+
+        Pop-out is out-of-band: ``run_burst`` aborts the rows the control names in
+        :meth:`EngineControl.drain_aborts` after each step (not via an EOS draw).
+
+        When no control is attached, :meth:`forward` defers entirely to
+        ``super().forward`` so normal generation and the ``next_token_logprobs``
+        paths are byte-for-byte unaffected.
+
+        Row -> request identity is read from ``model_runner.input_batch.req_ids``
+        (see :mod:`genlm.backend.llm.engine_control`). The sampler is constructed
+        with a reference to its ``model_runner`` for exactly this.
+        """
+
+        def __init__(self, logprobs_mode, model_runner):
+            super().__init__(logprobs_mode=logprobs_mode)
+            self._model_runner = model_runner
+            self._control = None
+
+        def attach(self, control):
+            """Bind the control object that drives the current burst (or ``None``)."""
+            self._control = control
+
+        def detach(self):
+            """Unbind any control; subsequent steps behave like the stock sampler."""
+            self._control = None
+
+        def _row_handles(self, num_rows):
+            """Row -> control handle (int); strips vLLM's ``{ext}-{8char}`` internal id."""
+            req_ids = self._model_runner.input_batch.req_ids
+            return [int(r.rsplit("-", 1)[0]) for r in req_ids[:num_rows]]
+
+        def forward(
+            self,
+            logits,
+            sampling_metadata,
+            predict_bonus_token=False,
+            logprobs_mode_override=None,
+        ):
+            control = self._control
+            if control is None:
+                # No burst active: identical to the stock sampler.
+                return super().forward(
+                    logits,
+                    sampling_metadata,
+                    predict_bonus_token=predict_bonus_token,
+                    logprobs_mode_override=logprobs_mode_override,
+                )
+
+            logprobs_mode = logprobs_mode_override or self.logprobs_mode
+            num_logprobs = sampling_metadata.max_num_logprobs
+            raw_logprobs = None
+            if num_logprobs is not None:
+                if logprobs_mode == "raw_logprobs":
+                    raw_logprobs = self.compute_logprobs(logits)
+                elif logprobs_mode == "raw_logits":
+                    raw_logprobs = (
+                        logits.clone()
+                        if logits.dtype == torch.float32
+                        else logits.to(torch.float32)
+                    )
+
+            logits = logits.to(torch.float32)
+
+            # Stock non-argmax-invariant processors + penalties.
+            logits = self.apply_logits_processors(
+                logits, sampling_metadata, predict_bonus_token
+            )
+            # Stock argmax-invariant processors (GlobalLogprobsCapture lives
+            # here). These normally run inside ``sample`` after temperature; the
+            # control owns temperature/draw, so we run them here on the post-processor
+            # logits to keep capture working.
+            for processor in sampling_metadata.logitsprocs.argmax_invariant:
+                logits = processor.apply(logits)
+
+            rows = self._row_handles(logits.shape[0])
+
+            # Hand the draw to the control (it forms its own proposal from the logits).
+            sampled = control.draw(logits, rows)
+
+            if not isinstance(sampled, torch.Tensor):
+                sampled = torch.tensor(sampled, dtype=torch.int64, device=logits.device)
+            sampled = sampled.to(logits.device).long().view(-1)
+
+            logprobs_tensors = None
+            if num_logprobs is not None and raw_logprobs is not None:
+                if num_logprobs == -1:
+                    logprobs_tensors = LogprobsTensors(
+                        torch.empty(0), raw_logprobs, torch.empty(0)
+                    )
+                else:
+                    logprobs_tensors = self.gather_logprobs(
+                        raw_logprobs, num_logprobs, token_ids=sampled
+                    )
+
+            return SamplerOutput(
+                sampled_token_ids=sampled.to(torch.int32).unsqueeze(-1),
+                logprobs_tensors=logprobs_tensors,
+            )
+
     class AsyncVirtualLM(AsyncLM):  # pragma: no cover
         """Async language model using vLLM v1 with global logits processor.
 
         This implementation uses vLLM v1's in-process mode with a global
         logits processor to efficiently capture full vocabulary log probabilities.
         """
+
+        supports_burst = True  # has run_burst; drives the engine-native burst lane
 
         default_params = {
             "max_tokens": 1,
@@ -176,14 +297,22 @@ else:
             """
             self.llm_engine = llm_engine
             self.logprobs_capture = logprobs_capture
+            # The engine-native sampler, swapped in once by from_name (None until
+            # then, and on any non-engine construction path). Detached except for
+            # the duration of a run_burst call.
+            self._control_sampler = None
             self.tokenizer = llm_engine.get_tokenizer()
             self.cache = (
                 OutputCache(maxsize=cache_size, **(cache_opts or {}))
                 if cache_size > 0
                 else None
             )
-            self.lora_request = None
-            self.lora_name_to_ids = {}
+            # name -> LoRARequest; every forward selects its adapter per request
+            # via ``lora_name`` (``None`` = base). Ids are monotonic: vLLM caches
+            # adapter weights by int id, so an id must never be reused for
+            # different weights (re-registering a name gets a fresh id).
+            self._lora_requests = {}
+            self._next_lora_id = 1
 
             self.queries = []
             self.batch_size = batch_size
@@ -227,7 +356,19 @@ else:
                 logprobs_capture
             )
 
-            return cls(llm, logprobs_capture, **kwargs)
+            # Install the engine-native sampler ONCE. Detached (the default) it
+            # defers verbatim to the stock sampler, so normal generation and the
+            # next_token_logprobs paths are byte-unaffected; run_burst attaches a
+            # control object only for a burst's duration.
+            control_sampler = ControlSampler(
+                logprobs_mode=model_runner.model_config.logprobs_mode,
+                model_runner=model_runner,
+            )
+            model_runner.sampler = control_sampler
+
+            inst = cls(llm, logprobs_capture, **kwargs)
+            inst._control_sampler = control_sampler
+            return inst
 
         @staticmethod
         def _get_model_runner(llm):
@@ -245,71 +386,57 @@ else:
             """Access the underlying model for advanced use cases."""
             return self._get_model_runner(self.llm_engine).model
 
-        def clear_lora(self):
-            """
-            Disable any active LoRA adapter for the vLLM engine.
-            """
-            self.lora_request = None
-
         def add_new_lora(self, lora_path, lora_name="lora_1"):
-            """Load a LoRA adapter into the base model by creating a unique id for it.
+            """Register a LoRA adapter under ``lora_name``.
+
+            Re-registering an existing name evicts the old weights and binds the
+            name to ``lora_path`` under a fresh id — a training loop pushes updated
+            weights with this one call. Forwards select the adapter per call via
+            ``lora_name=`` (or ``lora_view``).
 
             Args:
                 lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
                 lora_name (str): Name to assign to the loaded adapter.
-
-            Notes:
-                This does not activate the adapter immediately. Call `set_lora()` to enable the adapter.
             """
-            self.lora_name_to_ids[lora_name] = self.hash_to_int(lora_name)
+            if lora_name in self._lora_requests:
+                self.remove_lora(lora_name)
+            lid = self._next_lora_id
+            self._next_lora_id += 1
+            self._lora_requests[lora_name] = LoRARequest(lora_name, lid, lora_path)
 
-        def hash_to_int(self, value):
-            """Generates a deterministic unique id for a LoRA adapter from its name.
+        def remove_lora(self, lora_name):
+            """Unregister ``lora_name`` and evict its weights from the engine."""
+            req = self._lora_requests.pop(lora_name)
+            self.llm_engine.llm_engine.remove_lora(req.lora_int_id)
+            # OutputCache keys are (ids, lora_name); a later re-register under this
+            # name must not serve the old adapter's logprobs.
+            if self.cache is not None:
+                self.cache.clear()
 
-            Args:
-                value (str): The name of the LoRA adapter to hash.
+        def _lora_request_for(self, lora_name):
+            """Per-request LoRARequest for ``lora_name`` (``None`` = base, LoRA off)."""
+            return None if lora_name is None else self._lora_requests[lora_name]
 
-            Returns:
-                An integer ID corresponding to the LoRA adapter, in the range [1, 2^31 - 1].
-            """
-            hash_bytes = hashlib.shake_128(value.encode("utf-8")).digest(4)
-            return (int.from_bytes(hash_bytes, "big") % (2**31 - 2)) + 1
-
-        def set_lora(self, lora_path, lora_name="lora_1"):
-            """Configure a LoRA adapter request for the vLLM engine.
-
-            Args:
-                lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
-                lora_name (str): Identifier name to associate with this LoRA adapter within vLLM.
-                lora_id (int): Globally unique ID for the adapter.
-            """
-            if lora_name not in self.lora_name_to_ids:
-                raise ValueError(
-                    f"A LoRA adapter named '{lora_name}' has not been loaded yet. Please call add_new_lora() first to load and name your LoRA adapters."
-                )
-            self.lora_request = LoRARequest(
-                lora_name, self.lora_name_to_ids[lora_name], lora_path
-            )
-
-        async def next_token_logprobs(self, token_ids):
+        async def next_token_logprobs(self, token_ids, lora_name=None):
             """Request log probabilities of next token asynchronously with auto-batching.
 
-            Concurrent calls to this method are automatically batched into a single
-            ``LLM.generate()`` call for efficiency. Use with ``await``.
+            Concurrent calls are auto-batched into ``LLM.generate()`` calls (one per
+            distinct LoRA adapter) for efficiency. Use with ``await``.
 
             Args:
                 token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
+                lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
 
             Returns:
                 result (torch.Tensor): Normalized log probability tensor.
             """
-            key = tuple(token_ids)
+            key = (tuple(token_ids), lora_name)
 
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
 
             future = asyncio.get_running_loop().create_future()
-            self._add_query(token_ids, future)
+            self._add_query(token_ids, future, lora_name)
             result = await future
 
             if self.cache is not None:
@@ -317,7 +444,7 @@ else:
 
             return result
 
-        def _add_query(self, token_ids, future):
+        def _add_query(self, token_ids, future, lora_name=None):
             """Add a query to be evaluated in the next batch.
 
             The timeout is measured from the *first* queued query, not the most
@@ -329,7 +456,7 @@ else:
                 token_ids (list[int]): Token IDs representing the query prompt.
                 future (asyncio.Future): Future to store the result in.
             """
-            self.queries.append((token_ids, future))
+            self.queries.append((token_ids, future, lora_name))
 
             if len(self.queries) >= self.batch_size:
                 if self.timer:
@@ -342,7 +469,8 @@ else:
                 )
 
         def _batch_evaluate(self):
-            """Process all queued queries in a single batched ``generate()`` call."""
+            """Process all queued queries, one batched ``generate()`` per distinct LoRA
+            adapter (a single ``generate`` applies one adapter to all its prompts)."""
             queries, self.queries = self.queries, []
             if not queries:
                 return
@@ -353,51 +481,47 @@ else:
 
             if self.logprobs_capture is None:
                 exc = RuntimeError("Cannot use model after cleanup() has been called")
-                for _, future in queries:
+                for _, future, _ in queries:
                     future.set_exception(exc)
                 return
 
-            # Deduplicate: group futures by identical prompts
-            query_groups = defaultdict(list)
-            for token_ids, future in queries:
-                query_groups[tuple(token_ids)].append(future)
+            # Group by LoRA (one generate each), and dedup identical prompts within each.
+            by_lora = defaultdict(lambda: defaultdict(list))
+            for token_ids, future, lora_name in queries:
+                by_lora[lora_name][tuple(token_ids)].append(future)
 
-            unique_token_ids = list(query_groups.keys())
-
-            self.logprobs_capture.clear()
-
-            prompts = [
-                TokensPrompt(prompt_token_ids=list(token_ids))
-                for token_ids in unique_token_ids
-            ]
-
-            try:
-                self.llm_engine.generate(
-                    prompts=prompts,
-                    sampling_params=SamplingParams(**self.default_params),
-                    lora_request=self.lora_request,
-                    use_tqdm=False,
-                )
-
-                all_logprobs = self.logprobs_capture.get_all_logprobs()
-                assert all_logprobs is not None, "Logprobs should be captured"
-                assert all_logprobs.shape[0] == len(unique_token_ids), (
-                    f"Expected {len(unique_token_ids)} logprobs, got {all_logprobs.shape[0]}"
-                )
-
-                for i, key in enumerate(unique_token_ids):
-                    logprobs = all_logprobs[i]
-                    futures = query_groups[key]
-                    if len(futures) == 1:
-                        futures[0].set_result(logprobs)
-                    else:
+            for lora_name, query_groups in by_lora.items():
+                unique_token_ids = list(query_groups.keys())
+                self.logprobs_capture.clear()
+                prompts = [
+                    TokensPrompt(prompt_token_ids=list(token_ids))
+                    for token_ids in unique_token_ids
+                ]
+                try:
+                    self.llm_engine.generate(
+                        prompts=prompts,
+                        sampling_params=SamplingParams(**self.default_params),
+                        lora_request=self._lora_request_for(lora_name),
+                        use_tqdm=False,
+                    )
+                    all_logprobs = self.logprobs_capture.get_all_logprobs()
+                    assert all_logprobs is not None, "Logprobs should be captured"
+                    assert all_logprobs.shape[0] == len(unique_token_ids), (
+                        f"Expected {len(unique_token_ids)} logprobs, got {all_logprobs.shape[0]}"
+                    )
+                    for i, key in enumerate(unique_token_ids):
+                        logprobs = all_logprobs[i]
+                        futures = query_groups[key]
+                        if len(futures) == 1:
+                            futures[0].set_result(logprobs)
+                        else:
+                            for future in futures:
+                                future.set_result(logprobs.clone())
+                except Exception as exc:
+                    for futures in query_groups.values():
                         for future in futures:
-                            future.set_result(logprobs.clone())
-            except Exception as exc:
-                for futures in query_groups.values():
-                    for future in futures:
-                        if not future.done():
-                            future.set_exception(exc)
+                            if not future.done():
+                                future.set_exception(exc)
 
         def reset_async_queries(self):
             """Clear any pending queries from the queue.
@@ -415,7 +539,7 @@ else:
                 self.sample_timer.cancel()
                 self.sample_timer = None
 
-        def next_token_logprobs_sync(self, token_ids):
+        def next_token_logprobs_sync(self, token_ids, lora_name=None):
             """Request log probabilities of next token synchronously.
 
             Does not support auto-batching. For batched sync calls, use
@@ -423,11 +547,12 @@ else:
 
             Args:
                 token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
+                lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
 
             Returns:
                 (torch.Tensor): Normalized log probability tensor.
             """
-            key = tuple(token_ids)
+            key = (tuple(token_ids), lora_name)
 
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
@@ -440,7 +565,7 @@ else:
             self.llm_engine.generate(
                 prompts=TokensPrompt(prompt_token_ids=list(token_ids)),
                 sampling_params=SamplingParams(**self.default_params),
-                lora_request=self.lora_request,
+                lora_request=self._lora_request_for(lora_name),
                 use_tqdm=False,
             )
 
@@ -452,12 +577,13 @@ else:
 
             return result
 
-        def batch_next_token_logprobs_sync(self, token_ids_list):
+        def batch_next_token_logprobs_sync(self, token_ids_list, lora_name=None):
             """
             Request log probabilities of next tokens in a batch synchronously.
 
             Args:
                 token_ids_list (list[list[int]]): A list of token ID lists, each representing a prompt to the language model.
+                lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
 
             Returns:
                 (torch.Tensor): A tensor of normalized log probability tensors, one for each prompt in the input list.
@@ -482,7 +608,7 @@ else:
             self.llm_engine.generate(
                 prompts=prompts,
                 sampling_params=SamplingParams(**self.default_params),
-                lora_request=self.lora_request,
+                lora_request=self._lora_request_for(lora_name),
                 use_tqdm=False,
             )
 
@@ -583,9 +709,13 @@ else:
                         e,
                     )
 
-        def _add_sample_query(self, prompt_token_ids, sampling_params, future):
+        def _add_sample_query(
+            self, prompt_token_ids, sampling_params, future, lora_name=None
+        ):
             """Enqueue a ``sample()`` request; mirrors ``_add_query`` for the logprobs path."""
-            self.sample_queries.append((prompt_token_ids, sampling_params, future))
+            self.sample_queries.append(
+                (prompt_token_ids, sampling_params, future, lora_name)
+            )
             if len(self.sample_queries) >= self.batch_size:
                 if self.sample_timer:
                     self.sample_timer.cancel()
@@ -597,7 +727,8 @@ else:
                 )
 
         def _batch_sample_evaluate(self):
-            """Dispatch queued ``sample()`` requests in one batched ``generate()`` call."""
+            """Dispatch queued ``sample()`` requests, one batched ``generate()`` call
+            per distinct LoRA adapter."""
             queries, self.sample_queries = self.sample_queries, []
             if not queries:
                 return
@@ -606,23 +737,29 @@ else:
                 self.sample_timer = None
             if self.logprobs_capture is None:
                 exc = RuntimeError("Cannot use model after cleanup() has been called")
-                for _, _, future in queries:
+                for _, _, future, _ in queries:
                     future.set_exception(exc)
                 return
-            try:
-                outputs = self.llm_engine.generate(
-                    prompts=[TokensPrompt(prompt_token_ids=t) for t, _, _ in queries],
-                    sampling_params=[sp for _, sp, _ in queries],
-                    lora_request=self.lora_request,
-                    use_tqdm=False,
-                )
-                assert len(outputs) == len(queries)
-                for output, (_, _, future) in zip(outputs, queries):
-                    future.set_result(list(output.outputs[0].token_ids))
-            except Exception as exc:
-                for _, _, future in queries:
-                    if not future.done():
-                        future.set_exception(exc)
+            by_lora = defaultdict(list)
+            for query in queries:
+                by_lora[query[3]].append(query)
+            for lora_name, group in by_lora.items():
+                try:
+                    outputs = self.llm_engine.generate(
+                        prompts=[
+                            TokensPrompt(prompt_token_ids=t) for t, _, _, _ in group
+                        ],
+                        sampling_params=[sp for _, sp, _, _ in group],
+                        lora_request=self._lora_request_for(lora_name),
+                        use_tqdm=False,
+                    )
+                    assert len(outputs) == len(group)
+                    for output, (_, _, future, _) in zip(outputs, group):
+                        future.set_result(list(output.outputs[0].token_ids))
+                except Exception as exc:
+                    for _, _, future, _ in group:
+                        if not future.done():
+                            future.set_exception(exc)
 
         async def sample(
             self,
@@ -631,6 +768,7 @@ else:
             eos_token_ids,
             temperature=1.0,
             seed=None,
+            lora_name=None,
         ):
             """Sample from the language model.
 
@@ -643,6 +781,7 @@ else:
                 temperature (float, optional): The temperature to use to rescale the logits. Defaults to 1.0.
                 max_tokens (int): The maximum number of tokens to generate.
                 seed (int, optional): The seed for the random number generator. Defaults to None.
+                lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
 
             Returns:
                 (list[int]): The sampled token IDs.
@@ -658,8 +797,96 @@ else:
                     stop=[self.byte_vocab[i].decode() for i in eos_token_ids],
                 ),
                 future,
+                lora_name,
             )
             token_ids = await future
             if token_ids and token_ids[-1] in eos_token_ids:
                 token_ids = token_ids[:-1]
             return token_ids
+
+        def run_burst(
+            self,
+            control,
+            max_steps,
+        ):  # pragma: no cover
+            """Run one engine-native decode burst driven by an SMC ``control`` (an ``EngineControl``).
+
+            Attaches ``control`` to the persistent :class:`ControlSampler` and drives the
+            engine's decode loop for up to ``max_steps`` steps. The control owns what
+            requests exist: it queues the initial population and every mid-burst re-add via
+            :meth:`EngineControl.drain_adds`, and names rows to drop via
+            :meth:`EngineControl.drain_aborts`; we just (re-)prefill and abort accordingly
+            (the out-of-band pop-out -- a particle terminating, or rows at an ESS crossing).
+            Each step the control draws via :meth:`EngineControl.draw`. No EOS stop tokens,
+            no discard forward, and NO SMC logic (ESS/resample/weights all live in ``control``).
+
+            Args:
+                control (EngineControl): the SMC control object.
+                max_steps (int): maximum decode steps for the burst.
+            """
+            from vllm.sampling_params import RequestOutputKind
+
+            sampler = self._control_sampler
+            # self.llm_engine is the vLLM LLM; .llm_engine is the inner LLMEngine.
+            # Bind it once rather than hopping through both attrs at every call.
+            engine = self.llm_engine.llm_engine
+
+            sampling_params = SamplingParams(
+                n=1,
+                max_tokens=max_steps,
+                detokenize=False,
+                # Pop-out is the control's explicit abort_request, NOT an EOS stop
+                # token -- the control draws in its own vocab and ends rows out-of-band.
+                ignore_eos=True,
+                output_kind=RequestOutputKind.FINAL_ONLY,
+            )
+
+            # Engine request id is str(handle); track int handles, str<->int at the vLLM
+            # boundary only ({handle}-{8hex} is parsed only in ControlSampler._row_handles).
+            sampler.attach(control)
+            gone = set()  # handles finished by the engine or aborted
+            added = (
+                set()
+            )  # handles ever added (initial + mid-burst re-adds); finally net
+            try:
+                # The control owns what requests exist: drain its add-stream (initial
+                # population + mid-burst re-adds) and its abort-stream uniformly. Each
+                # engine.step() forwards + selects (control.draw returns the token now; it
+                # banks/resamples the PREVIOUS step on the main loop during this forward,
+                # the overlap). After the step we apply what that flagged: abort dropped
+                # rows, (re-)prefill added ones. No SMC logic here -- only abort/add plumbing.
+                def _drain():
+                    aborts = [h for h in control.drain_aborts() if h not in gone]
+                    if aborts:
+                        engine.abort_request([str(h) for h in aborts])
+                        gone.update(aborts)
+                    for handle, prompt, lora_name in control.drain_adds():
+                        engine.add_request(
+                            str(handle),
+                            TokensPrompt(prompt_token_ids=list(prompt)),
+                            sampling_params,
+                            lora_request=self._lora_request_for(lora_name),
+                        )
+                        added.add(handle)
+
+                _drain()  # seed the initial population (the control's first adds)
+                while engine.has_unfinished_requests():
+                    step_outputs = engine.step()
+                    for output in step_outputs:
+                        if output.finished:
+                            gone.add(int(output.request_id))
+                    _drain()
+                # Decode loop drained: let the control settle work deferred past the last
+                # step (the final bank), then drain whatever that flags.
+                control.on_burst_end()
+                _drain()
+            finally:
+                sampler.detach()
+                # Safety net: drop anything still running (an exception mid-burst, or
+                # a row that hit the max_steps length cap before the control aborted).
+                remaining = [str(h) for h in added if h not in gone]
+                if remaining and engine.has_unfinished_requests():
+                    with contextlib.suppress(Exception):
+                        engine.abort_request(remaining)
+            # Committed tokens are tracked control-side (the control banks each draw into
+            # its particle contexts), so run_burst returns nothing.

@@ -43,6 +43,14 @@ For LoRA support:
 pip install genlm-backend[lora]
 ```
 
+LoRA adapters are selected **per request**: register an adapter once with
+`add_new_lora(path, name)`, then pass `lora_name=name` to any forward
+(`next_token_logprobs`, `sample`, ...) or bind a handle with `lora_view(name)`;
+omitting `lora_name` (i.e. `None`) runs the base model. Re-registering an
+existing name rebinds it to new weights (old weights and caches are evicted) —
+a training loop pushes each update with the same `add_new_lora(new_path, name)`
+call. `remove_lora(name)` evicts an adapter explicitly.
+
 ## 🧪 Example: Autobatched Sequential Importance Sampling with LLMs
 
 This example demonstrates how `genlm-backend` enables concise, scalable probabilistic inference with language models. It implements a Sequential Importance Sampling (SIS) algorithm that makes asynchronous log-probabality requests which get automatically batched by the language model.
