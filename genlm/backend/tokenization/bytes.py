@@ -1,7 +1,6 @@
 """Functions to get the byte vocabulary from a HuggingFace tokenizer"""
 
 import re
-from transformers import AutoTokenizer
 
 
 class ByteDecoderError(Exception):
@@ -191,35 +190,31 @@ def _check_complex_roundtrip(tokenizer, byte_decoder):
         )
 
 
-# def _bytes_to_unicode():
-#    """Create a mapping from bytes to Unicode characters.
-#
-#    Returns:
-#        (dict): Mapping from byte values to Unicode characters
-#    """
-#    bs = (
-#        list(range(ord("!"), ord("~") + 1))
-#        + list(range(ord("¡"), ord("¬") + 1))
-#        + list(range(ord("®"), ord("ÿ") + 1))
-#    )
-#    cs = bs[:]
-#    n = 0
-#    for b in range(256):
-#        if b not in bs:
-#            bs.append(b)
-#            cs.append(256 + n)
-#            n += 1
-#    cs = [chr(n) for n in cs]
-#    return dict(zip(bs, cs))
+def _bytes_to_unicode():
+    """The canonical GPT-2 byte->unicode map (transformers' ``bytes_to_unicode``)."""
+    bs = (
+        list(range(ord("!"), ord("~") + 1))
+        + list(range(ord("¡"), ord("¬") + 1))
+        + list(range(ord("®"), ord("ÿ") + 1))
+    )
+    cs = bs[:]
+    n = 0
+    for b in range(256):
+        if b not in bs:
+            bs.append(b)
+            cs.append(256 + n)
+            n += 1
+    cs = [chr(n) for n in cs]
+    return dict(zip(bs, cs))
 
 
 def _get_default_byte_decoder():
-    """Get the default GPT-2 byte decoder with additional special character mappings.
+    """GPT-2 char->byte decoder (+ special chars).
 
-    Returns:
-        (dict): Mapping from characters to bytes including special characters
+    Reconstructed from ``_bytes_to_unicode`` rather than read off
+    ``GPT2Tokenizer.byte_decoder`` (dropped in transformers 5.x); identical map.
     """
-    byte_decoder = AutoTokenizer.from_pretrained("gpt2", use_fast=False).byte_decoder
+    byte_decoder = {ch: b for b, ch in _bytes_to_unicode().items()}
     byte_decoder.update(
         {
             " ": 32,
