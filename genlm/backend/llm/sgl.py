@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 from typing import Dict, List, Tuple, Optional
 from collections import deque
 import torch
@@ -9,7 +10,10 @@ from genlm.backend.llm.base import AsyncLM
 try:
     from sglang.srt.server_args import PortArgs, ServerArgs
     from sglang.srt.managers.scheduler import Scheduler
-    from sglang.srt.managers.io_struct import TokenizedGenerateReqInput as Request
+    from sglang.srt.managers.io_struct import (
+        TokenizedGenerateReqInput as Request,
+        LoadLoRAAdapterReqInput,
+    )
     from sglang.srt.sampling.sampling_params import SamplingParams
     from sglang.srt.distributed.parallel_state import (
         destroy_distributed_environment,
@@ -39,11 +43,12 @@ if not HAS_SGL:
 else:
     SP = SamplingParams(max_new_tokens=0)
 
-    def _make_request(token_ids: Tuple[int]) -> Request:
+    def _make_request(token_ids: Tuple[int], lora_id: Optional[str] = None) -> Request:
         """Construct a SGLang inference request object.
 
         Args:
             token_ids (Tuple[int]): The token IDs of the request.
+            lora_id (Optional[str]): UUID of the active LoRA adapter, or None for the base model.
 
         Returns:
             (Request): The Request object.
@@ -58,6 +63,7 @@ else:
             top_logprobs_num=-1,
             token_ids_logprob=[],
             stream=False,
+            lora_id=lora_id,
         )
         req.regenerate_rid()
         return req
@@ -94,10 +100,18 @@ else:
             self._queue: Optional[asyncio.Queue] = None
             self._task: Optional[asyncio.Task] = None
 
-            self._pending: Dict[Tuple[int, ...], List[asyncio.Future]] = {}
-            self._inflight: Dict[Tuple[int, ...], Request] = {}
+            # _pending, _inflight, and _rid_to_token_ids are all keyed by
+            # tuple(token_ids). Adapter switches wipe these (along with the
+            # output cache), so the cache only ever holds entries from the
+            # currently-active regime.
+            self._pending: Dict = {}
+            self._inflight: Dict = {}
+            self._rid_to_token_ids: Dict[str, tuple] = {}
 
-            self._rid_to_token_ids: Dict[str, Tuple[int, ...]] = {}
+            self._lora_name_to_id: Dict[str, str] = {}
+            # UUID of the currently-active LoRA adapter, or None for the
+            # base model. Plumbed into every TokenizedGenerateReqInput.
+            self._lora_id: Optional[str] = None
 
             super().__init__(tokenizer=self.tokenizer)
 
@@ -108,6 +122,11 @@ else:
             Args:
                 model_id (str): The name of the model to load.
                 engine_opts (dict, optional): Additional configuration options for the SGLang inference engine.
+                    To enable LoRA, pass at least ``{"enable_lora": True, "max_lora_rank": <r>,
+                    "lora_target_modules": [...]}``. ``max_loras_per_batch`` and
+                    ``lora_backend`` are also accepted; see SGLang's ``ServerArgs``
+                    for the full list. These must be set at construction time;
+                    they cannot be changed later.
                 gpu_id (int, optional): The GPU ID to use for the inference engine.
                 **kwargs: Additional arguments passed to the `AsyncSGLTransformer` constructor.
 
@@ -130,6 +149,67 @@ else:
             mod = Scheduler(server_args, port_args, gpu_id, 0, 0, 0, 0)
             mod.result_queue = deque()
             return cls(mod, **kwargs)
+
+        def add_new_lora(self, lora_path, lora_name="lora_1"):
+            """Load a LoRA adapter into the SGLang engine.
+
+            Args:
+                lora_path (str): Path to the adapter weights or HF hub identifier.
+                lora_name (str): Name to associate with the loaded adapter.
+
+            Notes:
+                Blocks the caller for the actual disk/GPU load duration. SGLang's
+                LoRA path is not lazy (unlike vLLM's), so this is a real I/O step.
+                Requires ``enable_lora=True`` in the engine options at construction.
+                Does not activate the adapter; call :meth:`set_lora` to enable it.
+            """
+            lora_id = uuid.uuid4().hex
+            req = LoadLoRAAdapterReqInput(
+                lora_name=lora_name,
+                lora_path=lora_path,
+                pinned=False,
+                lora_id=lora_id,
+            )
+            result = self.model.load_lora_adapter(req)
+            if not result.success:
+                raise RuntimeError(
+                    f"Failed to load LoRA adapter '{lora_name}' from '{lora_path}': "
+                    f"{result.error_message}"
+                )
+            self._lora_name_to_id[lora_name] = lora_id
+
+        def set_lora(self, lora_path=None, lora_name="lora_1"):
+            """Activate a previously loaded LoRA adapter.
+
+            Args:
+                lora_path: Unused; accepted for signature parity with the base class.
+                lora_name (str): Name of the adapter to activate (must match a prior ``add_new_lora`` call).
+
+            Notes:
+                Wipes the output cache and any in-flight tracking, so the
+                cache only ever holds entries from the currently-active
+                regime. Concurrent in-flight requests are cancelled.
+            """
+            if lora_name not in self._lora_name_to_id:
+                raise ValueError(
+                    f"A LoRA adapter named '{lora_name}' has not been loaded yet. "
+                    "Call add_new_lora() first."
+                )
+            self._lora_id = self._lora_name_to_id[lora_name]
+            self.reset_async_queries()
+            self.clear_cache()
+
+        def clear_lora(self):
+            """Deactivate any active LoRA adapter; subsequent requests use the base model.
+
+            Notes:
+                Adapter weights stay loaded in the engine; only the active
+                pointer is reset. Wipes the output cache and any in-flight
+                tracking; concurrent in-flight requests are cancelled.
+            """
+            self._lora_id = None
+            self.reset_async_queries()
+            self.clear_cache()
 
         def clear_cache(self):
             """Clear the logprobs output cache."""
@@ -198,15 +278,14 @@ else:
             if not token_ids:
                 raise ValueError("Token ids must not be empty")
 
-            key = tuple(token_ids)
+            token_tuple = tuple(token_ids)
+            if self.cache is not None and token_tuple in self.cache:
+                return self.cache[token_tuple]
 
-            if self.cache is not None and key in self.cache:
-                return self.cache[key]
-
-            out = await self._queue_request(key)
+            out = await self._queue_request(token_tuple)
 
             if self.cache is not None:
-                self.cache[key] = out
+                self.cache[token_tuple] = out
 
             return out
 
@@ -230,32 +309,32 @@ else:
             Returns:
                 (torch.Tensor): A tensor of normalized log probability tensors.
             """
+            input_keys = [tuple(t) for t in token_ids_list]
             results = {}
             to_compute = []
 
-            for token_ids in token_ids_list:
-                if not token_ids:
+            for token_tuple in input_keys:
+                if not token_tuple:
                     raise ValueError("Token ids must not be empty")
-                key = tuple(token_ids)
-                if self.cache is not None and key in self.cache:
-                    results[key] = self.cache[key]
-                elif key not in results:
-                    to_compute.append(key)
-                    results[key] = None
+                if self.cache is not None and token_tuple in self.cache:
+                    results[token_tuple] = self.cache[token_tuple]
+                elif token_tuple not in results:
+                    to_compute.append(token_tuple)
+                    results[token_tuple] = None
 
             if to_compute:
                 requests = []
-                for key in to_compute:
-                    req = _make_request(key)
-                    self._rid_to_token_ids[req.rid] = key
+                for token_tuple in to_compute:
+                    req = _make_request(token_tuple, lora_id=self._lora_id)
+                    self._rid_to_token_ids[req.rid] = token_tuple
                     requests.append(req)
 
-                for key, logprobs in self._batch_evaluate(requests):
-                    results[key] = logprobs
+                for token_tuple, logprobs in self._batch_evaluate(requests):
+                    results[token_tuple] = logprobs
                     if self.cache is not None:
-                        self.cache[key] = logprobs
+                        self.cache[token_tuple] = logprobs
 
-            return torch.stack([results[tuple(t)] for t in token_ids_list])
+            return torch.stack([results[k] for k in input_keys])
 
         def _register(self, token_ids: Tuple[int], future: asyncio.Future):
             """Register a request with the SGLang inference engine.
@@ -271,13 +350,12 @@ else:
                 return None
 
             key = tuple(token_ids)
-
             self._pending.setdefault(key, []).append(future)
 
             if key in self._inflight:
                 return None
 
-            req = _make_request(token_ids)
+            req = _make_request(token_ids, lora_id=self._lora_id)
             self._rid_to_token_ids[req.rid] = key
             self._inflight[key] = req
             return req
@@ -322,10 +400,10 @@ else:
 
                     for i, req in enumerate(batch.reqs):
                         if req.finished():
-                            token_ids = self._rid_to_token_ids.pop(req.rid, None)
-                            if token_ids is None:
+                            key = self._rid_to_token_ids.pop(req.rid, None)
+                            if key is None:
                                 continue  # pragma: no cover
-                            yield token_ids, logprobs[i]
+                            yield key, logprobs[i]
 
         async def _background_loop(self):
             """Background task that processes queued requests from the queue."""
@@ -333,9 +411,9 @@ else:
             try:
                 while True:
                     requests = await self._drain_queue()
-                    for token_ids, logprobs in self._batch_evaluate(requests):
-                        waiters = self._pending.pop(token_ids, [])
-                        self._inflight.pop(token_ids, None)
+                    for key, logprobs in self._batch_evaluate(requests):
+                        waiters = self._pending.pop(key, [])
+                        self._inflight.pop(key, None)
                         for f in waiters:
                             f.set_result(logprobs)
 
@@ -351,7 +429,15 @@ else:
                 raise
 
         def _cleanup_engine(self):
-            """Clean up the SGLang inference engine and distributed environment."""
+            """Clean up the SGLang inference engine and release GPU memory.
+
+            sglang's ``Scheduler`` has no public shutdown method — it's
+            designed to live until process exit. But when it's instantiated
+            directly (the in-process pattern this wrapper uses), it's a
+            plain Python object with no background threads. Dropping the
+            reference plus emptying PyTorch's caching allocator releases
+            the model weights and KV pool back to the GPU.
+            """
             if getattr(self, "model", None) is None:
                 return  # pragma: no cover
             try:
@@ -360,6 +446,9 @@ else:
                 destroy_distributed_environment()
             except Exception:  # pragma: no cover
                 pass  # pragma: no cover
+            self.model = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         def __del__(self):  # pragma: no cover
             """Clean up the SGLang inference engine when the instance is deleted."""

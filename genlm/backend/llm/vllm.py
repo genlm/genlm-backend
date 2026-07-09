@@ -250,6 +250,7 @@ else:
             Disable any active LoRA adapter for the vLLM engine.
             """
             self.lora_request = None
+            self.clear_cache()
 
         def add_new_lora(self, lora_path, lora_name="lora_1"):
             """Load a LoRA adapter into the base model by creating a unique id for it.
@@ -290,6 +291,7 @@ else:
             self.lora_request = LoRARequest(
                 lora_name, self.lora_name_to_ids[lora_name], lora_path
             )
+            self.clear_cache()
 
         async def next_token_logprobs(self, token_ids):
             """Request log probabilities of next token asynchronously with auto-batching.
