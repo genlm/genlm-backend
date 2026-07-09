@@ -230,7 +230,7 @@ def test_from_name_with_options(model_name):
     bitsandbytes_opts = {"load_in_4bit": True}
     hf_opts = {
         "device_map": "auto",
-        "torch_dtype": torch.float16,
+        "dtype": torch.float16,
     }
 
     model = AsyncTransformer.from_name(
