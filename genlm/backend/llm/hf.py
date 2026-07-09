@@ -419,4 +419,4 @@ class AsyncTransformer(AsyncLM):
                 past_key_values=None,
                 use_cache=False,
             ).logits[0]
-            return torch.log_softmax(logits[-1], dim=0)
+            return torch.log_softmax(logits[-1], dim=0, dtype=torch.float32)

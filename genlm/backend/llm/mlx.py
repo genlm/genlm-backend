@@ -342,7 +342,7 @@ else:
                 inputs_padded = inputs_padded[:, n_to_process:]
 
             logits = self.mlx_lm_model(inputs_padded, cache=prompt_cache)
-            logits = logits[:, -1, :]
+            logits = logits[:, -1, :].astype(mx.float32)
             logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
             mx.async_eval(logprobs)
 
