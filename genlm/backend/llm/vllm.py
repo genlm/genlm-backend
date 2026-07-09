@@ -341,8 +341,83 @@ else:
                     self.timeout, self._batch_evaluate
                 )
 
+        def _prefill_step_limits(self):
+            """``(max_num_batched_tokens, max_num_seqs)`` from the scheduler (cached).
+            A ``generate`` stays in one prefill step (what ``GlobalLogprobsCapture``
+            needs) only under both limits; ``_sub_batches`` uses them to keep it.
+            """
+            limits = getattr(self, "_cached_prefill_limits", None)
+            if limits is None:
+                # Conservative fallback, only reached if the scheduler config can't
+                # be read: too small just over-splits, too large would span prefill
+                # steps and drop rows (then _capture_logprobs raises).
+                max_tokens, max_seqs = 512, 128
+                try:
+                    cfg = self.llm_engine.llm_engine.vllm_config.scheduler_config
+                    max_tokens = int(cfg.max_num_batched_tokens) or max_tokens
+                    max_seqs = int(cfg.max_num_seqs) or max_seqs
+                except Exception:
+                    logging.getLogger("genlm.backend").warning(
+                        "Could not read scheduler_config; using conservative prefill "
+                        "limits (%d tokens, %d seqs).",
+                        max_tokens,
+                        max_seqs,
+                    )
+                limits = (max_tokens, max_seqs)
+                self._cached_prefill_limits = limits
+            return limits
+
+        @staticmethod
+        def _sub_batches(token_id_tuples, max_tokens, max_seqs):
+            """Greedily pack prompts into sub-batches within both ``max_tokens`` total
+            tokens and ``max_seqs`` prompts, so each runs in one prefill step. A prompt
+            longer than ``max_tokens`` becomes its own sub-batch (a single prompt still
+            yields one capture row, its final prefill chunk).
+            """
+            batch, total = [], 0
+            for t in token_id_tuples:
+                if batch and (total + len(t) > max_tokens or len(batch) >= max_seqs):
+                    yield batch
+                    batch, total = [], 0
+                batch.append(t)
+                total += len(t)
+            if batch:
+                yield batch
+
+        def _capture_logprobs(self, token_id_tuples):
+            """``[len(prompts), V]`` logprobs in input order. Sub-batches so each
+            ``generate()`` is one prefill step and yields one capture row per prompt
+            (a multi-step batch would drop rows)."""
+            if not token_id_tuples:
+                raise ValueError("no prompts to evaluate")
+            max_tokens, max_seqs = self._prefill_step_limits()
+            rows = []
+            for sub in self._sub_batches(token_id_tuples, max_tokens, max_seqs):
+                self.logprobs_capture.clear()
+                self.llm_engine.generate(
+                    prompts=[TokensPrompt(prompt_token_ids=list(t)) for t in sub],
+                    sampling_params=SamplingParams(**self.default_params),
+                    lora_request=self.lora_request,
+                    use_tqdm=False,
+                )
+                all_logprobs = self.logprobs_capture.get_all_logprobs()
+                # Explicit checks (not asserts) so the row-count guard survives python -O.
+                if all_logprobs is None:
+                    raise RuntimeError("logprobs were not captured")
+                if all_logprobs.shape[0] != len(sub):
+                    raise RuntimeError(
+                        f"Expected {len(sub)} logprobs, got {all_logprobs.shape[0]}"
+                    )
+                rows.append(all_logprobs)
+            return rows[0] if len(rows) == 1 else torch.cat(rows, dim=0)
+
         def _batch_evaluate(self):
-            """Process all queued queries in a single batched ``generate()`` call."""
+            """Resolve all queued queries via batched ``generate()`` calls.
+
+            Prompts go through :meth:`_capture_logprobs` (one-prefill-step sub-batches);
+            all rows are collected before any future is set, so a sub-batch failure
+            fails the batch atomically instead of half-fulfilling it.
+            """
             queries, self.queries = self.queries, []
             if not queries:
                 return
@@ -364,30 +439,12 @@ else:
 
             unique_token_ids = list(query_groups.keys())
 
-            self.logprobs_capture.clear()
-
-            prompts = [
-                TokensPrompt(prompt_token_ids=list(token_ids))
-                for token_ids in unique_token_ids
-            ]
-
             try:
-                self.llm_engine.generate(
-                    prompts=prompts,
-                    sampling_params=SamplingParams(**self.default_params),
-                    lora_request=self.lora_request,
-                    use_tqdm=False,
-                )
-
-                all_logprobs = self.logprobs_capture.get_all_logprobs()
-                assert all_logprobs is not None, "Logprobs should be captured"
-                assert all_logprobs.shape[0] == len(unique_token_ids), (
-                    f"Expected {len(unique_token_ids)} logprobs, got {all_logprobs.shape[0]}"
-                )
-
+                # Collect first, resolve last: keeps the whole batch all-or-nothing.
+                rows = self._capture_logprobs(unique_token_ids)
                 for i, key in enumerate(unique_token_ids):
-                    logprobs = all_logprobs[i]
-                    futures = query_groups[key]
+                    logprobs = rows[i]
+                    futures = [f for f in query_groups[key] if not f.done()]
                     if len(futures) == 1:
                         futures[0].set_result(logprobs)
                     else:
@@ -435,17 +492,7 @@ else:
             if self.logprobs_capture is None:
                 raise RuntimeError("Cannot use model after cleanup() has been called")
 
-            self.logprobs_capture.clear()
-
-            self.llm_engine.generate(
-                prompts=TokensPrompt(prompt_token_ids=list(token_ids)),
-                sampling_params=SamplingParams(**self.default_params),
-                lora_request=self.lora_request,
-                use_tqdm=False,
-            )
-
-            result = self.logprobs_capture.get_logprobs(batch_index=0)
-            assert result is not None, "Logprobs should be captured by global processor"
+            result = self._capture_logprobs([tuple(token_ids)])[0]
 
             if self.cache is not None:
                 self.cache[key] = result
@@ -453,8 +500,7 @@ else:
             return result
 
         def batch_next_token_logprobs_sync(self, token_ids_list):
-            """
-            Request log probabilities of next tokens in a batch synchronously.
+            """Request log probabilities of next tokens in a batch synchronously.
 
             Args:
                 token_ids_list (list[list[int]]): A list of token ID lists, each representing a prompt to the language model.
@@ -469,31 +515,13 @@ else:
             """
             if self.logprobs_capture is None:
                 raise RuntimeError("Cannot use model after cleanup() has been called")
-            # Clear any stale captured logprobs
-            self.logprobs_capture.clear()
+            if not token_ids_list:
+                return torch.empty(0, len(self.byte_vocab))  # 2-D, matches [N, V]
 
-            # Create prompts for batch
-            prompts = [
-                TokensPrompt(prompt_token_ids=list(token_ids))
-                for token_ids in token_ids_list
-            ]
-
-            # Generate one token for each prompt
-            self.llm_engine.generate(
-                prompts=prompts,
-                sampling_params=SamplingParams(**self.default_params),
-                lora_request=self.lora_request,
-                use_tqdm=False,
-            )
-
-            # Get all captured logprobs at once (optimized - single clone)
-            all_logprobs = self.logprobs_capture.get_all_logprobs()
-            assert all_logprobs is not None, "Logprobs should be captured"
-            assert all_logprobs.shape[0] == len(token_ids_list), (
-                f"Expected {len(token_ids_list)} logprobs, got {all_logprobs.shape[0]}"
-            )
-
-            return all_logprobs
+            # Sub-batch via the shared helper so each generate() is one prefill step
+            # (GlobalLogprobsCapture keeps only the last step's rows). No dedup here;
+            # every prompt is re-evaluated and returned in input order.
+            return self._capture_logprobs([tuple(t) for t in token_ids_list])
 
         def clear_cache(self):
             """Clear output cache."""
