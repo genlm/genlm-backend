@@ -1,29 +1,14 @@
-"""Engine-native SMC seams.
+"""The contract an SMC controller (in genlm-control) implements to drive a vLLM
+engine step-locked from inside the sampler. The backend owns no algorithm logic.
 
-This module defines the *only* contract the SMC "controller" (which lives entirely in
-genlm-control) needs to implement in order to drive a vLLM engine step-locked
-from inside the sampler. The backend owns NO algorithm logic: there is no
-driver, no ESS, no resampling, no weight bookkeeping here. The contract is four
-methods -- :meth:`EngineControl.draw` (select a token per row),
-:meth:`EngineControl.drain_aborts` / :meth:`EngineControl.drain_adds` (the abort
-and add streams the control drives the engine with -- the initial population is
-just the first adds), and :meth:`EngineControl.on_burst_end` (settle work the
-control deferred past the last step) -- plus a way to learn which particle each
-batch row corresponds to.
+The unit is a **group**: one logical sequence decoded under K weight-views, run as
+K engine requests the backend keeps in lockstep — every group handed to
+:meth:`EngineControl.draw` has all K views' logits, and the returned token is
+committed to all K. Partial scheduling never reaches the control.
 
-The arm that consumes this contract is :class:`genlm.backend.llm.vllm.ControlSampler`,
-a swapped-in ``vllm.v1.sample.sampler.Sampler`` whose ``forward`` calls back into
-the controller. The controller is held by direct in-process reference; nothing is smuggled
-through a registry or ``extra_args``.
-
-Row -> request identity
------------------------
-Row ``i``'s request is ``model_runner.input_batch.req_ids[i]`` (the authoritative
-row->id source the model runner itself scatters tokens by). Those are vLLM's
-*internal* ids -- the external id with 8 random chars appended
-(``f"{external}-{random_uuid():.8}"``). ``ControlSampler`` strips that suffix and
-hands the control its own external handle (int), so the control never parses the
-backend's id format.
+The consuming arm is :class:`genlm.backend.llm.vllm.ControlSampler`, a swapped-in
+``vllm.v1.sample.sampler.Sampler`` holding the control by direct in-process
+reference.
 """
 
 from __future__ import annotations
@@ -34,47 +19,35 @@ from typing import Protocol, Sequence
 class EngineControl(Protocol):
     """The seam the SMC controller implements to drive an in-engine decode window.
 
-    Implementations live in genlm-control. The backend depends on nothing in
-    genlm-control; this Protocol is the entire interface.
+    Implementations live in genlm-control; this Protocol is the entire interface.
     """
 
-    def draw(self, logits, handles: Sequence[int]):
-        """Draw one token id per row from the step's ``[num_rows, vocab]`` logits.
-
-        ``handles[i]`` is the control's own request handle owning row ``i`` (the
-        backend strips its internal id format). Returns a length-``num_rows`` tensor
-        or list of token ids. Pop-out is out-of-band via :meth:`drain_aborts`, not
-        the drawn token. ``SamplingMetadata`` is not passed: the control draws in its
-        own vocab/temperature.
+    def draw(self, logits, groups: Sequence[int]):
+        """Draw one token id per group from ``[G, K, vocab]`` logits; returns a
+        length-``G`` tensor or list. ``logits[g, k]`` is view ``k`` of group
+        ``groups[g]``; every group present is complete. A group already flagged
+        for abort may appear until the abort drains — return any valid id for it.
+        Pop-out is out-of-band via :meth:`drain_aborts`, never the drawn token.
         """
         ...
 
     def drain_aborts(self) -> Sequence[int]:
-        """External request indices (the ``str(i)`` ``run_burst`` submitted, as
-        ints) to abort, accumulated since the last call and cleared on read.
-
-        ``run_burst`` calls this after every ``engine.step()`` and issues
-        ``abort_request`` for the returned rows -- the out-of-band pop-out that
-        replaces an EOS-stop draw. The controller flags a row when its particle
-        terminates (staggered) or, all live rows at once, when its ESS test crosses.
+        """Group handles to abort, accumulated since the last call, cleared on
+        read. Called after every ``engine.step()``; all K of a group's requests
+        are aborted.
         """
         ...
 
     def drain_adds(self):
-        """``(ext_id, prompt_token_ids, lora_name)`` requests to (re-)add to the
-        engine, accumulated since the last call and cleared on read.
-
-        ``run_burst`` calls this once before the loop (seeding the initial population)
-        and after every ``engine.step()``, issuing ``add_request`` for each. ``ext_id``
-        is a fresh control handle (so there is no abort/add id race); the control maps
-        it back to its (particle, view). Empty for a step with nothing to add.
+        """``(handle, prompts, lora_names)`` groups to (re-)add, accumulated since
+        the last call, cleared on read. ``prompts``/``lora_names`` are K-long.
+        ``handle`` must be fresh (no abort/add id race). Called once before the
+        loop and after every ``engine.step()``.
         """
         ...
 
     def on_burst_end(self):
-        """Settle any work the control deferred past the last decode step (e.g. a
-        deferred bank), called once after the loop drains and before the final
-        ``drain_aborts`` / ``drain_adds``. The backend stays oblivious to what is
-        settled; it only drains what this flags.
+        """Settle work the control deferred past the last decode step, called once
+        after the loop drains and before the final drains.
         """
         ...

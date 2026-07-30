@@ -138,52 +138,102 @@ else:
             with self._lock:
                 self._captured_batch = None
 
+    class _GroupTable:  # pragma: no cover
+        """``run_burst``'s group ledger: one control handle = K engine requests in
+        lockstep. A partially scheduled group is flushed and re-added at its
+        committed context (prefix-cached); the control only ever sees complete
+        groups.
+        """
+
+        def __init__(self):
+            self._next_req = 0
+            self.owner = {}  # engine req id (int) -> (group handle, view idx)
+            self.reqs = {}  # group handle -> [engine req id per view]
+            self.prompts = {}  # group handle -> [committed prompt ids per view]
+            self.loras = {}  # group handle -> [lora name per view]
+            self.eng_adds = []  # queued (req_id, prompt, lora_name) engine adds
+            self.eng_aborts = []  # queued engine req id aborts
+
+        def add_group(self, handle, prompts, loras):
+            self.prompts[handle] = [list(p) for p in prompts]
+            self.loras[handle] = list(loras)
+            self._enqueue(handle)
+
+        def _enqueue(self, handle):
+            """Queue engine adds for all K views at the committed context, under
+            fresh request ids (an id is never reused across a flush)."""
+            rids = []
+            for prompt, lora in zip(self.prompts[handle], self.loras[handle]):
+                rid = self._next_req
+                self._next_req += 1
+                self.owner[rid] = (handle, len(rids))
+                self.eng_adds.append((rid, list(prompt), lora))
+                rids.append(rid)
+            self.reqs[handle] = rids
+
+        def abort_group(self, handle):
+            for rid in self.reqs.pop(handle, ()):
+                self.owner.pop(rid, None)
+                self.eng_aborts.append(rid)
+            self.prompts.pop(handle, None)
+            self.loras.pop(handle, None)
+
+        def commit(self, handle, token_id):
+            """Record the drawn token against all K views' contexts."""
+            for prompt in self.prompts[handle]:
+                prompt.append(token_id)
+
+        def stall(self, handle):
+            """Flush all K requests and re-add them at the committed context."""
+            for rid in self.reqs.get(handle, ()):
+                self.owner.pop(rid, None)
+                self.eng_aborts.append(rid)
+            self._enqueue(handle)
+
+        def drain_engine(self):
+            """Queued (aborts, adds) for the engine, cleared on read."""
+            aborts, self.eng_aborts = self.eng_aborts, []
+            adds, self.eng_adds = self.eng_adds, []
+            return aborts, adds
+
     class ControlSampler(Sampler):  # pragma: no cover
         """A ``Sampler`` whose decode step is driven by an SMC control object (an ``EngineControl``).
 
-        This is a thin engine *arm*: it owns no SMC logic. When a control object
-        (:class:`~genlm.backend.llm.engine_control.EngineControl`) is attached
-        for the current burst, :meth:`forward` reproduces the stock sampler's
-        logits-shaping pipeline and then hands off to it:
+        This is a thin engine *arm*: it owns no SMC logic. With a control attached,
+        :meth:`forward` reproduces the stock sampler's logits-shaping pipeline
+        (raw logprobs, float32, both processor classes -- so
+        :class:`GlobalLogprobsCapture` still sees post-processor logits), then
+        assembles complete groups from the :class:`_GroupTable` (stalling partial
+        ones), hands ``[G, K, vocab]`` logits to ``control.draw``, and commits each
+        group's token to all K rows. Pop-out is out-of-band via
+        :meth:`EngineControl.drain_aborts`, never an EOS draw.
 
-        1. compute raw logprobs if requested (stock behavior),
-        2. cast logits to float32 (stock behavior),
-        3. ``apply_logits_processors(...)`` -- the non-argmax-invariant
-           processors and penalties (stock behavior),
-        4. apply the argmax-invariant processors -- this is where
-           :class:`GlobalLogprobsCapture` lives, so full-vocab logprob capture
-           keeps working and reflects the post-processor logits,
-        5. ``control.draw(logits, rows)`` -- the control forms its own proposal from the
-           logits and draws one token per row,
-        6. package the drawn ids into a :class:`SamplerOutput`.
-
-        Pop-out is out-of-band: ``run_burst`` aborts the rows the control names in
-        :meth:`EngineControl.drain_aborts` after each step (not via an EOS draw).
-
-        When no control is attached, :meth:`forward` defers entirely to
-        ``super().forward`` so normal generation and the ``next_token_logprobs``
+        With no control attached, :meth:`forward` defers entirely to
+        ``super().forward`` -- normal generation and the ``next_token_logprobs``
         paths are byte-for-byte unaffected.
 
         Row -> request identity is read from ``model_runner.input_batch.req_ids``
-        (see :mod:`genlm.backend.llm.engine_control`). The sampler is constructed
-        with a reference to its ``model_runner`` for exactly this.
+        (see :mod:`genlm.backend.llm.engine_control`).
         """
 
         def __init__(self, logprobs_mode, model_runner):
             super().__init__(logprobs_mode=logprobs_mode)
             self._model_runner = model_runner
             self._control = None
+            self._table = None
 
-        def attach(self, control):
-            """Bind the control object that drives the current burst (or ``None``)."""
+        def attach(self, control, table):
+            """Bind the control + group table that drive the current burst."""
             self._control = control
+            self._table = table
 
         def detach(self):
             """Unbind any control; subsequent steps behave like the stock sampler."""
             self._control = None
+            self._table = None
 
-        def _row_handles(self, num_rows):
-            """Row -> control handle (int); strips vLLM's ``{ext}-{8char}`` internal id."""
+        def _row_reqs(self, num_rows):
+            """Row -> engine req id (int); strips vLLM's ``{ext}-{8char}`` internal id."""
             req_ids = self._model_runner.input_batch.req_ids
             return [int(r.rsplit("-", 1)[0]) for r in req_ids[:num_rows]]
 
@@ -230,14 +280,37 @@ else:
             for processor in sampling_metadata.logitsprocs.argmax_invariant:
                 logits = processor.apply(logits)
 
-            rows = self._row_handles(logits.shape[0])
+            table = self._table
+            rows = self._row_reqs(logits.shape[0])
 
-            # Hand the draw to the control (it forms its own proposal from the logits).
-            sampled = control.draw(logits, rows)
+            # Assemble groups: handle -> per-view row index for this step's batch.
+            slots = {}
+            for i, rid in enumerate(rows):
+                ov = table.owner.get(rid)  # None: flushed/aborted but still scheduled
+                if ov is None:
+                    continue
+                handle, vi = ov
+                slots.setdefault(handle, [None] * len(table.reqs[handle]))[vi] = i
+            full = [h for h, s in slots.items() if all(i is not None for i in s)]
+            for h in slots:
+                if h not in full:
+                    table.stall(h)
 
-            if not isinstance(sampled, torch.Tensor):
-                sampled = torch.tensor(sampled, dtype=torch.int64, device=logits.device)
-            sampled = sampled.to(logits.device).long().view(-1)
+            # Placeholder for rows of stalled/dead groups (flushed before commit).
+            sampled = torch.zeros(len(rows), dtype=torch.int64, device=logits.device)
+            if full:
+                idx = torch.tensor(
+                    [slots[h] for h in full], dtype=torch.int64, device=logits.device
+                )
+                tokens = control.draw(logits[idx], full)  # [G, K, vocab] -> [G]
+                if not isinstance(tokens, torch.Tensor):
+                    tokens = torch.tensor(
+                        tokens, dtype=torch.int64, device=logits.device
+                    )
+                tokens = tokens.to(logits.device).long().view(-1)
+                for h, t in zip(full, tokens.tolist()):
+                    table.commit(h, int(t))
+                sampled[idx.view(-1)] = tokens.repeat_interleave(idx.shape[1])
 
             logprobs_tensors = None
             if num_logprobs is not None and raw_logprobs is not None:
@@ -813,12 +886,10 @@ else:
 
             Attaches ``control`` to the persistent :class:`ControlSampler` and drives the
             engine's decode loop for up to ``max_steps`` steps. The control owns what
-            requests exist: it queues the initial population and every mid-burst re-add via
-            :meth:`EngineControl.drain_adds`, and names rows to drop via
-            :meth:`EngineControl.drain_aborts`; we just (re-)prefill and abort accordingly
-            (the out-of-band pop-out -- a particle terminating, or rows at an ESS crossing).
-            Each step the control draws via :meth:`EngineControl.draw`. No EOS stop tokens,
-            no discard forward, and NO SMC logic (ESS/resample/weights all live in ``control``).
+            groups exist (adds/aborts via its drain streams; one handle = K lockstep
+            engine requests, see :class:`_GroupTable`) and draws each step via
+            :meth:`EngineControl.draw`. No EOS stop tokens, no discard forward, no SMC
+            logic here.
 
             Args:
                 control (EngineControl): the SMC control object.
@@ -841,33 +912,33 @@ else:
                 output_kind=RequestOutputKind.FINAL_ONLY,
             )
 
-            # Engine request id is str(handle); track int handles, str<->int at the vLLM
-            # boundary only ({handle}-{8hex} is parsed only in ControlSampler._row_handles).
-            sampler.attach(control)
-            gone = set()  # handles finished by the engine or aborted
-            added = (
-                set()
-            )  # handles ever added (initial + mid-burst re-adds); finally net
+            # Engine request id is str(table req id); the group table owns the int
+            # ids ({rid}-{8hex} is parsed only in ControlSampler._row_reqs).
+            table = _GroupTable()
+            sampler.attach(control, table)
+            gone = set()  # engine req ids finished by the engine or aborted
+            added = set()  # engine req ids ever added; finally net
             try:
-                # The control owns what requests exist: drain its add-stream (initial
-                # population + mid-burst re-adds) and its abort-stream uniformly. Each
-                # engine.step() forwards + selects (control.draw returns the token now; it
-                # banks/resamples the PREVIOUS step on the main loop during this forward,
-                # the overlap). After the step we apply what that flagged: abort dropped
-                # rows, (re-)prefill added ones. No SMC logic here -- only abort/add plumbing.
+                # Control abort/add streams route through the table, whose engine
+                # queues also hold stall flushes from the last step's forward.
                 def _drain():
-                    aborts = [h for h in control.drain_aborts() if h not in gone]
+                    for handle in control.drain_aborts():
+                        table.abort_group(handle)
+                    for handle, prompts, loras in control.drain_adds():
+                        table.add_group(handle, prompts, loras)
+                    aborts, adds = table.drain_engine()
+                    aborts = [r for r in aborts if r not in gone]
                     if aborts:
-                        engine.abort_request([str(h) for h in aborts])
+                        engine.abort_request([str(r) for r in aborts])
                         gone.update(aborts)
-                    for handle, prompt, lora_name in control.drain_adds():
+                    for rid, prompt, lora_name in adds:
                         engine.add_request(
-                            str(handle),
+                            str(rid),
                             TokensPrompt(prompt_token_ids=list(prompt)),
                             sampling_params,
                             lora_request=self._lora_request_for(lora_name),
                         )
-                        added.add(handle)
+                        added.add(rid)
 
                 _drain()  # seed the initial population (the control's first adds)
                 while engine.has_unfinished_requests():
