@@ -222,6 +222,11 @@ else:
             self._control = None
             self._table = None
 
+        @property
+        def active(self):
+            """Whether a burst currently drives the engine's decode loop."""
+            return self._control is not None
+
         def attach(self, control, table):
             """Bind the control + group table that drive the current burst."""
             self._control = control
@@ -517,6 +522,18 @@ else:
 
             return result
 
+        def _reject_during_burst(self):
+            """A burst owns the decode loop: any other ``generate`` re-enters it through
+            the attached ``ControlSampler`` and deadlocks (the draw hops to the loop this
+            call is blocking). Every forward inside a burst must come from its injected
+            views instead."""
+            if self._control_sampler is not None and self._control_sampler.active:
+                raise RuntimeError(
+                    "logprobs forward requested while an engine burst is running; it "
+                    "would re-enter the burst's decode loop. This potential must be "
+                    "served from the burst's injected views (see burst_blocker)."
+                )
+
         def _add_query(self, token_ids, future, lora_name=None):
             """Add a query to be evaluated in the next batch.
 
@@ -529,6 +546,7 @@ else:
                 token_ids (list[int]): Token IDs representing the query prompt.
                 future (asyncio.Future): Future to store the result in.
             """
+            self._reject_during_burst()
             self.queries.append((token_ids, future, lora_name))
 
             if len(self.queries) >= self.batch_size:
@@ -554,6 +572,13 @@ else:
 
             if self.logprobs_capture is None:
                 exc = RuntimeError("Cannot use model after cleanup() has been called")
+                for _, future, _ in queries:
+                    future.set_exception(exc)
+                return
+
+            try:  # queued before the burst opened, fired inside it
+                self._reject_during_burst()
+            except RuntimeError as exc:
                 for _, future, _ in queries:
                     future.set_exception(exc)
                 return
@@ -633,6 +658,7 @@ else:
             if self.logprobs_capture is None:
                 raise RuntimeError("Cannot use model after cleanup() has been called")
 
+            self._reject_during_burst()
             self.logprobs_capture.clear()
 
             self.llm_engine.generate(
@@ -668,6 +694,7 @@ else:
             """
             if self.logprobs_capture is None:
                 raise RuntimeError("Cannot use model after cleanup() has been called")
+            self._reject_during_burst()
             # Clear any stale captured logprobs
             self.logprobs_capture.clear()
 
