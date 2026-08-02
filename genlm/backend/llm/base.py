@@ -38,6 +38,7 @@ class AsyncLM(ABC):
     """
 
     supports_burst = False  # overridden True by backends with run_burst
+    burst_active = False  # True while a burst owns this model's decode loop
 
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer

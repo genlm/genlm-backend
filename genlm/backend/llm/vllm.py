@@ -522,12 +522,16 @@ else:
 
             return result
 
+        @property
+        def burst_active(self):
+            return self._control_sampler is not None and self._control_sampler.active
+
         def _reject_during_burst(self):
             """A burst owns the decode loop: any other ``generate`` re-enters it through
             the attached ``ControlSampler`` and deadlocks (the draw hops to the loop this
             call is blocking). Every forward inside a burst must come from its injected
             views instead."""
-            if self._control_sampler is not None and self._control_sampler.active:
+            if self.burst_active:
                 raise RuntimeError(
                     "logprobs forward requested while an engine burst is running; it "
                     "would re-enter the burst's decode loop. This potential must be "
