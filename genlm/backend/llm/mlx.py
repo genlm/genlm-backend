@@ -1,5 +1,7 @@
 import asyncio
+import json
 from collections import defaultdict
+from pathlib import Path
 
 import torch
 
@@ -9,6 +11,7 @@ from genlm.backend.llm.base import AsyncLM
 try:
     import mlx.core as mx
     import mlx_lm
+    from mlx.utils import tree_flatten, tree_unflatten
     from mlx_lm.generate import (
         _left_pad_prompts,
         _make_cache,
@@ -16,6 +19,7 @@ try:
         wired_limit,
     )
     from mlx_lm.sample_utils import make_sampler
+    from mlx_lm.tuner.utils import linear_to_lora_layers
 
     HAS_MLX = True
 except ImportError:  # pragma: no cover
@@ -128,6 +132,61 @@ else:
             self.seqs = [list(p) for p in prompts]
             return self.model(x, cache=self.cache)[:, -1, :]
 
+    class _Adapters:
+        """LoRA weight sets over one model.
+
+        MLX attaches adapters to the model itself, so the model is wrapped once, on the
+        first registration, and a lane is then only the ``lora_*`` arrays to install --
+        adapters share the base weights rather than copying them. The base lane is the
+        all-zero set the wrap starts from, which leaves base forwards bit-exact.
+        """
+
+        def __init__(self, model):
+            self.model = model
+            self.sets = {}  # name -> [(parameter path, array)], None being the base
+            self.layout = None  # (num_layers, lora_parameters) the wrap used
+
+        def add(self, name, path):
+            """Register the adapter at ``path`` under ``name``, rebinding if it exists."""
+            path = Path(path)
+            with open(path / "adapter_config.json") as fid:
+                config = json.load(fid)
+            kind = config.get("fine_tune_type", "lora")
+            if kind != "lora":
+                raise ValueError(f"MLX adapters must be 'lora', not {kind!r}")
+            layout = (config["num_layers"], config["lora_parameters"])
+            if self.layout is None:
+                linear_to_lora_layers(self.model, *layout)
+                self.layout = layout
+                self.sets[None] = self._installed()
+            elif layout != self.layout:
+                raise ValueError(
+                    f"adapter {name!r} wants layout {layout}, but the model is already "
+                    f"wrapped for {self.layout}; MLX wraps a model once, so every "
+                    f"adapter on it must share a layout"
+                )
+            weights = mx.load(str(path / "adapters.safetensors"))
+            self.sets[name] = [(k, v) for k, v in weights.items() if "lora_" in k]
+
+        def remove(self, name):
+            if name is None or self.sets.pop(name, None) is None:
+                raise ValueError(f"no adapter named {name!r}")
+
+        def select(self, name):
+            """Install ``name``'s weights; ``None`` restores the base."""
+            if name is not None and name not in self.sets:
+                raise ValueError(f"no adapter named {name!r}")
+            if self.layout is not None:
+                self.model.update(tree_unflatten(self.sets[name]))
+
+        def _installed(self):
+            """The adapter arrays currently on the model."""
+            return [
+                (k, v)
+                for k, v in tree_flatten(self.model.trainable_parameters())
+                if "lora_" in k
+            ]
+
     class AsyncMlxLM(AsyncLM):
         """Asynchronous MLX language model.
 
@@ -164,7 +223,9 @@ else:
             self.timeout = timeout
             self.timer = None
             self.queries = []
-            self.slots = _SlotPool(mlx_lm_model, prefill_step_size)
+            self.adapters = _Adapters(mlx_lm_model)
+            # KV rows never cross adapters, so each lane keeps its own pool.
+            self.slots = defaultdict(lambda: _SlotPool(mlx_lm_model, prefill_step_size))
             self.cache = (
                 OutputCache(maxsize=cache_size, **(cache_opts or {}))
                 if cache_size > 0
@@ -187,55 +248,72 @@ else:
             model, tokenizer = mlx_lm.load(model_name)
             return cls(model, tokenizer, **kwargs)
 
-        def lora_view(self, lora_name):
-            """MLX has no adapters; only the base model is addressable."""
-            if lora_name is not None:
-                raise ValueError("AsyncMlxLM does not support LoRA adapters")
-            return self
+        def add_new_lora(self, lora_path, lora_name="lora_1"):
+            """Register the adapter at ``lora_path`` under ``lora_name``, rebinding the
+            name if it already exists. Every adapter on a model must share the layout
+            the first one wrapped it with.
+
+            Args:
+                lora_path (str): Directory holding ``adapter_config.json`` and
+                    ``adapters.safetensors``.
+                lora_name (str, optional): Name to select the adapter by.
+            """
+            self.adapters.add(lora_name, lora_path)
+            self.clear_cache()
+
+        def remove_lora(self, lora_name):
+            """Unregister ``lora_name``.
+
+            Args:
+                lora_name (str): Name of the adapter to remove.
+            """
+            self.adapters.remove(lora_name)
+            self.clear_cache()
 
         def clear_cache(self):
-            """Drop the memoized log-probs and the live KV rows."""
+            """Drop the memoized log-probs and every lane's live KV rows."""
             if self.cache is not None:
                 self.cache.clear()
-            self.slots.reset()
+            self.slots.clear()
             mx.clear_cache()
 
         def reset_async_queries(self):
             """Drop queued queries. Use after an exception left them unresolved."""
             self.queries = []
 
-        def _forward(self, prompts):
-            """Next-token log-probs for each prompt, ``[len(prompts), vocab]``."""
+        def _forward(self, prompts, lora_name):
+            """Next-token log-probs under one adapter, ``[len(prompts), vocab]``."""
             with wired_limit(self.mlx_lm_model, [self.generation_stream]):
-                logits = self.slots.logits(prompts)
+                self.adapters.select(lora_name)
+                logits = self.slots[lora_name].logits(prompts)
                 logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
                 mx.eval(logprobs)
             return _to_torch(logprobs)
 
         def _resolve(self, keys):
-            """``{key: logprobs}`` for distinct context keys, forwarding the uncached
-            ones together and memoizing them."""
-            out, todo = {}, []
+            """``{key: logprobs}`` for distinct ``(context, lora_name)`` keys, forwarding
+            the uncached ones one batch per adapter and memoizing them."""
+            out, todo = {}, defaultdict(list)
             for key in keys:
                 if self.cache is not None and key in self.cache:
                     out[key] = self.cache[key]
                 else:
-                    todo.append(key)
-            if todo:
-                logprobs = self._forward([list(k) for k in todo])
-                for row, key in enumerate(todo):
+                    todo[key[1]].append(key)
+            for lora_name, batch in todo.items():
+                logprobs = self._forward([list(k[0]) for k in batch], lora_name)
+                for row, key in enumerate(batch):
                     out[key] = logprobs[row]
                     if self.cache is not None:
                         self.cache[key] = logprobs[row]
             return out
 
-        def _add_query(self, token_ids, future):
+        def _add_query(self, key, future):
             """Queue a query, running the batch once it is full or the timer fires.
 
             The timer is armed on the empty-to-nonempty transition, so a steady trickle
             of queries cannot starve the batch.
             """
-            self.queries.append((token_ids, future))
+            self.queries.append((key, future))
             if len(self.queries) >= self.batch_size:
                 if self.timer:
                     self.timer.cancel()
@@ -253,43 +331,45 @@ else:
             if not queries:
                 return
             futures = defaultdict(list)
-            for token_ids, future in queries:
-                futures[tuple(token_ids)].append(future)
+            for key, future in queries:
+                futures[key].append(future)
             logprobs = self._resolve(list(futures))
             for key, waiting in futures.items():
                 for future in waiting:
                     future.set_result(logprobs[key])
 
-        async def next_token_logprobs(self, token_ids):
+        async def next_token_logprobs(self, token_ids, lora_name=None):
             """Next-token log-probs for `token_ids`, batched with concurrent requests.
 
             Args:
                 token_ids (list[int]): A prompt's token ids.
+                lora_name (str, optional): Adapter to forward under (``None`` = base).
 
             Returns:
                 (torch.Tensor): Normalized log-probabilities over the next token.
             """
             if not token_ids:
                 raise ValueError("Token ids must not be empty")
-            key = tuple(token_ids)
+            key = (tuple(token_ids), lora_name)
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
             future = asyncio.get_running_loop().create_future()
-            self._add_query(token_ids, future)
+            self._add_query(key, future)
             return await future
 
-        def next_token_logprobs_sync(self, token_ids):
+        def next_token_logprobs_sync(self, token_ids, lora_name=None):
             """Next-token log-probs for `token_ids`, evaluated immediately.
 
             Args:
                 token_ids (list[int]): A prompt's token ids.
+                lora_name (str, optional): Adapter to forward under (``None`` = base).
 
             Returns:
                 (torch.Tensor): Normalized log-probabilities over the next token.
             """
             if not token_ids:
                 raise ValueError("Token ids must not be empty")
-            key = tuple(token_ids)
+            key = (tuple(token_ids), lora_name)
             return self._resolve([key])[key]
 
         def batch_next_token_logprobs_sync(self, token_ids_list, lora_name=None):
@@ -297,15 +377,14 @@ else:
 
             Args:
                 token_ids_list (list[list[int]]): Prompts' token ids.
-                lora_name (str, optional): Must be ``None``.
+                lora_name (str, optional): Adapter to forward under (``None`` = base).
 
             Returns:
                 (torch.Tensor): ``[len(token_ids_list), vocab]`` log-probabilities.
             """
-            self.lora_view(lora_name)
             if any(not ids for ids in token_ids_list):
                 raise ValueError("Token ids must not be empty")
-            keys = [tuple(ids) for ids in token_ids_list]
+            keys = [(tuple(ids), lora_name) for ids in token_ids_list]
             logprobs = self._resolve(list(dict.fromkeys(keys)))
             return torch.stack([logprobs[k] for k in keys])
 
@@ -326,12 +405,12 @@ else:
                 eos_token_ids (list[int]): Token ids that stop generation.
                 temperature (float, optional): Logit rescaling; higher is more uniform.
                 seed (int, optional): Seed for the random number generator.
-                lora_name (str, optional): Must be ``None``.
+                lora_name (str, optional): Adapter to sample under (``None`` = base).
 
             Returns:
                 (list[int]): The sampled token ids, excluding any EOS.
             """
-            self.lora_view(lora_name)
+            self.adapters.select(lora_name)
             if seed is not None:
                 mx.random.seed(seed)
 
