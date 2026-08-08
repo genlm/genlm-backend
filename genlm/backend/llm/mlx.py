@@ -203,7 +203,7 @@ else:
             batch_size=5,
             timeout=0.001,
             prefill_step_size=2048,
-            cache_size=400,
+            cache_size=0,
             cache_opts=None,
         ):
             """Initialize an `AsyncMlxLM` instance.
@@ -214,9 +214,11 @@ else:
                 batch_size (int, optional): Maximum number of queries to batch together.
                 timeout (float, optional): Seconds to wait before running a short batch.
                 prefill_step_size (int, optional): Tokens per prefill chunk.
-                cache_size (int, optional): Log-prob cache entries; 0 disables it.
-                cache_opts (dict, optional): Extra
-                    [`OutputCache`][genlm.backend.cache.OutputCache] options.
+                cache_size (int, optional): Maximum size of the output cache. If 0,
+                    caching is disabled. Defaults to 0.
+                cache_opts (dict, optional): Additional options to pass to the
+                    [`OutputCache`][genlm.backend.cache.OutputCache] constructor.
+                    Defaults to None (no extra options).
             """
             self.mlx_lm_model = mlx_lm_model
             self.batch_size = batch_size
