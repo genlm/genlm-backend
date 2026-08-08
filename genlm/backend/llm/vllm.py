@@ -430,6 +430,11 @@ else:
                 "enable_prefix_caching": True,
                 "disable_log_stats": True,
                 "gpu_memory_utilization": 0.9,
+                # Pinned, not inherited: vLLM turns async scheduling on by default for a
+                # generative model on a uniproc executor, and it moves when the running
+                # loop cuts a request off against its token budget. A burst tracks that
+                # budget in its own group table, so the resolved value must not drift.
+                "async_scheduling": False,
                 **(engine_opts or {}),
             }
 
