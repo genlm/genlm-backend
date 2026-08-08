@@ -1,6 +1,7 @@
 import asyncio
 import json
 from collections import defaultdict
+from functools import partial
 from pathlib import Path
 
 import torch
@@ -218,14 +219,15 @@ else:
                     [`OutputCache`][genlm.backend.cache.OutputCache] options.
             """
             self.mlx_lm_model = mlx_lm_model
-            self.tokenizer = tokenizer
             self.batch_size = batch_size
             self.timeout = timeout
             self.timer = None
             self.queries = []
             self.adapters = _Adapters(mlx_lm_model)
             # KV rows never cross adapters, so each lane keeps its own pool.
-            self.slots = defaultdict(lambda: _SlotPool(mlx_lm_model, prefill_step_size))
+            self.slots = defaultdict(
+                partial(_SlotPool, mlx_lm_model, prefill_step_size)
+            )
             self.cache = (
                 OutputCache(maxsize=cache_size, **(cache_opts or {}))
                 if cache_size > 0
