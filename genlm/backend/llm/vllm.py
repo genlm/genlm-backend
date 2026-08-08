@@ -151,7 +151,7 @@ else:
             self.reqs = {}  # group handle -> [engine req id per view]
             self.prompts = {}  # group handle -> [committed prompt ids per view]
             self.loras = {}  # group handle -> [lora name per view]
-            self.eng_adds = []  # queued (req_id, prompt, lora_name) engine adds
+            self.eng_adds = {}  # queued engine adds: req id -> (prompt, lora_name)
             self.eng_aborts = []  # queued engine req id aborts
 
         def add_group(self, handle, prompts, loras):
@@ -167,14 +167,21 @@ else:
                 rid = self._next_req
                 self._next_req += 1
                 self.owner[rid] = (handle, len(rids))
-                self.eng_adds.append((rid, list(prompt), lora))
+                self.eng_adds[rid] = (list(prompt), lora)
                 rids.append(rid)
             self.reqs[handle] = rids
 
+        def _retire(self, rid):
+            """Drop a request id. An id whose add is still queued was never seen by
+            the engine, so cancelling the add replaces the abort -- aborting it would
+            be a no-op the add that follows in the same drain then undoes."""
+            self.owner.pop(rid, None)
+            if self.eng_adds.pop(rid, None) is None:
+                self.eng_aborts.append(rid)
+
         def abort_group(self, handle):
             for rid in self.reqs.pop(handle, ()):
-                self.owner.pop(rid, None)
-                self.eng_aborts.append(rid)
+                self._retire(rid)
             self.prompts.pop(handle, None)
             self.loras.pop(handle, None)
 
@@ -186,15 +193,15 @@ else:
         def stall(self, handle):
             """Flush all K requests and re-add them at the committed context."""
             for rid in self.reqs.get(handle, ()):
-                self.owner.pop(rid, None)
-                self.eng_aborts.append(rid)
+                self._retire(rid)
             self._enqueue(handle)
 
         def drain_engine(self):
-            """Queued (aborts, adds) for the engine, cleared on read."""
+            """Queued (aborts, adds) for the engine, cleared on read. Aborts are
+            issued first, so no id may appear in both."""
             aborts, self.eng_aborts = self.eng_aborts, []
-            adds, self.eng_adds = self.eng_adds, []
-            return aborts, adds
+            adds, self.eng_adds = self.eng_adds, {}
+            return aborts, [(rid, prompt, lora) for rid, (prompt, lora) in adds.items()]
 
     class ControlSampler(Sampler):  # pragma: no cover
         """A ``Sampler`` whose decode step is driven by an SMC control object (an ``EngineControl``).
