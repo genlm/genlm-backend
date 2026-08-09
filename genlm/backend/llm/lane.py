@@ -48,11 +48,16 @@ class Lane:
         self._ledger = ledger
         self.rid = rid  # current engine rid; the ledger may swap it on a stall
         self.context: list[int] = list(prompt_ids)
+        self.prompt_len = len(self.context)  # row tokens = context[prompt_len:]
         self.lora_name = lora_name
         self.row = row
         # Cohort tag: lanes sharing a pool_key step together (an engine that owns
         # its scheduler steps one cohort's pools when all its lanes have fed).
         self.pool_key = pool_key
+        # Client scratch: the leaf's processed weights for the current warm and
+        # its running fed-token log-prob sum (the leaf's own ``prefix``).
+        self.stash: Optional[Any] = None
+        self.bank = 0.0
         self.closed = False
         self._warm_value: Optional[Any] = None
         self._waiter: Optional[asyncio.Future] = None
