@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+from array import array
 from typing import Dict, List, Tuple, Optional
 from collections import deque
 import torch
@@ -52,7 +53,8 @@ else:
         """
         req = Request(
             input_text="",
-            input_ids=list(token_ids),
+            # sglang carries token ids as an "q" array and concatenates onto it.
+            input_ids=array("q", token_ids),
             input_embeds=None,
             mm_inputs=None,
             token_type_ids=None,
