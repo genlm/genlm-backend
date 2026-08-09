@@ -18,6 +18,8 @@ try:
         destroy_model_parallel,
     )
     from sglang.srt.runtime_context import publish
+    from sglang.srt.environ import envs
+    from sglang.srt.utils import is_cuda
 
     HAS_SGL = True
 except ImportError:  # pragma: no cover
@@ -126,7 +128,11 @@ else:
                 "model_path": model_id,
                 "grammar_backend": "none",
                 "allow_auto_truncate": False,
-                "disable_overlap_schedule": False,
+                # ``_batch_evaluate`` drives the scheduler with sglang's NORMAL event
+                # loop shape (plan -> run_batch -> process_batch_result). The overlap
+                # loop defers results through ``result_queue`` instead, so asking for it
+                # here would not match how we step the batch.
+                "disable_overlap_schedule": True,
                 "mem_fraction_static": 0.9,  # default value is 0.9
             }
             if engine_opts:
@@ -150,6 +156,20 @@ else:
                 dp_rank=0,
             )
             mod.result_queue = deque()
+            # A constructed Scheduler is not yet runnable: run_event_loop establishes
+            # these two, then dispatches into a loop that never returns, so an embedded
+            # driver has to set them itself. The schedule stream is redrawn while it
+            # aliases the forward stream, which would erase scheduler/forward overlap.
+            mod.schedule_stream = mod.device_module.Stream(priority=0)
+            redraws = 0
+            while (
+                getattr(mod.schedule_stream, "cuda_stream", None)
+                == getattr(mod.forward_stream, "cuda_stream", object())
+                and redraws < 64
+            ):
+                mod.schedule_stream = mod.device_module.Stream(priority=0)
+                redraws += 1
+            mod._war_barrier_enabled = is_cuda() or envs.SGLANG_ENABLE_WAR_BARRIER.get()
             return cls(mod, **kwargs)
 
         def clear_cache(self):
@@ -331,34 +351,38 @@ else:
             if not requests:
                 return  # pragma: no cover
 
-            self.model.process_input_requests(requests)
+            sched = self.model
+            sched.process_input_requests(requests)
 
-            # Mirrors sglang's own scheduler loop: the planner is handed the running and
-            # previous batches and returns a plan, whose ``running_batch`` has to be
-            # carried back onto the scheduler for the next call to see it.
-            while True:
-                plan = self.model.get_next_batch_to_run(
-                    running_batch=self.model.running_batch,
-                    last_batch=self.model.last_batch,
-                )
-                self.model.running_batch = plan.running_batch
-                batch = plan.batch_to_run
-                self.model.last_batch = batch
-                if batch is None:
-                    break
-                with torch.inference_mode():
-                    batch_result = self.model.run_batch(batch)
-                    self.model.process_batch_result(batch, batch_result)
-                    logprobs = torch.log_softmax(
-                        batch_result.logits_output.next_token_logits, dim=-1
-                    ).to("cpu")
+            # sglang's own normal event loop, drained instead of served forever: the
+            # planner is handed the running and previous batches and returns a plan, and
+            # its `running_batch` has to be carried back for the next call to see it.
+            # The whole loop runs on the schedule stream, as `run_event_loop` does.
+            with sched.device_module.StreamContext(sched.schedule_stream):
+                while True:
+                    plan = sched.get_next_batch_to_run(
+                        running_batch=sched.running_batch,
+                        last_batch=sched.last_batch,
+                    )
+                    sched.running_batch = plan.running_batch
+                    batch = plan.batch_to_run
+                    sched.cur_batch_for_debug = batch
+                    if batch is None:
+                        break  # drained; the server loop would idle here instead
+                    with torch.inference_mode():
+                        batch_result = sched.run_batch(batch)
+                        sched.process_batch_result(batch, batch_result)
+                        logprobs = torch.log_softmax(
+                            batch_result.logits_output.next_token_logits, dim=-1
+                        ).to("cpu")
 
-                    for i, req in enumerate(batch.reqs):
-                        if req.finished():
-                            token_ids = self._rid_to_token_ids.pop(req.rid, None)
-                            if token_ids is None:
-                                continue  # pragma: no cover
-                            yield token_ids, logprobs[i]
+                        for i, req in enumerate(batch.reqs):
+                            if req.finished():
+                                token_ids = self._rid_to_token_ids.pop(req.rid, None)
+                                if token_ids is None:
+                                    continue  # pragma: no cover
+                                yield token_ids, logprobs[i]
+                    sched.last_batch = batch
 
         async def _background_loop(self):
             """Background task that processes queued requests from the queue."""
