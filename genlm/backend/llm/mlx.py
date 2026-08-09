@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 from collections import defaultdict
 from functools import partial
 from pathlib import Path
@@ -8,6 +9,7 @@ import torch
 
 from genlm.backend.cache import OutputCache
 from genlm.backend.llm.base import AsyncLM
+from genlm.backend.llm.lane import LaneLedger
 
 try:
     import mlx.core as mx
@@ -225,56 +227,6 @@ else:
                 if "lora_" in k
             ]
 
-    class _Ledger:
-        """``run_burst``'s group ledger: one control handle = K lane prompts, held in
-        batch order.
-
-        MLX schedules nothing, so every ordered handle forwards every step -- there is no
-        partially scheduled group to stall and no engine request id to track.
-        """
-
-        def __init__(self):
-            self.order = []  # control handles, batch order
-            self.prompts = {}  # handle -> committed token ids per lane
-            self.loras = []  # adapter per lane, snapshotted at the first add
-            self.laid = None  # the order the pools' rows currently hold
-
-        def drain(self, control):
-            """Apply the control's abort and add streams."""
-            for handle in control.drain_aborts():
-                if self.prompts.pop(handle, None) is not None:
-                    self.order.remove(handle)
-            for handle, prompts, loras in control.drain_adds():
-                if not self.loras:
-                    self.loras = list(loras)
-                self.prompts[handle] = [list(p) for p in prompts]
-                self.order.append(handle)
-
-        def commit(self, tokens):
-            """Record each ordered handle's drawn token against all K of its lanes."""
-            for handle, token in zip(self.order, tokens):
-                for prompt in self.prompts[handle]:
-                    prompt.append(token)
-
-        def sources(self, pool):
-            """The pool row each ordered handle continues, or ``None`` to rediscover.
-            Records the layout it hands out, so call it once per step.
-
-            A handle re-added mid-burst sits exactly one token past the pool -- the
-            control queues adds only after the drawn token is banked -- so looking its
-            prompt's head up by exact match both finds the ancestor and proves it. A
-            miss (a step that committed more than one item, a ragged unit boundary)
-            falls back to :meth:`_SlotPool.logits`.
-            """
-            rows = (
-                list(range(len(self.order)))
-                if self.laid == self.order
-                else pool.rows_holding([self.prompts[h][0][:-1] for h in self.order])
-            )
-            # Either branch the caller takes leaves the pools holding ``order``.
-            self.laid = list(self.order)
-            return None if None in rows else rows
-
     class AsyncMlxLM(AsyncLM):
         """Asynchronous MLX language model.
 
@@ -283,7 +235,7 @@ else:
         Next-token log-probs are memoized per exact context.
         """
 
-        supports_burst = True  # has run_burst; drives the engine-native burst lane
+        supports_lanes = True  # serves resident decode lanes (open_lane)
 
         def __init__(
             self,
@@ -320,10 +272,14 @@ else:
             self.slots = defaultdict(
                 partial(_SlotPool, mlx_lm_model, prefill_step_size)
             )
-            # A burst's lanes hold their own rows: one pool per lane, kept across bursts
-            # so a unit-grain round continues instead of reprefilling.
-            self.burst_slots = []
-            self.burst_lanes = []  # the lane adapters `burst_slots` was built for
+            # Resident decode lanes: KV rows per adapter in ``lane_slots``, driven by
+            # the lane engine thread; ``_mlx_lock`` serializes it against one-shots.
+            self.ledger = LaneLedger()
+            self.lane_slots = defaultdict(
+                partial(_SlotPool, mlx_lm_model, prefill_step_size)
+            )
+            self._mlx_lock = threading.Lock()
+            self._lane_thread = None
             self.cache = (
                 OutputCache(maxsize=cache_size, **(cache_opts or {}))
                 if cache_size > 0
@@ -374,97 +330,90 @@ else:
             if self.cache is not None:
                 self.cache.clear()
             self.slots.clear()
-            self.burst_slots, self.burst_lanes = [], []
+            self.lane_slots.clear()
             mx.clear_cache()
+
+        def open_lane(self, prompt_ids, *, lora_name=None, row=None, pool_key=None):
+            """Open a resident decode lane; starts the engine thread on first use.
+
+            The engine steps whenever every open lane has fed or closed
+            (:class:`~genlm.backend.llm.lane.Lane`), parks when no lanes are live,
+            and interleaves one-shot forwards between steps via ``_mlx_lock``."""
+            if self._lane_thread is None or not self._lane_thread.is_alive():
+                self._lane_thread = threading.Thread(
+                    target=self._lane_loop, daemon=True
+                )
+                self._stop_lanes = threading.Event()
+                self._lane_thread.start()
+            return self.ledger.open_lane(
+                prompt_ids, lora_name=lora_name, row=row, pool_key=pool_key
+            )
+
+        def close_lane_engine(self):
+            """Stop the lane engine thread; open lanes error on their next read."""
+            if self._lane_thread is not None:
+                self._stop_lanes.set()
+                self.ledger.submitted.set()
+                self._lane_thread.join(timeout=10.0)
+                self._lane_thread = None
+
+        def _lane_loop(self):
+            """The lane engine: cohort stepping, no cross-cohort barrier.
+
+            Lanes sharing a ``pool_key`` are one cohort with their own KV pools
+            (one per adapter). A cohort steps when every one of its live lanes has
+            consumed-and-fed its warm (``not lane.warm``), so cohorts pace
+            independently — one cohort's boundary never stalls another's steps.
+            ``_SlotPool.logits`` discovers per-batch reuse: a post-feed step
+            advances the live KV; a reopened lane's prefix re-lays."""
+            live = {}  # rid -> Lane, engine-side residency
+            while not self._stop_lanes.is_set():
+                adds, aborts = self.ledger.drain()
+                for rid in aborts:
+                    live.pop(rid, None)
+                for lane in adds:
+                    live[lane.rid] = lane
+                cohorts = defaultdict(list)
+                for lane in live.values():
+                    cohorts[lane.pool_key].append(lane)
+                ready = [
+                    lanes
+                    for lanes in cohorts.values()
+                    if all(not ln.warm for ln in lanes)
+                ]
+                if not ready:
+                    self.ledger.submitted.wait(timeout=0.05)
+                    self.ledger.submitted.clear()
+                    continue
+                for lanes in ready:
+                    rows = {}
+                    by_lora = defaultdict(list)
+                    for ln in lanes:
+                        by_lora[ln.lora_name].append(ln)
+                    with self._mlx_lock, _wired(self.mlx_lm_model):
+                        for lora_name, cohort in by_lora.items():
+                            self.adapters.select(lora_name)
+                            pool = self.lane_slots[(lanes[0].pool_key, lora_name)]
+                            logits = pool.logits([list(ln.context) for ln in cohort])
+                            logits = logits.astype(mx.float32)
+                            logprobs = logits - mx.logsumexp(
+                                logits, axis=-1, keepdims=True
+                            )
+                            mx.eval(logprobs)
+                            out = _to_torch(logprobs)
+                            for i, ln in enumerate(cohort):
+                                rows[ln.rid] = out[i]
+                    self.ledger.publish(rows)
 
         def reset_async_queries(self):
             """Drop queued queries. Use after an exception left them unresolved."""
             self.queries = []
 
-        def run_burst(self, control, max_steps):
-            """Run one decode burst driven by an SMC ``control`` (an ``EngineControl``).
-
-            The control owns which groups exist (its abort/add streams) and draws every
-            step; this is only the loop and the KV. No SMC logic, no EOS stop, no return
-            value -- committed tokens are tracked control-side.
-
-            Args:
-                control (EngineControl): the SMC control object.
-                max_steps (int): maximum decode steps for the burst. A global cap, where
-                    the vLLM arm's is per request; length termination is control-side.
-            """
-            if self.burst_active:
-                raise RuntimeError(
-                    "a burst already owns this model's decode loop; the two would share "
-                    "one KV pool per lane and overwrite each other's rows"
-                )
-            ledger = _Ledger()
-            self.burst_active = True
-            try:
-                with _wired(self.mlx_lm_model):
-                    ledger.drain(control)  # seed the initial population
-                    for _ in range(max_steps):
-                        if not ledger.order:
-                            break
-                        drawn = control.draw(self._burst_step(ledger), ledger.order)
-                        ledger.commit(
-                            drawn.tolist() if torch.is_tensor(drawn) else list(drawn)
-                        )
-                        ledger.drain(control)
-                    # Let the control settle what it deferred past the last step, then
-                    # drain whatever that flags.
-                    control.on_burst_end()
-                    ledger.drain(control)
-            finally:
-                self.burst_active = False
-
-        def _burst_step(self, ledger):
-            """One decode step across every lane: ``[G, K, vocab]`` fp32, on the host.
-
-            fp32 is taken in MLX rather than on the torch side, which sidesteps
-            ``_to_torch``'s bfloat16 narrowing (that exists for the numpy-facing slow
-            lane alone).
-
-            The rows land on the CPU because the control composes them against
-            context-only potentials whose own rows are float64 numpy, and Metal has no
-            float64 -- a device row makes ``Product._compose`` raise. The slow lane
-            serves host rows for the same reason, so this also keeps the two paths
-            promoting through the same dtype.
-            """
-            if self.burst_lanes != ledger.loras:
-                self.burst_slots = [
-                    _SlotPool(self.mlx_lm_model, self.prefill_step_size)
-                    for _ in ledger.loras
-                ]
-                self.burst_lanes = list(ledger.loras)
-            # One source list for every lane. Lanes carry DIFFERENT prompts (a LoRA view
-            # and a base view have their own prefixes), but two rows of one group share
-            # each lane's prefix and a crossing only reindexes within a group -- so a
-            # row's ancestor is the same row in every lane. Gathering every pool with
-            # this one list is also what holds them in a single row order.
-            sources = ledger.sources(self.burst_slots[0])
-            per_lane = []
-            for lane, pool in enumerate(self.burst_slots):
-                self.adapters.select(ledger.loras[lane])
-                prompts = [ledger.prompts[h][lane] for h in ledger.order]
-                per_lane.append(
-                    pool.advance(sources, [p[-1:] for p in prompts])
-                    if sources is not None
-                    else pool.logits(prompts)
-                )
-            warm = mx.stack(per_lane, axis=1).astype(mx.float32)
-            mx.eval(warm)
-            return torch.from_dlpack(warm).cpu()
-
         def _forward(self, prompts, lora_name):
-            """Next-token log-probs under one adapter, ``[len(prompts), vocab]``."""
-            if self.burst_active:
-                raise RuntimeError(
-                    "next-token log-probs were requested while a burst owns this "
-                    "model's decode loop; the forward would reprefill into the pool the "
-                    "burst is driving. This leaf should have been an injected lane."
-                )
-            with _wired(self.mlx_lm_model):
+            """Next-token log-probs under one adapter, ``[len(prompts), vocab]``.
+            Serialized against the lane engine thread: one-shots run between its
+            decode steps."""
+            with self._mlx_lock, _wired(self.mlx_lm_model):
                 self.adapters.select(lora_name)
                 logits = self.slots[lora_name].logits(prompts).astype(mx.float32)
                 logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)

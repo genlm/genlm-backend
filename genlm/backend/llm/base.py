@@ -37,8 +37,9 @@ class AsyncLM(ABC):
         tokenizer: A Hugging Face tokenizer instance compatible with the language model
     """
 
-    supports_burst = False  # overridden True by backends with run_burst
-    burst_active = False  # True while a burst owns this model's decode loop
+    supports_burst = False  # legacy vLLM burst arm (dies with the lane port)
+    burst_active = False  # legacy vLLM burst arm (dies with the lane port)
+    supports_lanes = False  # overridden True by backends serving resident lanes
 
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer

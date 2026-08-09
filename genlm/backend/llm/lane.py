@@ -42,12 +42,17 @@ class Lane:
     idempotently readable until fed), CLOSED. ``close`` is idempotent; every
     other call on a closed lane raises."""
 
-    def __init__(self, ledger: "LaneLedger", rid: int, prompt_ids, lora_name, row):
+    def __init__(
+        self, ledger: "LaneLedger", rid: int, prompt_ids, lora_name, row, pool_key=None
+    ):
         self._ledger = ledger
         self.rid = rid  # current engine rid; the ledger may swap it on a stall
         self.context: list[int] = list(prompt_ids)
         self.lora_name = lora_name
         self.row = row
+        # Cohort tag: lanes sharing a pool_key step together (an engine that owns
+        # its scheduler steps one cohort's pools when all its lanes have fed).
+        self.pool_key = pool_key
         self.closed = False
         self._warm_value: Optional[Any] = None
         self._waiter: Optional[asyncio.Future] = None
@@ -133,13 +138,18 @@ class LaneLedger:
     # -- event-loop side -----------------------------------------------------
 
     def open_lane(
-        self, prompt_ids, *, lora_name=None, row: Optional[RowHandle] = None
+        self,
+        prompt_ids,
+        *,
+        lora_name=None,
+        row: Optional[RowHandle] = None,
+        pool_key=None,
     ) -> Lane:
         if self._loop is None:
             self._loop = asyncio.get_running_loop()
         if row is None:
             row = self.row_handle()
-        lane = Lane(self, self._mint(), prompt_ids, lora_name, row)
+        lane = Lane(self, self._mint(), prompt_ids, lora_name, row, pool_key)
         row.lanes.append(lane)
         self.lanes[lane.rid] = lane
         with self._cv:
@@ -160,6 +170,8 @@ class LaneLedger:
             if lane.rid in self._owed:
                 self._fed[lane.rid] = token_id
                 self._cv.notify_all()
+        # A feed may complete a cohort: wake an engine parked on readiness.
+        self.submitted.set()
 
     def _retire(self, lane: Lane) -> None:
         self.lanes.pop(lane.rid, None)
@@ -202,6 +214,14 @@ class LaneLedger:
                     raise LaneError(f"feed barrier timeout; lanes owing: {owing}")
             fed, self._fed, self._owed = self._fed, {}, set()
         return fed
+
+    def publish(self, rows: dict[int, Any]) -> None:
+        """Deliver one cohort's rows in a single loop callback WITHOUT waiting for
+        feeds — for an engine that owns its scheduler and steps a cohort only once
+        every one of its lanes has fed (no cross-cohort barrier)."""
+        if rows:
+            assert self._loop is not None, "publish before any open_lane"
+            self._loop.call_soon_threadsafe(self._deliver_step, dict(rows))
 
     def _deliver_step(self, rows: dict[int, Any]) -> None:
         for rid, row in rows.items():
