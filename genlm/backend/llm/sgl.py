@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 from typing import Dict, List, Tuple, Optional
 from collections import deque
 import torch
@@ -15,6 +16,7 @@ try:
         destroy_distributed_environment,
         destroy_model_parallel,
     )
+    from sglang.srt.runtime_context import publish
 
     HAS_SGL = True
 except ImportError:  # pragma: no cover
@@ -60,8 +62,8 @@ else:
             top_logprobs_num=-1,
             token_ids_logprob=[],
             stream=False,
+            rid=uuid.uuid4().hex,
         )
-        req.regenerate_rid()
         return req
 
     class AsyncSGLTransformer(AsyncLM):
@@ -129,6 +131,9 @@ else:
                 _engine_opts.update(engine_opts)
             server_args = ServerArgs(**_engine_opts)
             port_args = PortArgs.init_new(server_args)
+            # sglang reads its config through a process-wide runtime context, so a
+            # Scheduler cannot be constructed until this process publishes one.
+            publish(server_args, role="scheduler")
             # Ranks by keyword: sglang keeps inserting parallelism axes into this
             # signature, and positionally the trailing args silently change meaning.
             mod = Scheduler(
