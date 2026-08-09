@@ -224,7 +224,12 @@ class LaneLedger:
         every one of its lanes has fed (no cross-cohort barrier)."""
         if rows:
             assert self._loop is not None, "publish before any open_lane"
-            self._loop.call_soon_threadsafe(self._deliver_step, dict(rows))
+            try:
+                self._loop.call_soon_threadsafe(self._deliver_step, dict(rows))
+            except RuntimeError:
+                # The run's loop closed with a step in flight; its lanes are
+                # dead and the rows have no reader.
+                pass
 
     def _deliver_step(self, rows: dict[int, Any]) -> None:
         for rid, row in rows.items():
@@ -232,18 +237,24 @@ class LaneLedger:
             if lane is not None:
                 lane._deliver(row)
 
-    def restall(self, row: RowHandle) -> list[tuple[int, Lane]]:
-        """Mint fresh rids for a handle's lanes (engine re-adds them at their
-        committed contexts) and return ``(old_rid, lane)`` pairs to abort. The
-        ``Lane`` objects survive; only the engine binding changes."""
-        swapped = []
-        for lane in row.lanes:
-            old = lane.rid
-            self.lanes.pop(old, None)
-            lane.rid = self._mint()
-            self.lanes[lane.rid] = lane
-            swapped.append((old, lane))
-        return swapped
+    def restall(self, row: RowHandle) -> None:
+        """Flush a partially-scheduled handle: mint fresh rids for its lanes and
+        queue abort-old + re-add-at-context through the ordinary drain. The
+        ``Lane`` objects survive; only the engine binding changes. Engine-thread
+        callable."""
+        with self._cv:
+            for lane in row.lanes:
+                old = lane.rid
+                self.lanes.pop(old, None)
+                if lane in self._adds:  # never reached the engine
+                    pass
+                else:
+                    self._aborts.append(old)
+                lane.rid = self._mint()
+                self.lanes[lane.rid] = lane
+                if lane not in self._adds:
+                    self._adds.append(lane)
+        self.submitted.set()
 
 
 class FakeLaneServer:

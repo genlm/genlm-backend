@@ -10,6 +10,7 @@ from collections import defaultdict
 
 from genlm.backend.llm.base import AsyncLM
 from genlm.backend.cache import OutputCache
+from genlm.backend.llm.lane import LaneLedger
 
 
 try:
@@ -41,7 +42,7 @@ try:
     )
     from vllm.v1.sample.logits_processor import LogitsProcessor
     from vllm.v1.sample.sampler import Sampler
-    from vllm.v1.outputs import SamplerOutput, LogprobsTensors
+    from vllm.v1.outputs import SamplerOutput
 
     HAS_VLLM = True
 except ImportError:  # pragma: no cover
@@ -141,114 +142,26 @@ else:
             with self._lock:
                 self._captured_batch = None
 
-    class _GroupTable:  # pragma: no cover
-        """``run_burst``'s group ledger: one control handle = K engine requests in
-        lockstep. A partially scheduled group is flushed and re-added at its
-        committed context (prefix-cached); the control only ever sees complete
-        groups.
+    class LaneSampler(Sampler):  # pragma: no cover
+        """A ``Sampler`` that serves resident lanes: publishes each step's
+        log-probability rows to their lanes and blocks until every published
+        lane feeds or closes (the feed barrier). Scoring one-shots are captured
+        per request and resolved to their futures. With no lanes or scores
+        live, defers verbatim to the stock sampler.
+
+        Row -> request identity reads ``model_runner.input_batch.req_ids``
+        (vLLM appends a hyphen-free ``-{8hex}`` to every caller id, so the
+        last-dash split is safe). A row handle scheduled only partially this
+        step is stalled: flushed and re-added at its lanes' contexts, nothing
+        published — control never observes a partial view-set.
         """
 
-        def __init__(self):
-            self._next_req = 0
-            self.owner = {}  # engine req id (int) -> (group handle, view idx)
-            self.reqs = {}  # group handle -> [engine req id per view]
-            self.prompts = {}  # group handle -> [committed prompt ids per view]
-            self.loras = {}  # group handle -> [lora name per view]
-            self.eng_adds = {}  # queued engine adds: req id -> (prompt, lora_name)
-            self.eng_aborts = []  # queued engine req id aborts
-
-        def add_group(self, handle, prompts, loras):
-            self.prompts[handle] = [list(p) for p in prompts]
-            self.loras[handle] = list(loras)
-            self._enqueue(handle)
-
-        def _enqueue(self, handle):
-            """Queue engine adds for all K views at the committed context, under
-            fresh request ids (an id is never reused across a flush)."""
-            rids = []
-            for prompt, lora in zip(self.prompts[handle], self.loras[handle]):
-                rid = self._next_req
-                self._next_req += 1
-                self.owner[rid] = (handle, len(rids))
-                self.eng_adds[rid] = (list(prompt), lora)
-                rids.append(rid)
-            self.reqs[handle] = rids
-
-        def _retire(self, rid):
-            """Drop a request id. An id whose add is still queued was never seen by
-            the engine, so cancelling the add replaces the abort -- aborting it would
-            be a no-op the add that follows in the same drain then undoes."""
-            self.owner.pop(rid, None)
-            if self.eng_adds.pop(rid, None) is None:
-                self.eng_aborts.append(rid)
-
-        def abort_group(self, handle):
-            for rid in self.reqs.pop(handle, ()):
-                self._retire(rid)
-            self.prompts.pop(handle, None)
-            self.loras.pop(handle, None)
-
-        def commit(self, handle, token_id):
-            """Record the drawn token against all K views' contexts."""
-            for prompt in self.prompts[handle]:
-                prompt.append(token_id)
-
-        def stall(self, handle):
-            """Flush all K requests and re-add them at the committed context."""
-            for rid in self.reqs.get(handle, ()):
-                self._retire(rid)
-            self._enqueue(handle)
-
-        def drain_engine(self):
-            """Queued (aborts, adds) for the engine, cleared on read. Aborts are
-            issued first, so no id may appear in both."""
-            aborts, self.eng_aborts = self.eng_aborts, []
-            adds, self.eng_adds = self.eng_adds, {}
-            return aborts, [(rid, prompt, lora) for rid, (prompt, lora) in adds.items()]
-
-    class ControlSampler(Sampler):  # pragma: no cover
-        """A ``Sampler`` whose decode step is driven by an SMC control object (an ``EngineControl``).
-
-        This is a thin engine *arm*: it owns no SMC logic. With a control attached,
-        :meth:`forward` reproduces the stock sampler's logits-shaping pipeline
-        (raw logprobs, float32, both processor classes -- so
-        :class:`GlobalLogprobsCapture` still sees post-processor logits), then
-        assembles complete groups from the :class:`_GroupTable` (stalling partial
-        ones), hands ``[G, K, vocab]`` logits to ``control.draw``, and commits each
-        group's token to all K rows. Pop-out is out-of-band via
-        :meth:`EngineControl.drain_aborts`, never an EOS draw.
-
-        With no control attached, :meth:`forward` defers entirely to
-        ``super().forward`` -- normal generation and the ``next_token_logprobs``
-        paths are byte-for-byte unaffected.
-
-        Row -> request identity is read from ``model_runner.input_batch.req_ids``
-        (see :mod:`genlm.backend.llm.engine_control`).
-        """
-
-        def __init__(self, logprobs_mode, model_runner):
+        def __init__(self, logprobs_mode, model_runner, server):
             super().__init__(logprobs_mode=logprobs_mode)
             self._model_runner = model_runner
-            self._control = None
-            self._table = None
+            self._server = server
 
-        @property
-        def active(self):
-            """Whether a burst currently drives the engine's decode loop."""
-            return self._control is not None
-
-        def attach(self, control, table):
-            """Bind the control + group table that drive the current burst."""
-            self._control = control
-            self._table = table
-
-        def detach(self):
-            """Unbind any control; subsequent steps behave like the stock sampler."""
-            self._control = None
-            self._table = None
-
-        def _row_reqs(self, num_rows):
-            """Row -> engine req id (int); strips vLLM's ``{ext}-{8char}`` internal id."""
+        def _row_rids(self, num_rows):
             req_ids = self._model_runner.input_batch.req_ids
             return [int(r.rsplit("-", 1)[0]) for r in req_ids[:num_rows]]
 
@@ -259,9 +172,9 @@ else:
             predict_bonus_token=False,
             logprobs_mode_override=None,
         ):
-            control = self._control
-            if control is None:
-                # No burst active: identical to the stock sampler.
+            server = self._server
+            ledger = server.ledger
+            if not ledger.lanes and not server._scores:
                 return super().forward(
                     logits,
                     sampling_metadata,
@@ -269,78 +182,51 @@ else:
                     logprobs_mode_override=logprobs_mode_override,
                 )
 
-            logprobs_mode = logprobs_mode_override or self.logprobs_mode
-            num_logprobs = sampling_metadata.max_num_logprobs
-            raw_logprobs = None
-            if num_logprobs is not None:
-                if logprobs_mode == "raw_logprobs":
-                    raw_logprobs = self.compute_logprobs(logits)
-                elif logprobs_mode == "raw_logits":
-                    raw_logprobs = (
-                        logits.clone()
-                        if logits.dtype == torch.float32
-                        else logits.to(torch.float32)
-                    )
-
             logits = logits.to(torch.float32)
-
-            # Stock non-argmax-invariant processors + penalties.
             logits = self.apply_logits_processors(
                 logits, sampling_metadata, predict_bonus_token
             )
-            # Stock argmax-invariant processors (GlobalLogprobsCapture lives
-            # here). These normally run inside ``sample`` after temperature; the
-            # control owns temperature/draw, so we run them here on the post-processor
-            # logits to keep capture working.
             for processor in sampling_metadata.logitsprocs.argmax_invariant:
                 logits = processor.apply(logits)
+            logprobs = torch.log_softmax(logits, dim=-1)
 
-            table = self._table
-            rows = self._row_reqs(logits.shape[0])
+            rids = self._row_rids(logits.shape[0])
+            sampled = torch.zeros(len(rids), dtype=torch.int64, device=logits.device)
 
-            # Assemble groups: handle -> per-view row index for this step's batch.
-            slots = {}
-            for i, rid in enumerate(rows):
-                ov = table.owner.get(rid)  # None: flushed/aborted but still scheduled
-                if ov is None:
-                    continue
-                handle, vi = ov
-                slots.setdefault(handle, [None] * len(table.reqs[handle]))[vi] = i
-            full = [h for h, s in slots.items() if all(i is not None for i in s)]
-            for h in slots:
-                if h not in full:
-                    table.stall(h)
-
-            # Placeholder for rows of stalled/dead groups (flushed before commit).
-            sampled = torch.zeros(len(rows), dtype=torch.int64, device=logits.device)
-            if full:
-                idx = torch.tensor(
-                    [slots[h] for h in full], dtype=torch.int64, device=logits.device
-                )
-                tokens = control.draw(logits[idx], full)  # [G, K, vocab] -> [G]
-                if not isinstance(tokens, torch.Tensor):
-                    tokens = torch.tensor(
-                        tokens, dtype=torch.int64, device=logits.device
+            # Scoring one-shots: resolve each future on its own loop.
+            for i, rid in enumerate(rids):
+                entry = server._scores.get(rid)
+                if entry is not None:
+                    loop, fut = entry
+                    row = logprobs[i].detach().cpu()
+                    loop.call_soon_threadsafe(
+                        lambda f=fut, r=row: f.done() or f.set_result(r)
                     )
-                tokens = tokens.to(logits.device).long().view(-1)
-                for h, t in zip(full, tokens.tolist()):
-                    table.commit(h, int(t))
-                sampled[idx.view(-1)] = tokens.repeat_interleave(idx.shape[1])
 
-            logprobs_tensors = None
-            if num_logprobs is not None and raw_logprobs is not None:
-                if num_logprobs == -1:
-                    logprobs_tensors = LogprobsTensors(
-                        torch.empty(0), raw_logprobs, torch.empty(0)
-                    )
+            # Lanes: assemble complete row handles, stall the rest.
+            present = {}  # rid -> batch index, lanes only
+            for i, rid in enumerate(rids):
+                if rid in ledger.lanes:
+                    present[rid] = i
+            by_handle = {}
+            for rid in present:
+                lane = ledger.lanes[rid]
+                by_handle.setdefault(id(lane.row), (lane.row, []))[1].append(rid)
+            rows_out = {}
+            for row_handle, handle_rids in by_handle.values():
+                if len(handle_rids) == len(row_handle.lanes):
+                    for rid in handle_rids:
+                        rows_out[rid] = logprobs[present[rid]].detach().cpu()
                 else:
-                    logprobs_tensors = self.gather_logprobs(
-                        raw_logprobs, num_logprobs, token_ids=sampled
-                    )
+                    ledger.restall(row_handle)
+
+            fed = ledger.publish_and_wait(rows_out)
+            for rid, token in fed.items():
+                sampled[present[rid]] = int(token)
 
             return SamplerOutput(
                 sampled_token_ids=sampled.to(torch.int32).unsqueeze(-1),
-                logprobs_tensors=logprobs_tensors,
+                logprobs_tensors=None,
             )
 
     class AsyncVirtualLM(AsyncLM):  # pragma: no cover
@@ -350,7 +236,7 @@ else:
         logits processor to efficiently capture full vocabulary log probabilities.
         """
 
-        supports_burst = True  # has run_burst; drives the engine-native burst lane
+        supports_lanes = True  # serves resident decode lanes (open_lane)
 
         default_params = {
             "max_tokens": 1,
@@ -387,8 +273,11 @@ else:
             self.logprobs_capture = logprobs_capture
             # The engine-native sampler, swapped in once by from_name (None until
             # then, and on any non-engine construction path). Detached except for
-            # the duration of a run_burst call.
-            self._control_sampler = None
+            self.ledger = LaneLedger()
+            self._scores = {}  # scoring rid -> (loop, future)
+            self._score_adds = []  # queued (rid, token_ids, lora_name)
+            self._lane_thread = None
+            self._stop_lanes = None
             self.tokenizer = llm_engine.get_tokenizer()
             self.cache = (
                 OutputCache(maxsize=cache_size, **(cache_opts or {}))
@@ -433,10 +322,7 @@ else:
                 "enable_prefix_caching": True,
                 "disable_log_stats": True,
                 "gpu_memory_utilization": 0.9,
-                # Pinned, not inherited: vLLM turns async scheduling on by default for a
-                # generative model on a uniproc executor, and it moves when the running
-                # loop cuts a request off against its token budget. A burst tracks that
-                # budget in its own group table, so the resolved value must not drift.
+                # Pinned off for the lane port: revisit once lanes settle.
                 "async_scheduling": False,
                 **(engine_opts or {}),
             }
@@ -449,18 +335,15 @@ else:
                 logprobs_capture
             )
 
-            # Install the engine-native sampler ONCE. Detached (the default) it
+            # Install the lane sampler ONCE. With no lanes or scores live it
             # defers verbatim to the stock sampler, so normal generation and the
-            # next_token_logprobs paths are byte-unaffected; run_burst attaches a
-            # control object only for a burst's duration.
-            control_sampler = ControlSampler(
+            # next_token_logprobs paths are byte-unaffected.
+            inst = cls(llm, logprobs_capture, **kwargs)
+            model_runner.sampler = LaneSampler(
                 logprobs_mode=model_runner.model_config.logprobs_mode,
                 model_runner=model_runner,
+                server=inst,
             )
-            model_runner.sampler = control_sampler
-
-            inst = cls(llm, logprobs_capture, **kwargs)
-            inst._control_sampler = control_sampler
             return inst
 
         @staticmethod
@@ -537,22 +420,6 @@ else:
 
             return result
 
-        @property
-        def burst_active(self):
-            return self._control_sampler is not None and self._control_sampler.active
-
-        def _reject_during_burst(self):
-            """A burst owns the decode loop: any other ``generate`` re-enters it through
-            the attached ``ControlSampler`` and deadlocks (the draw hops to the loop this
-            call is blocking). Every forward inside a burst must come from its injected
-            views instead."""
-            if self.burst_active:
-                raise RuntimeError(
-                    "logprobs forward requested while an engine burst is running; it "
-                    "would re-enter the burst's decode loop. This potential must be "
-                    "served from the burst's injected views (see burst_blocker)."
-                )
-
         def _add_query(self, token_ids, future, lora_name=None):
             """Add a query to be evaluated in the next batch.
 
@@ -565,7 +432,6 @@ else:
                 token_ids (list[int]): Token IDs representing the query prompt.
                 future (asyncio.Future): Future to store the result in.
             """
-            self._reject_during_burst()
             self.queries.append((token_ids, future, lora_name))
 
             if len(self.queries) >= self.batch_size:
@@ -595,11 +461,16 @@ else:
                     future.set_exception(exc)
                 return
 
-            try:  # queued before the burst opened, fired inside it
-                self._reject_during_burst()
-            except RuntimeError as exc:
-                for _, future, _ in queries:
-                    future.set_exception(exc)
+            if self._lane_thread is not None and self._lane_thread.is_alive():
+                # The lane engine owns the decode loop: score through it (a
+                # max_tokens=1 request rides the running steps via chunked
+                # prefill; the sampler resolves the future from its row).
+                loop = asyncio.get_running_loop()
+                for token_ids, future, lora_name in queries:
+                    rid = self.ledger._mint()
+                    self._scores[rid] = (loop, future)
+                    self._score_adds.append((rid, list(token_ids), lora_name))
+                self.ledger.submitted.set()
                 return
 
             # Group by LoRA (one generate each), and dedup identical prompts within each.
@@ -677,7 +548,11 @@ else:
             if self.logprobs_capture is None:
                 raise RuntimeError("Cannot use model after cleanup() has been called")
 
-            self._reject_during_burst()
+            if self._lane_thread is not None and self._lane_thread.is_alive():
+                raise RuntimeError(
+                    "sync logprobs cannot run while the lane engine is stepping; "
+                    "use the async path (it scores through the running loop)."
+                )
             self.logprobs_capture.clear()
 
             self.llm_engine.generate(
@@ -713,7 +588,11 @@ else:
             """
             if self.logprobs_capture is None:
                 raise RuntimeError("Cannot use model after cleanup() has been called")
-            self._reject_during_burst()
+            if self._lane_thread is not None and self._lane_thread.is_alive():
+                raise RuntimeError(
+                    "sync logprobs cannot run while the lane engine is stepping; "
+                    "use the async path (it scores through the running loop)."
+                )
             # Clear any stale captured logprobs
             self.logprobs_capture.clear()
 
@@ -745,8 +624,78 @@ else:
             if self.cache:
                 self.cache.clear()
 
+        def open_lane(self, prompt_ids, *, lora_name=None, row=None, pool_key=None):
+            """Open a resident decode lane; starts the engine thread on first use.
+
+            The engine steps whenever every published lane has fed or closed
+            (the feed barrier in :class:`~genlm.backend.llm.lane.LaneLedger`),
+            parks when nothing is live, and serves scoring one-shots from the
+            same loop."""
+            if self._lane_thread is None or not self._lane_thread.is_alive():
+                self._stop_lanes = threading.Event()
+                self._lane_thread = threading.Thread(
+                    target=self._lane_loop, daemon=True
+                )
+                self._lane_thread.start()
+            return self.ledger.open_lane(
+                prompt_ids, lora_name=lora_name, row=row, pool_key=pool_key
+            )
+
+        def close_lane_engine(self):
+            """Stop the lane engine thread; open lanes error on their next read."""
+            if self._lane_thread is not None:
+                self._stop_lanes.set()
+                self.ledger.submitted.set()
+                self._lane_thread.join(timeout=30.0)
+                self._lane_thread = None
+
+        def _lane_loop(self):
+            """The lane engine: drain lane adds/aborts and scoring adds into the
+            vLLM engine, step it while anything is live, park on empty. The
+            sampler (:class:`LaneSampler`) publishes rows and holds the feed
+            barrier inside ``engine.step()``."""
+            engine = self.llm_engine.llm_engine
+            decode_params = SamplingParams(
+                n=1,
+                max_tokens=1 << 20,  # control closes lanes; engine cap is a net
+                detokenize=False,
+                ignore_eos=True,
+            )
+            gone = set()  # engine-finished rids; an abort for one is a no-op
+            while not self._stop_lanes.is_set():
+                adds, aborts = self.ledger.drain()
+                score_adds, self._score_adds = self._score_adds, []
+                for rid in aborts:
+                    if rid not in gone:
+                        with contextlib.suppress(Exception):
+                            engine.abort_request([str(rid)])
+                for lane in adds:
+                    engine.add_request(
+                        str(lane.rid),
+                        TokensPrompt(prompt_token_ids=list(lane.context)),
+                        decode_params,
+                        lora_request=self._lora_request_for(lane.lora_name),
+                    )
+                for rid, token_ids, lora_name in score_adds:
+                    engine.add_request(
+                        str(rid),
+                        TokensPrompt(prompt_token_ids=token_ids),
+                        SamplingParams(**self.default_params),
+                        lora_request=self._lora_request_for(lora_name),
+                    )
+                if not engine.has_unfinished_requests():
+                    self.ledger.submitted.wait(timeout=0.05)
+                    self.ledger.submitted.clear()
+                    continue
+                for out in engine.step():
+                    if out.finished:
+                        rid = int(out.request_id.rsplit("-", 1)[0])
+                        gone.add(rid)
+                        self._scores.pop(rid, None)
+
         def cleanup(self):
             """Explicitly clean up GPU resources. Call this when done with the model."""
+            self.close_lane_engine()
             self._cleanup_engine()
 
         def __enter__(self):
@@ -922,88 +871,3 @@ else:
             if token_ids and token_ids[-1] in eos_token_ids:
                 token_ids = token_ids[:-1]
             return token_ids
-
-        def run_burst(
-            self,
-            control,
-            max_steps,
-        ):  # pragma: no cover
-            """Run one engine-native decode burst driven by an SMC ``control`` (an ``EngineControl``).
-
-            Attaches ``control`` to the persistent :class:`ControlSampler` and drives the
-            engine's decode loop for up to ``max_steps`` steps. The control owns what
-            groups exist (adds/aborts via its drain streams; one handle = K lockstep
-            engine requests, see :class:`_GroupTable`) and draws each step via
-            :meth:`EngineControl.draw`. No EOS stop tokens, no discard forward, no SMC
-            logic here.
-
-            Args:
-                control (EngineControl): the SMC control object.
-                max_steps (int): maximum decode steps for the burst.
-            """
-            from vllm.sampling_params import RequestOutputKind
-
-            sampler = self._control_sampler
-            # self.llm_engine is the vLLM LLM; .llm_engine is the inner LLMEngine.
-            # Bind it once rather than hopping through both attrs at every call.
-            engine = self.llm_engine.llm_engine
-
-            sampling_params = SamplingParams(
-                n=1,
-                max_tokens=max_steps,
-                detokenize=False,
-                # Pop-out is the control's explicit abort_request, NOT an EOS stop
-                # token -- the control draws in its own vocab and ends rows out-of-band.
-                ignore_eos=True,
-                output_kind=RequestOutputKind.FINAL_ONLY,
-            )
-
-            # Engine request id is str(table req id); the group table owns the int
-            # ids ({rid}-{8hex} is parsed only in ControlSampler._row_reqs).
-            table = _GroupTable()
-            sampler.attach(control, table)
-            gone = set()  # engine req ids finished by the engine or aborted
-            added = set()  # engine req ids ever added; finally net
-            try:
-                # Control abort/add streams route through the table, whose engine
-                # queues also hold stall flushes from the last step's forward.
-                def _drain():
-                    for handle in control.drain_aborts():
-                        table.abort_group(handle)
-                    for handle, prompts, loras in control.drain_adds():
-                        table.add_group(handle, prompts, loras)
-                    aborts, adds = table.drain_engine()
-                    aborts = [r for r in aborts if r not in gone]
-                    if aborts:
-                        engine.abort_request([str(r) for r in aborts])
-                        gone.update(aborts)
-                    for rid, prompt, lora_name in adds:
-                        engine.add_request(
-                            str(rid),
-                            TokensPrompt(prompt_token_ids=list(prompt)),
-                            sampling_params,
-                            lora_request=self._lora_request_for(lora_name),
-                        )
-                        added.add(rid)
-
-                _drain()  # seed the initial population (the control's first adds)
-                while engine.has_unfinished_requests():
-                    step_outputs = engine.step()
-                    for output in step_outputs:
-                        if output.finished:
-                            gone.add(int(output.request_id))
-                    _drain()
-                # Decode loop drained: let the control settle work deferred past the last
-                # step (the final bank), then drain whatever that flags.
-                control.on_burst_end()
-                _drain()
-            finally:
-                sampler.detach()
-                # Safety net: drop anything still running (an exception mid-burst, or
-                # a row that hit the max_steps length cap before the control aborted).
-                remaining = [str(h) for h in added if h not in gone]
-                if remaining and engine.has_unfinished_requests():
-                    with contextlib.suppress(Exception):
-                        engine.abort_request(remaining)
-            # Committed tokens are tracked control-side (the control banks each draw into
-            # its particle contexts), so run_burst returns nothing.

@@ -167,11 +167,13 @@ async def test_restall_swaps_rid_same_lane():
 
     ledger = LaneLedger()
     lane = ledger.open_lane([1, 2])
+    ledger.drain()  # the add reached the engine
     old = lane.rid
-    swapped = ledger.restall(lane.row)
-    assert swapped == [(old, lane)]
+    ledger.restall(lane.row)
     assert lane.rid != old and ledger.lanes[lane.rid] is lane
     assert lane.context == [1, 2]  # the Lane object survives untouched
+    adds, aborts = ledger.drain()
+    assert adds == [lane] and aborts == [old]  # abort old rid, re-add at context
 
 
 @pytest.mark.asyncio
