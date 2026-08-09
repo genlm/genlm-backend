@@ -289,7 +289,7 @@ else:
             """Next-token log-probs under one adapter, ``[len(prompts), vocab]``."""
             with wired_limit(self.mlx_lm_model, [self.generation_stream]):
                 self.adapters.select(lora_name)
-                logits = self.slots[lora_name].logits(prompts)
+                logits = self.slots[lora_name].logits(prompts).astype(mx.float32)
                 logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
                 mx.eval(logprobs)
             return _to_torch(logprobs)
