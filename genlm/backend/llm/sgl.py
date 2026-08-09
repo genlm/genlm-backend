@@ -331,7 +331,19 @@ else:
 
             self.model.process_input_requests(requests)
 
-            while batch := self.model.get_next_batch_to_run():
+            # Mirrors sglang's own scheduler loop: the planner is handed the running and
+            # previous batches and returns a plan, whose ``running_batch`` has to be
+            # carried back onto the scheduler for the next call to see it.
+            while True:
+                plan = self.model.get_next_batch_to_run(
+                    running_batch=self.model.running_batch,
+                    last_batch=self.model.last_batch,
+                )
+                self.model.running_batch = plan.running_batch
+                batch = plan.batch_to_run
+                self.model.last_batch = batch
+                if batch is None:
+                    break
                 with torch.inference_mode():
                     batch_result = self.model.run_batch(batch)
                     self.model.process_batch_result(batch, batch_result)
