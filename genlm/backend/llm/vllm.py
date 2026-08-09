@@ -29,6 +29,9 @@ try:
         )
     os.environ["VLLM_USE_V1"] = "1"
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    # The V2 model runner bypasses the Sampler/LogitsProcessor seam this module
+    # drives; some architectures default to it, so pin it off explicitly.
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
     from vllm.inputs import TokensPrompt
