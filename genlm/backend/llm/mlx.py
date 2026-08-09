@@ -151,7 +151,9 @@ else:
         def _prefill(self, prompts):
             """Left-padded batched prefill, replacing the pool."""
             width = max(map(len, prompts))
-            self.cache = _make_cache(self.model, [width - len(p) for p in prompts])
+            self.cache = _make_cache(
+                self.model, [width - len(p) for p in prompts], max_kv_size=None
+            )
             x = _left_pad_prompts(prompts, max_length=width)
             while x.shape[1] > 1:
                 n = min(self.prefill_step_size, x.shape[1] - 1)
@@ -327,7 +329,9 @@ else:
                 if cache_size > 0
                 else None
             )
-            super().__init__(tokenizer=tokenizer)
+            # mlx_lm.load hands back a TokenizerWrapper: it adds streaming detokenize but
+            # is not callable like a HuggingFace tokenizer, so unwrap to the real one.
+            super().__init__(tokenizer=getattr(tokenizer, "_tokenizer", tokenizer))
 
         @classmethod
         def from_name(cls, model_name, **kwargs):

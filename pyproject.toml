@@ -9,41 +9,41 @@ authors = [
 ]
 dependencies = [
     "torch",
-    "transformers>=4.36.0,<5.0.0.rc0",
+    "transformers>=5,<6",
     "sentencepiece",
     "protobuf",
     "accelerate",
     "bitsandbytes; sys_platform == 'linux'",
     "numba",
+    # numba refuses to import above the NumPy it was built against; transformers 5
+    # otherwise resolves numpy ahead of that bound.
+    "numpy<2.5",
 ]
 
 [project.optional-dependencies]
 mlx = [
-    # mlx-lm >=0.30 requires transformers>=5 (0.30.0-0.30.5 hard-pin an rc), which the
-    # transformers bound above forbids; 0.29.x is the last 4.x-compatible line. mlx
-    # itself carries no transformers dep, so pin it too rather than letting it drift
-    # ahead of the mlx-lm it has to serve.
-    "mlx>=0.29.2,<0.33",
-    "mlx-lm>=0.29.1,<0.30",
+    # mlx carries no transformers dep of its own; pin it alongside the mlx-lm it
+    # has to serve rather than letting it drift ahead.
+    "mlx>=0.29.2",
+    "mlx-lm>=0.30",
 ]
 vllm = [
     # The engine-native arms (ControlSampler, run_burst) reach into vLLM v1
     # internals (Sampler.forward signature, input_batch.req_ids, the model-runner
     # sampler swap) that are version-specific; pin to the 0.21 line validated on
-    # the box rather than advertising the whole >=0.10 range.
+    # the box rather than advertising the whole >=0.10 range. 0.21 already admits
+    # the transformers 5 line above, so this stays put.
     "vllm>=0.21.0,<0.22.0; sys_platform == 'linux'",
     "triton>=3.2.0; sys_platform == 'linux'",
 ]
 sgl = [
-    "sglang>=0.5.8,<0.5.9",
+    # sglang pins transformers EXACTLY (0.5.17 -> ==5.12.1), so installing this extra
+    # nails the whole environment to that release. It is kept out of the core bound so
+    # only an sglang install pays for it.
+    "sglang>=0.5.17,<0.5.18",
 ]
 lora = [
-    # peft >=0.19 imports ``EmbeddingParallel`` from
-    # ``transformers.integrations.tensor_parallel``, which only exists in a
-    # very recent transformers branch; on the transformers pin above (which
-    # resolves to 4.57.x) this raises ImportError at LoRA load time. Pin
-    # below 0.19 until peft's TP handling catches up.
-    "peft>=0.17,<0.19",
+    "peft>=0.17",
 ]
 docs = [
     "mkdocs",
