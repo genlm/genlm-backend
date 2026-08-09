@@ -145,8 +145,11 @@ class LaneLedger:
         row: Optional[RowHandle] = None,
         pool_key=None,
     ) -> Lane:
-        if self._loop is None:
-            self._loop = asyncio.get_running_loop()
+        # Rebind per open: the server outlives event loops (one asyncio.run per
+        # inference), and publishing to a dead loop would strand every warm.
+        loop = asyncio.get_running_loop()
+        if self._loop is not loop:
+            self._loop = loop
         if row is None:
             row = self.row_handle()
         lane = Lane(self, self._mint(), prompt_ids, lora_name, row, pool_key)
