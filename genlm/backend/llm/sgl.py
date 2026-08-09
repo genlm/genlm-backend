@@ -51,7 +51,9 @@ else:
         req = Request(
             input_text="",
             input_ids=list(token_ids),
+            input_embeds=None,
             mm_inputs=None,
+            token_type_ids=None,
             sampling_params=SP,
             return_logprob=False,
             logprob_start_len=-1,
@@ -127,7 +129,19 @@ else:
                 _engine_opts.update(engine_opts)
             server_args = ServerArgs(**_engine_opts)
             port_args = PortArgs.init_new(server_args)
-            mod = Scheduler(server_args, port_args, gpu_id, 0, 0, 0, 0)
+            # Ranks by keyword: sglang keeps inserting parallelism axes into this
+            # signature, and positionally the trailing args silently change meaning.
+            mod = Scheduler(
+                server_args,
+                port_args,
+                gpu_id,
+                tp_rank=0,
+                moe_ep_rank=0,
+                pp_rank=0,
+                attn_cp_rank=0,
+                moe_dp_rank=0,
+                dp_rank=0,
+            )
             mod.result_queue = deque()
             return cls(mod, **kwargs)
 

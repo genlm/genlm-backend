@@ -307,7 +307,9 @@ class AsyncTransformer(AsyncLM):
         else:
             pasts = None
 
-        pasts = DynamicCache.from_legacy_cache(pasts)
+        # ``DynamicCache`` takes the per-layer (key, value) pairs positionally; ``None``
+        # gives the empty cache a cold batch needs.
+        pasts = DynamicCache(None if pasts is None else [tuple(kv) for kv in pasts])
 
         results = self.model(
             input_ids,
