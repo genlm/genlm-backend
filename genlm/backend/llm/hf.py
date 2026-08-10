@@ -130,8 +130,6 @@ class AsyncTransformer(AsyncLM):
         # One logprob/KV trie per LoRA adapter (None = base): cached activations
         # are adapter-dependent, so the tries must never mix.
         self.caches = defaultdict(TokenTrie)
-        self._lora_versions = {}  # name -> monotonic weight-set id; rebind bumps
-        self._next_lora_version = 1
 
         # Queries to be batched. Each query is a sequence of tokens,
         # and a Future to be called when the query is resolved.
@@ -184,8 +182,7 @@ class AsyncTransformer(AsyncLM):
 
         Re-registering an existing name evicts the old weights and binds the
         name to ``lora_path`` — a training loop pushes updated weights with this
-        one call. Forwards select the adapter per call via ``lora_name=``
-        (or ``lora_view``).
+        one call. Forwards select the adapter per call via ``lora_name=``.
 
         Args:
             lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
@@ -194,20 +191,11 @@ class AsyncTransformer(AsyncLM):
         if self._has_adapter(lora_name):
             self.remove_lora(lora_name)
         self.model.load_adapter(lora_path, lora_name)
-        self._lora_versions[lora_name] = self._next_lora_version
-        self._next_lora_version += 1
 
     def remove_lora(self, lora_name):
         """Unregister ``lora_name``: drop its weights and its cache trie."""
         self.model.delete_adapter(lora_name)
         self.caches.pop(lora_name, None)
-        self._lora_versions.pop(lora_name, None)
-
-    def lora_id(self, lora_name):
-        """Stable id of the weights bound to ``lora_name`` (``None`` = base).
-        A re-registered name gets a fresh id, so anything cached under
-        (name, id) can never survive a rebind."""
-        return None if lora_name is None else self._lora_versions[lora_name]
 
     def _activate(self, lora_name):
         """Set the model's peft state for a forward under ``lora_name`` (``None`` = base).

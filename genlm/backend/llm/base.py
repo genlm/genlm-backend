@@ -6,27 +6,6 @@ from abc import ABC, abstractmethod
 from genlm.backend.tokenization import decode_vocab
 
 
-class _LoRABoundLM:
-    """Forward handle that runs every logprobs call under a fixed LoRA adapter.
-    Returned by ``AsyncLM.lora_view(name)``; duck-typed to the forward subset
-    of ``AsyncLM`` that ``PromptedLLM`` uses on the slow lane."""
-
-    def __init__(self, lm, lora_name):
-        self._lm = lm
-        self._lora_name = lora_name
-
-    async def next_token_logprobs(self, token_ids):
-        return await self._lm.next_token_logprobs(token_ids, lora_name=self._lora_name)
-
-    def next_token_logprobs_sync(self, token_ids):
-        return self._lm.next_token_logprobs_sync(token_ids, lora_name=self._lora_name)
-
-    async def batch_next_token_logprobs(self, token_ids_list):
-        return torch.stack(
-            await asyncio.gather(*[self.next_token_logprobs(t) for t in token_ids_list])
-        )
-
-
 class AsyncLM(ABC):
     """Abstract base class for asynchronous language models.
 
@@ -42,11 +21,12 @@ class AsyncLM(ABC):
         self.byte_vocab, self.str_vocab = decode_vocab(self.tokenizer)
 
     @abstractmethod
-    async def next_token_logprobs(self, token_ids):
+    async def next_token_logprobs(self, token_ids, lora_name=None):
         """Request log probabilities of next token asynchronously.
 
         Args:
             token_ids (list[int]): A list of token IDs representing the prompt.
+            lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
 
         Returns:
             (torch.Tensor): Normalized log probability tensor.
@@ -54,11 +34,12 @@ class AsyncLM(ABC):
         pass
 
     @abstractmethod
-    def next_token_logprobs_sync(self, token_ids):
+    def next_token_logprobs_sync(self, token_ids, lora_name=None):
         """Request log probabilities of next token synchronously.
 
         Args:
             token_ids (list[int]): A list of token IDs representing the prompt.
+            lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
 
         Returns:
             (torch.Tensor): Normalized log probability tensor.
@@ -75,9 +56,11 @@ class AsyncLM(ABC):
         Returns:
             (torch.Tensor): A tensor of log probability tensors.
         """
-        fwd = self.lora_view(lora_name)
         logprobs = await asyncio.gather(
-            *[fwd.next_token_logprobs(token_ids) for token_ids in token_ids_list]
+            *[
+                self.next_token_logprobs(token_ids, lora_name=lora_name)
+                for token_ids in token_ids_list
+            ]
         )
 
         return torch.stack(logprobs)
@@ -92,15 +75,17 @@ class AsyncLM(ABC):
         Returns:
             (torch.Tensor): A tensor of log probability tensors.
         """
-        fwd = self.lora_view(lora_name)
         return torch.stack(
-            [fwd.next_token_logprobs_sync(token_ids) for token_ids in token_ids_list]
+            [
+                self.next_token_logprobs_sync(token_ids, lora_name=lora_name)
+                for token_ids in token_ids_list
+            ]
         )
 
     def add_new_lora(self, lora_path, lora_name):
         """Register a LoRA adapter under ``lora_name``; re-registering an existing
         name rebinds it to the new weights. Forwards select the adapter per call
-        via ``lora_name=`` (or ``lora_view``).
+        via ``lora_name=``.
 
         Args:
             lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
@@ -122,24 +107,11 @@ class AsyncLM(ABC):
             "remove_lora must be implemented by subclasses"
         )  # pragma: no cover
 
-    def lora_view(self, lora_name):
-        """A forward handle whose logprobs calls run under LoRA adapter ``lora_name``
-        (``None`` = base/self). The view forwards with ``lora_name=``, so a backend
-        without LoRA support fails at the first forward."""
-        return self if lora_name is None else _LoRABoundLM(self, lora_name)
-
-    def lora_id(self, lora_name):
-        """Stable id of the weights bound to ``lora_name`` (``None`` = base).
-        A re-registered name gets a fresh id, so anything cached under
-        (name, id) can never survive a rebind."""
-        return None
-
     def set_lora(self, lora_path, lora_name):
         """Removed: adapter selection is per-request now."""
         raise RuntimeError(
             "set_lora() was removed: there is no active-adapter global anymore. "
-            "Pass lora_name= per call (next_token_logprobs/sample/...) or bind a "
-            "view with lora_view(name)."
+            "Pass lora_name= per call (next_token_logprobs/sample/...)."
         )
 
     def clear_lora(self):
@@ -180,11 +152,10 @@ class AsyncLM(ABC):
         else:
             generator = None
 
-        fwd = self.lora_view(lora_name)
         generated_token_ids = []
         for _ in range(max_tokens):
-            logprobs = await fwd.next_token_logprobs(
-                prompt_token_ids + generated_token_ids
+            logprobs = await self.next_token_logprobs(
+                prompt_token_ids + generated_token_ids, lora_name=lora_name
             )
             probs = torch.softmax(logprobs / temperature, dim=-1)
             next_token_id = torch.multinomial(
@@ -262,26 +233,32 @@ class MockAsyncLM(AsyncLM):
 
         return cls(AutoTokenizer.from_pretrained(model_name), **kwargs)
 
-    async def next_token_logprobs(self, token_ids):
+    async def next_token_logprobs(self, token_ids, lora_name=None):
         """Get next token log probabilities asynchronously.
 
         Args:
             token_ids (list[int]): Input token IDs.
+            lora_name (str, optional): Must be ``None``; the mock has no adapters.
 
         Returns:
             (torch.Tensor): Normalized log probability tensor.
         """
+        if lora_name is not None:
+            raise ValueError(f"MockAsyncLM has no adapter named {lora_name!r}")
         return self._get_logprobs(token_ids)
 
-    def next_token_logprobs_sync(self, token_ids):
+    def next_token_logprobs_sync(self, token_ids, lora_name=None):
         """Get next token log probabilities synchronously.
 
         Args:
             token_ids (list[int]): Input token IDs.
+            lora_name (str, optional): Must be ``None``; the mock has no adapters.
 
         Returns:
             (torch.Tensor): Normalized log probability tensor.
         """
+        if lora_name is not None:
+            raise ValueError(f"MockAsyncLM has no adapter named {lora_name!r}")
         return self._get_logprobs(token_ids)
 
     def _get_logprobs(self, token_ids):

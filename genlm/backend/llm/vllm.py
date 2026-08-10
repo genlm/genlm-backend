@@ -427,7 +427,7 @@ else:
             cached rows (their KV and scores came from the old weights) and
             binds ``lora_path`` under a fresh id — a training loop pushes
             updated weights with this one call. Forwards select the adapter
-            per call via ``lora_name=`` (or ``lora_view``).
+            per call via ``lora_name=``.
 
             Args:
                 lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
@@ -449,16 +449,6 @@ else:
             self._purge_adapter(lora_name)
             await self._settle()
             self.llm_engine.llm_engine.remove_lora(req.lora_int_id)
-
-        def lora_id(self, lora_name):
-            """Stable id of the weights bound to ``lora_name`` (``None`` = base).
-            A re-registered name gets a fresh id, so anything cached under
-            (name, id) can never survive a rebind."""
-            return (
-                None
-                if lora_name is None
-                else self._lora_requests[lora_name].lora_int_id
-            )
 
         def _lora_request_for(self, lora_name):
             """Per-request LoRARequest for ``lora_name`` (``None`` = base, LoRA off)."""
