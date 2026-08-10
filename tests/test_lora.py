@@ -293,7 +293,7 @@ def test_reregistration(async_llm, token_ids_list, lora_pair):
     finite = np.isfinite(lp_shifted) & np.isfinite(lp_identity)
     assert np.abs(lp_shifted[finite] - lp_identity[finite]).max() > 1e-2
 
-    async_llm.remove_lora("reg")
+    asyncio.run(async_llm.remove_lora("reg"))
     with pytest.raises(KeyError):
         asyncio.run(async_llm.next_token_logprobs(ids, lora_name="reg"))
 
