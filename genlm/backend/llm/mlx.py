@@ -108,11 +108,6 @@ else:
                 hasattr(c, "filter") for c in self.cache
             )
 
-        def rows_holding(self, prefixes):
-            """The row holding exactly each prefix, ``None`` where none does."""
-            index = {tuple(seq): i for i, seq in enumerate(self.seqs)}
-            return [index.get(tuple(p)) for p in prefixes]
-
         def _source(self, prompt):
             """``(row, n)`` for the live row whose tokens are the longest strict prefix
             of ``prompt``, or ``(None, 0)``."""
@@ -174,6 +169,8 @@ else:
         def __init__(self, model):
             self.model = model
             self.sets = {}  # name -> [(parameter path, array)], None being the base
+            self.versions = {}  # name -> monotonic weight-set id; a rebind bumps it
+            self._next_version = 1
             self.layout = None  # (num_layers, lora_parameters) the wrap used
             # The weight set currently on the model, by identity. ``add`` rebinds a name
             # to a fresh list, so a rebind invalidates itself.
@@ -200,10 +197,13 @@ else:
                 )
             weights = mx.load(str(path / "adapters.safetensors"))
             self.sets[name] = [(k, v) for k, v in weights.items() if "lora_" in k]
+            self.versions[name] = self._next_version
+            self._next_version += 1
 
         def remove(self, name):
             if name is None or self.sets.pop(name, None) is None:
                 raise ValueError(f"no adapter named {name!r}")
+            del self.versions[name]
 
         def select(self, name):
             """Install ``name``'s weights; ``None`` restores the base."""
@@ -310,6 +310,12 @@ else:
             self.adapters.remove(lora_name)
             self.clear_cache()
 
+        def lora_id(self, lora_name):
+            """Stable id of the weights bound to ``lora_name`` (``None`` = base).
+            A re-registered name gets a fresh id, so anything cached under
+            (name, id) can never survive a rebind."""
+            return None if lora_name is None else self.adapters.versions[lora_name]
+
         def clear_cache(self):
             """Drop the memoized log-probs and every pool's live KV rows."""
             if self.cache is not None:
@@ -366,14 +372,23 @@ else:
                 await asyncio.sleep(self.timeout)
 
         def _batch_evaluate(self):
-            """Resolve every queued query in one forward, deduplicating equal prompts."""
+            """Resolve every queued query in one forward, deduplicating equal
+            prompts. Every future gets its row or the exception — a failed
+            forward must not leave co-window callers waiting forever."""
             queries, self.queries = self.queries, []
             if not queries:
                 return
             futures = defaultdict(list)
             for key, future in queries:
                 futures[key].append(future)
-            logprobs = self._resolve(list(futures))
+            try:
+                logprobs = self._resolve(list(futures))
+            except BaseException as exc:
+                for waiting in futures.values():
+                    for future in waiting:
+                        if not future.done():
+                            future.set_exception(exc)
+                raise
             for key, waiting in futures.items():
                 for future in waiting:
                     future.set_result(logprobs[key])

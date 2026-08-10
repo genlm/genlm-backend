@@ -8,7 +8,7 @@ extending a context by one token appends that token to its request (a request
 whose next token hasn't arrived is skipped by the scheduler — resident and
 free), and the full-vocabulary row for every step leaves through a capture
 shim in the model runner's sampler slot. The engine never waits on a caller;
-callers only ever await rows.
+callers only ever await rows — or the exception that took them.
 """
 
 import os
@@ -129,10 +129,16 @@ else:
         drained at the top of ``schedule()``, so all queue mutation happens on
         the engine's own thread. An appended token makes a request schedulable
         for exactly one step; unappended requests are skipped by the stock
-        accounting (``num_new_tokens == 0``), resident and free. Placeholder
-        discipline: genlm tokens never materialize from the sampler, so async
-        scheduling's output placeholders are zeroed for them after every
-        schedule — otherwise the run-ahead accounting would corrupt.
+        accounting (``num_new_tokens == 0``), resident and free.
+
+        Genlm tokens arrive from the caller, not the sampler, which breaks two
+        of the runner's assumptions and both must be neutralized: (1) async
+        scheduling's output placeholders are zeroed after every schedule, or
+        the run-ahead accounting corrupts; (2) the runner reads a generated
+        position's input token from its own last-sampled buffer (which our
+        capture leaves at zero), so every drained append is shipped on the
+        ``SchedulerOutput`` for the worker-side wrap to write into that buffer
+        — otherwise the forward consumes token 0 instead of the appended one.
         """
 
         GENLM_PARAMS = (
@@ -142,6 +148,8 @@ else:
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self._genlm_inbox = []
+            self._genlm_dropped = []
+            self._genlm_new_tokens = {}  # drained appends awaiting the runner
             self._genlm_lock = threading.Lock()
             self._genlm_ids = set()
             self.genlm_block_hasher = None  # bound by AsyncVirtualLM.from_name
@@ -157,26 +165,45 @@ else:
             with self._genlm_lock:
                 self._genlm_inbox.append((births, appends, reaps))
 
+        def genlm_inbox_pending(self):
+            """Whether a submission is still waiting for a schedule pass."""
+            with self._genlm_lock:
+                return bool(self._genlm_inbox)
+
+        def genlm_take_dropped(self):
+            """Req ids whose appends targeted a request the engine no longer
+            holds — their rows can never arrive."""
+            with self._genlm_lock:
+                dropped, self._genlm_dropped = self._genlm_dropped, []
+            return dropped
+
         def has_requests(self):
             # The engine tests this before calling schedule(), so a submission
             # still in the inbox has to count as work or it would never drain.
-            with self._genlm_lock:
-                if self._genlm_inbox:
-                    return True
+            if self.genlm_inbox_pending():
+                return True
             return super().has_requests()
 
         def schedule(self, *args, **kwargs):
             self._genlm_drain()
-            return super().schedule(*args, **kwargs)
+            output = super().schedule(*args, **kwargs)
+            if self._genlm_new_tokens:
+                output.genlm_appends = self._genlm_new_tokens
+                self._genlm_new_tokens = {}
+            return output
 
         def _genlm_drain(self):
             with self._genlm_lock:
                 batch, self._genlm_inbox = self._genlm_inbox, []
+            dropped = []
             for births, appends, reaps in batch:
                 for req_id, token in appends:
                     request = self.requests.get(req_id)
-                    if request is not None:
+                    if request is None:
+                        dropped.append(req_id)
+                    else:
                         request.append_output_token_ids(int(token))
+                        self._genlm_new_tokens[req_id] = int(token)
                 for req_id, prompt_ids, lora_request in births:
                     request = Request(
                         request_id=req_id,
@@ -193,6 +220,9 @@ else:
                     if live:
                         self.finish_requests(live, RequestStatus.FINISHED_ABORTED)
                     self._genlm_ids.difference_update(reaps)
+            if dropped:
+                with self._genlm_lock:
+                    self._genlm_dropped.extend(dropped)
 
         def _update_after_schedule(self, scheduler_output):
             super()._update_after_schedule(scheduler_output)
@@ -202,13 +232,10 @@ else:
                     if request is not None:
                         request.num_output_placeholders = 0
 
-        def genlm_apply_now(self):
-            """Apply queued submissions without waiting for a schedule pass. Only
-            safe while no engine step is in flight (the caller owns the crank)."""
-            self._genlm_drain()
-
         def genlm_kv_usage(self):
-            """Fraction of the KV block pool in use (thread-safe int reads)."""
+            """Fraction of the KV block pool in use. Unsynchronized reads of
+            values the engine thread mutates — a heuristic threshold, torn
+            reads are harmless."""
             pool = self.kv_cache_manager.block_pool
             return 1.0 - pool.get_num_free_blocks() / pool.num_gpu_blocks
 
@@ -234,17 +261,44 @@ else:
 
     _gpu_model_runner.init_model_state = _init_model_state_with_capture
 
+    # The runner reads a generated position's input token from its per-request
+    # last-sampled buffer, which the capture sampler leaves untouched. Appends
+    # ride the SchedulerOutput; writing them here — after the stock request
+    # updates, before input preparation — makes the forward consume the
+    # appended token instead of a stale zero.
+    _orig_update_requests = _gpu_model_runner.GPUModelRunner.update_requests
+
+    def _update_requests_with_appends(self, scheduler_output):
+        _orig_update_requests(self, scheduler_output)
+        appends = getattr(scheduler_output, "genlm_appends", None)
+        if appends:
+            states = self.req_states
+            idxs, tokens = [], []
+            for req_id, token in appends.items():
+                idx = states.req_id_to_index.get(req_id)
+                if idx is not None:
+                    idxs.append(idx)
+                    tokens.append(token)
+            if idxs:
+                device = states.last_sampled_tokens.device
+                states.last_sampled_tokens[
+                    torch.tensor(idxs, dtype=torch.int64, device=device)
+                ] = torch.tensor(tokens, dtype=torch.int64, device=device).unsqueeze(1)
+
+    _gpu_model_runner.GPUModelRunner.update_requests = _update_requests_with_appends
+
     class AsyncVirtualLM(AsyncLM):  # pragma: no cover
         """Batched logprobs server over resident vLLM requests.
 
         Concurrent ``next_token_logprobs`` calls collect in an autobatch
         window (await-0 drain: the window fires when a full event-loop pass
         adds no new asks; ``timeout`` adds a cooperative linger only while no
-        crank is running). The executor diffs each context against its
-        resident request — an exact one-token extension appends that token; a
-        miss births a request — and cranks ``engine.step()`` on a worker
-        thread until every asked row has been captured. Identical contexts in
-        one window share one row.
+        crank is running). The executor reconciles the window against the
+        residency table — an exact one-token extension of an idle resident
+        appends that token; anything else births a request — and a
+        single-flight crank steps ``engine.step()`` on a worker thread until
+        every owed row has been captured. Identical contexts in one window
+        share one row.
         """
 
         def __init__(
@@ -278,19 +332,27 @@ else:
             self._lora_requests = {}
             self._next_lora_id = 1
 
-            # (tuple(context ids), lora_name) -> resident request id, in
-            # recency order (re-inserted on every touch) for LRU eviction.
-            self._residents = {}
-            self._extra_rids = []  # duplicate-content residents, reaped at release
-            self._evictions = []
+            # Every live engine request, in recency order (re-inserted on every
+            # extension): rid -> (tuple(context ids), lora_name). The content
+            # index beside it serves continuation lookups; a request that loses
+            # its index entry (its content was re-asked, or an extension landed
+            # on a key another request already held) stays in the table as an
+            # ordinary idle row until eviction reaps it. One table, one reaper.
+            self._requests = {}
+            self._by_content = {}  # (tuple(ids), lora_name) -> rid
             self._max_residents = 1 << 30  # tightened by from_name
             self._next_rid = 0
-            self._pending = {}  # req_id -> [asyncio futures]
+
+            # rid -> [asyncio futures]. The crank owns this map's contract:
+            # every owed future gets its row or an exception, never silence.
+            self._pending = {}
             self._pending_lock = threading.Lock()
+            self._served = 0  # rows delivered or failed; the crank's progress signal
+
             self._loop = None
             self._queries = []
             self._window_armed = False
-            self._cranking = False
+            self._crank_task = None
             self._sched = None  # bound by from_name
             self._core = None  # in-process engine-core client; the crank turns it
 
@@ -356,49 +418,71 @@ else:
             engine_core = self.llm_engine.llm_engine.engine_core.engine_core
             return engine_core.model_executor.driver_worker.worker.model_runner.model
 
+        # -- LoRA -------------------------------------------------------------
+
         def add_new_lora(self, lora_path, lora_name="lora_1"):
             """Register a LoRA adapter under ``lora_name``.
 
-            Re-registering an existing name evicts the old weights and binds the
-            name to ``lora_path`` under a fresh id — a training loop pushes updated
-            weights with this one call. Forwards select the adapter per call via
-            ``lora_name=`` (or ``lora_view``).
+            Re-registering an existing name purges the name's requests and
+            cached rows (their KV and scores came from the old weights) and
+            binds ``lora_path`` under a fresh id — a training loop pushes
+            updated weights with this one call. Forwards select the adapter
+            per call via ``lora_name=`` (or ``lora_view``).
 
             Args:
                 lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
                 lora_name (str): Name to assign to the loaded adapter.
             """
             if lora_name in self._lora_requests:
-                self.remove_lora(lora_name)
+                del self._lora_requests[lora_name]
+                self._purge_adapter(lora_name)
             lid = self._next_lora_id
             self._next_lora_id += 1
             self._lora_requests[lora_name] = LoRARequest(lora_name, lid, lora_path)
 
-        def remove_lora(self, lora_name):
+        async def remove_lora(self, lora_name):
             """Unregister ``lora_name`` and evict its weights from the engine.
-            Residents under the adapter are reaped first: their KV would outlive
-            the weights that produced it."""
+            The adapter's requests are reaped first — their KV would outlive
+            the weights that produced it — so this waits for a quiet engine."""
             req = self._lora_requests.pop(lora_name)
-            stale = [
-                rid for (_, name), rid in self._residents.items() if name == lora_name
-            ]
-            for key in [k for k in self._residents if k[1] == lora_name]:
-                del self._residents[key]
-            if stale:
-                self._sched.genlm_submit([], [], stale)
-                self._sched.genlm_apply_now()
-                self._core.get_output()
+            await self._settle()
+            self._purge_adapter(lora_name)
+            await self._settle()
             self.llm_engine.llm_engine.remove_lora(req.lora_int_id)
-            # OutputCache keys are (ids, lora_name); a later re-register under this
-            # name must not serve the old adapter's logprobs.
-            if self.cache is not None:
-                self.cache.clear()
+
+        def lora_id(self, lora_name):
+            """Stable id of the weights bound to ``lora_name`` (``None`` = base).
+            A re-registered name gets a fresh id, so anything cached under
+            (name, id) can never survive a rebind."""
+            return (
+                None
+                if lora_name is None
+                else self._lora_requests[lora_name].lora_int_id
+            )
 
         def _lora_request_for(self, lora_name):
             """Per-request LoRARequest for ``lora_name`` (``None`` = base, LoRA off)."""
             return None if lora_name is None else self._lora_requests[lora_name]
 
-        # -- the window -----------------------------------------------------
+        def _purge_adapter(self, lora_name):
+            """Drop every request under ``lora_name``: fail rows still owed
+            (the weights are changing under them), queue engine-side reaps,
+            and forget cached rows keyed by the name."""
+            stale = [
+                rid for rid, (_, name) in self._requests.items() if name == lora_name
+            ]
+            self._fail_rows(
+                [rid for rid in stale if rid in self._pending],
+                f"adapter {lora_name!r} was rebound or removed mid-forward",
+            )
+            for rid in stale:
+                self._forget(rid)
+            if stale and self._sched is not None:
+                self._sched.genlm_submit([], [], stale)
+            if self.cache is not None:
+                self.cache.clear()
+
+        # -- the window -------------------------------------------------------
 
         async def next_token_logprobs(self, token_ids, lora_name=None):
             """Request log probabilities of next token asynchronously with auto-batching.
@@ -410,6 +494,8 @@ else:
             Returns:
                 result (torch.Tensor): Normalized log probability tensor.
             """
+            if not token_ids:
+                raise ValueError("token_ids must not be empty")
             key = (tuple(token_ids), lora_name)
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
@@ -421,10 +507,15 @@ else:
                 self._window_armed = True
                 try:
                     await self._collect()
+                    queries, self._queries = self._queries, []
                 finally:
                     self._window_armed = False
-                queries, self._queries = self._queries, []
-                self._execute(queries)
+                try:
+                    self._execute(queries)
+                except BaseException as exc:
+                    for _, f in queries:
+                        if not f.done():
+                            f.set_exception(exc)
             result = await future
 
             if self.cache is not None:
@@ -438,7 +529,7 @@ else:
 
             Run by the window's first caller, never a background task: window
             state must not outlive the loop the callers are on."""
-            lingered = self._cranking or not self.timeout
+            lingered = self._crank_running() or not self.timeout
             while True:
                 n = len(self._queries)
                 await asyncio.sleep(0)
@@ -450,135 +541,193 @@ else:
                 await asyncio.sleep(self.timeout)
 
         def _execute(self, queries):
-            """Reconcile one window's contexts into the scheduler and make sure
-            a crank is turning."""
-            self._evict_under_pressure()
+            """Reconcile one window against the residency table, then make sure
+            a crank is turning. Planned over a consistent snapshot: every ask
+            registers its owed row before any eviction runs, so eviction can
+            never take a request this window speaks for."""
+            reaps = self._reap_under_pressure()
             grouped = {}
             for key, future in queries:
                 grouped.setdefault(key, []).append(future)
 
+            # Everything fallible happens before any mutation, so a raise here
+            # (an unknown adapter, say) leaves no half-applied state behind.
+            # Shortest first: a context is reconciled before any extension of
+            # it, so a chain (c, c+1, c+2) in one window resolves parent-first.
+            plan = [
+                ((ids, lora_name), self._lora_request_for(lora_name), futures)
+                for (ids, lora_name), futures in sorted(
+                    grouped.items(), key=lambda kv: len(kv[0][0])
+                )
+            ]
+
             births, appends = [], []
-            claimed = set()  # requests this window already speaks for
-            for (ids, lora_name), futures in sorted(
-                grouped.items(), key=lambda kv: len(kv[0][0])
-            ):
+            for (ids, lora_name), lora_request, futures in plan:
                 rid = None
-                if ids:
-                    # A resident is extendable once, and only when it owes no row:
-                    # a window can hold both a context and its extension (a critic
-                    # leaf trails the draw leaf), and one request cannot serve both.
-                    cand = self._residents.get((ids[:-1], lora_name))
-                    if (
-                        cand is not None
-                        and cand not in claimed
-                        and cand not in self._pending
-                    ):
-                        del self._residents[(ids[:-1], lora_name)]
-                        rid = cand
-                        appends.append((rid, ids[-1]))
-                        self._residents[(ids, lora_name)] = rid
+                # A resident is extendable only while it owes no row: a window
+                # can hold both a context and its extension (a critic leaf
+                # trails the draw leaf), and one request cannot serve both.
+                cand = self._by_content.get((ids[:-1], lora_name))
+                if cand is not None and cand not in self._pending:
+                    rid = cand
+                    appends.append((rid, ids[-1]))
+                    self._move(rid, (ids, lora_name))
                 if rid is None:
                     rid = self._mint()
-                    births.append((rid, ids, self._lora_request_for(lora_name)))
-                    if (ids, lora_name) in self._residents:
-                        self._extra_rids.append(rid)  # duplicate content
-                    else:
-                        self._residents[(ids, lora_name)] = rid
-                        self._evict_over_cap()
-                claimed.add(rid)
+                    births.append((rid, ids, lora_request))
+                    self._admit(rid, (ids, lora_name))
                 with self._pending_lock:
                     self._pending[rid] = futures
 
-            reaps = self._take_evictions()
+            reaps += self._reap_over_cap()
             self._sched.genlm_submit(births, appends, reaps)
-            if not self._cranking:
-                asyncio.create_task(self._crank())
+            self._ensure_crank()
 
         def _mint(self):
             self._next_rid += 1
             return f"{_REQ_PREFIX}{self._next_rid}"
 
-        def _evict_over_cap(self):
-            while len(self._residents) > self._max_residents:
-                if not self._evict_oldest_idle():
-                    return
+        # -- the residency table ----------------------------------------------
 
-        def _evict_under_pressure(self):
-            """Reap the oldest-recency residents when the KV block pool runs
-            hot: an idle resident is CPU-free but pins its blocks. Freed blocks
-            keep their prefix-cache hashes, so a reaped path that returns
-            rebirths with a cache-hit prefill."""
-            if self._sched is None or self._sched.genlm_kv_usage() < 0.9:
-                return
-            for _ in range(max(1, len(self._residents) // 8)):
-                if not self._evict_oldest_idle():
-                    return
+        def _admit(self, rid, key):
+            """Register a live request at ``key``. A newcomer takes the content
+            index; a displaced incumbent stays in the table as an idle row."""
+            self._requests[rid] = key
+            self._by_content[key] = rid
 
-        def _evict_oldest_idle(self):
-            """Evict the oldest resident with no row in flight; False if none."""
-            for key, rid in self._residents.items():
+        def _move(self, rid, key):
+            """Re-key an extended request (re-insertion keeps recency order)."""
+            self._forget(rid)
+            self._admit(rid, key)
+
+        def _forget(self, rid):
+            """Drop ``rid`` from the table and, if it still holds it, the index."""
+            key = self._requests.pop(rid, None)
+            if key is not None and self._by_content.get(key) == rid:
+                del self._by_content[key]
+
+        def _reap_idle(self, n):
+            """Up to ``n`` oldest requests owing no row, removed from the table
+            and returned for the scheduler reap. Freed blocks keep their
+            prefix-cache hashes, so a reaped path that returns rebirths with a
+            cache-hit prefill."""
+            victims = []
+            for rid in self._requests:
+                if len(victims) >= n:
+                    break
                 if rid not in self._pending:
-                    del self._residents[key]
-                    self._evictions.append(rid)
-                    return True
-            return False
+                    victims.append(rid)
+            for rid in victims:
+                self._forget(rid)
+            return victims
 
-        def _take_evictions(self):
-            evictions, self._evictions = self._evictions, []
-            return evictions
+        def _reap_over_cap(self):
+            over = len(self._requests) - self._max_residents
+            return self._reap_idle(over) if over > 0 else []
+
+        def _reap_under_pressure(self):
+            """An idle request is CPU-free (the scheduler skips it) but pins
+            its KV blocks; shed the oldest when the block pool runs hot."""
+            if self._sched is None or self._sched.genlm_kv_usage() < 0.9:
+                return []
+            return self._reap_idle(max(1, len(self._requests) // 8))
+
+        # -- the crank ----------------------------------------------------------
+
+        def _crank_running(self):
+            return self._crank_task is not None and not self._crank_task.done()
+
+        def _ensure_crank(self):
+            if not self._crank_running():
+                self._crank_task = asyncio.get_running_loop().create_task(self._crank())
 
         async def _crank(self):
-            """Single-flight: step the engine off-loop until every pending row
-            has been captured. Later windows piggyback on the running crank."""
-            if self._cranking:
-                return
-            self._cranking = True
+            """Single-flight: step the engine off-loop until no row is owed and
+            no submission waits in the inbox. Owns the pending contract — on
+            any failure every owed future gets the exception."""
             try:
-                while self._pending:
-                    if not self._sched.has_requests():
-                        # Rows are owed but the engine holds nothing for them:
-                        # a request was lost, and stepping would spin forever.
-                        with self._pending_lock:
-                            owed = list(self._pending)
-                            self._pending.clear()
-                        raise RuntimeError(f"engine dropped requests {owed}")
+                stalled = 0
+                while self._pending or self._sched.genlm_inbox_pending():
+                    served = self._served
                     await asyncio.to_thread(self._core.get_output)
-            finally:
-                self._cranking = False
-            if self._pending:
-                asyncio.create_task(self._crank())
+                    self._fail_rows(
+                        self._sched.genlm_take_dropped(),
+                        "the engine no longer holds the request",
+                    )
+                    if self._pending and self._served == served:
+                        stalled += 1
+                        if stalled > 4096:
+                            raise RuntimeError(
+                                "engine made no progress on owed rows: "
+                                f"{list(self._pending)}"
+                            )
+                    else:
+                        stalled = 0
+            except BaseException as exc:
+                with self._pending_lock:
+                    owed = list(self._pending.values())
+                    self._pending.clear()
+                for futures in owed:
+                    for f in futures:
+                        if not f.done():
+                            f.set_exception(exc)
+                raise
+
+        def _fail_rows(self, rids, why):
+            """Fail the owed futures of ``rids`` and forget the requests —
+            they are gone engine-side."""
+            for rid in rids:
+                with self._pending_lock:
+                    futures = self._pending.pop(rid, None)
+                    if futures:
+                        self._served += 1
+                self._forget(rid)
+                exc = RuntimeError(f"{why}: {rid}")
+                for f in futures or []:
+                    if not f.done():
+                        f.set_exception(exc)
 
         def _deliver(self, req_id, row):
             """Capture-shim callback (engine thread): hand ``req_id``'s row to
             its awaiting futures on the event loop."""
             with self._pending_lock:
                 futures = self._pending.pop(req_id, None)
+                if futures:
+                    self._served += 1
             if not futures or self._loop is None:
                 return
 
             def _resolve():
                 for i, f in enumerate(futures):
-                    if not f.done():
-                        f.set_result(row if i == 0 else row.clone())
+                    try:
+                        if not f.done():
+                            f.set_result(row if i == 0 else row.clone())
+                    except Exception:
+                        continue  # a dead future must not starve the live ones
 
             try:
                 self._loop.call_soon_threadsafe(_resolve)
             except RuntimeError:
                 pass  # the run's loop closed; the rows have no reader
 
+        async def _settle(self):
+            """Wait until the engine owes nothing: rows served, inbox drained."""
+            while (
+                self._crank_running()
+                or self._pending
+                or self._sched.genlm_inbox_pending()
+            ):
+                self._ensure_crank()
+                await self._crank_task
+
         async def release_all(self):
-            """Reap every resident request (end of an inference run). Waits out
-            any turning crank so the reap lands on a quiet engine."""
-            reaps = list(self._residents.values()) + self._extra_rids
-            self._residents.clear()
-            self._extra_rids = []
+            """Reap every idle request (end of an inference run) and wait for
+            the engine to carry it out."""
+            reaps = self._reap_idle(len(self._requests))
             if not reaps or self._sched is None:
                 return
             self._sched.genlm_submit([], [], reaps)
-            while self._cranking:
-                await asyncio.sleep(0.001)
-            self._sched.genlm_apply_now()
-            self._core.get_output()  # carry the freed rows to the model runner
+            await self._settle()
 
         def reset_async_queries(self):
             """Clear any pending queries from the queue.

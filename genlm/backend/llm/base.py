@@ -128,6 +128,12 @@ class AsyncLM(ABC):
         without LoRA support fails at the first forward."""
         return self if lora_name is None else _LoRABoundLM(self, lora_name)
 
+    def lora_id(self, lora_name):
+        """Stable id of the weights bound to ``lora_name`` (``None`` = base).
+        A re-registered name gets a fresh id, so anything cached under
+        (name, id) can never survive a rebind."""
+        return None
+
     def set_lora(self, lora_path, lora_name):
         """Removed: adapter selection is per-request now."""
         raise RuntimeError(

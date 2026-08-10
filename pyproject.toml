@@ -28,12 +28,12 @@ mlx = [
     "mlx-lm>=0.30",
 ]
 vllm = [
-    # The engine-native arms (ControlSampler, run_burst) reach into vLLM v1
-    # internals (Sampler.forward signature, input_batch.req_ids, the model-runner
-    # sampler swap) that are version-specific; pin one validated line rather than
-    # advertising the whole range. Every consumed surface is byte-identical
-    # 0.21 <-> 0.26; the V2 model runner (which bypasses the sampler seam) is
-    # pinned off at import in llm/vllm.py.
+    # The serving mechanism reaches into vLLM v1 internals that are
+    # version-specific (the MRv2 custom_sampler hook, direct Request
+    # construction, scheduler subclassing); pin one validated line rather
+    # than advertising the whole range. The V2 model runner is forced ON at
+    # import in llm/vllm.py -- the capture shim installs through its
+    # ModelState hook.
     "vllm>=0.26.0,<0.27.0; sys_platform == 'linux'",
     "triton>=3.2.0; sys_platform == 'linux'",
 ]
