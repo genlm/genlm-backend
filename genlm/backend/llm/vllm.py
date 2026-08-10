@@ -1,48 +1,55 @@
+"""vLLM backend: a batched next-token-logprobs server over resident engine
+requests.
+
+The public surface is ``next_token_logprobs`` / ``batch_next_token_logprobs``;
+concurrent calls meet in an autobatch window and execute as one batch. Behind
+the window, each distinct growing context holds a resident engine request:
+extending a context by one token appends that token to its request (a request
+whose next token hasn't arrived is skipped by the scheduler — resident and
+free), and the full-vocabulary row for every step leaves through a capture
+shim in the model runner's sampler slot. The engine never waits on a caller;
+callers only ever await rows.
+"""
+
 import os
 import sys
 import asyncio
-import contextlib
 import warnings
+import threading
 import torch
 import logging
-import threading
-from collections import defaultdict
 
 from genlm.backend.llm.base import AsyncLM
 from genlm.backend.cache import OutputCache
-from genlm.backend.llm.lane import LaneLedger
 
 
 try:
-    # Enable vLLM v1 with in-process mode (no multiprocessing). These env vars
-    # must be set BEFORE vllm is imported for the first time in this process;
-    # once vllm is imported the values have already been captured and cannot be
-    # changed by rewriting os.environ. We hard-set (rather than setdefault) so
-    # that pre-existing values from the user's environment do not silently
-    # switch us back to v0 or re-enable multiprocessing.
+    # In-process v1 engine with the V2 (MRv2) model runner. These env vars must
+    # be set BEFORE vllm is imported for the first time in this process.
     if "vllm" in sys.modules:
         warnings.warn(
-            "vllm was imported before genlm.backend.llm.vllm; "
-            "VLLM_USE_V1=1 / VLLM_ENABLE_V1_MULTIPROCESSING=0 may not take "
-            "effect and AsyncVirtualLM may fail to capture logprobs.",
+            "vllm was imported before genlm.backend.llm.vllm; engine-mode env "
+            "vars may not take effect.",
             RuntimeWarning,
             stacklevel=2,
         )
     os.environ["VLLM_USE_V1"] = "1"
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-    # The V2 model runner bypasses the Sampler/LogitsProcessor seam this module
-    # drives; some architectures default to it, so pin it off explicitly.
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
+    # flashinfer's JIT needs CUDA_HOME at runtime; compute nodes lack it.
+    os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+    # One runner, one seam: the capture shim installs via MRv2's
+    # ModelState.custom_sampler hook, so force MRv2 for every architecture.
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
-    from vllm.inputs import TokensPrompt
     from vllm.distributed.parallel_state import (
         destroy_model_parallel,
         destroy_distributed_environment,
     )
-    from vllm.v1.sample.logits_processor import LogitsProcessor
-    from vllm.v1.sample.sampler import Sampler
-    from vllm.v1.outputs import SamplerOutput
+    from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+    from vllm.v1.request import Request, RequestStatus
+    from vllm.v1.worker.gpu.sample.output import SamplerOutput
+    import vllm.v1.worker.gpu.model_runner as _gpu_model_runner
 
     HAS_VLLM = True
 except ImportError:  # pragma: no cover
@@ -69,221 +76,201 @@ if not HAS_VLLM:
 else:
     logging.getLogger("vllm").setLevel(logging.WARNING)
 
-    class GlobalLogprobsCapture(LogitsProcessor):  # pragma: no cover
-        """A global logits processor that captures full vocabulary logprobs.
+    _REQ_PREFIX = "genlm-"
 
-        This processor is injected once into the vLLM v1 engine and records
-        the log probabilities for *the most recent* sampling step, as a
-        single ``[batch_size, vocab_size]`` tensor.
+    class _CaptureSampler:  # pragma: no cover
+        """Sits in the model runner's sampler slot. For genlm requests it
+        captures the full-vocabulary log-probability row (device-resident) and
+        reports zero sampled tokens — the scheduler then appends nothing and
+        the request idles until its next token arrives from the caller. All
+        other requests defer verbatim to the wrapped stock sampler."""
 
-        Semantics:
+        def __init__(self, base, deliver):
+            self._base = base
+            self._deliver = deliver  # (req_id, row) -> None, thread-safe
 
-        * :meth:`apply` is invoked by the v1 sampler exactly once per decode
-          step across a batch of prompts, so the captured tensor always
-          reflects the final token-position logprobs for every prompt in
-          that batch.
-        * It does NOT retain history. Each :meth:`apply` call overwrites
-          ``_captured_batch``. This is intentional: for the
-          ``next_token_logprobs`` paths in :class:`AsyncVirtualLM`, every
-          ``generate`` is issued with ``max_tokens=1`` and preceded by
-          :meth:`clear`, so exactly one decode step runs and the overwrite
-          never hides information. For sampling paths (:meth:`sample`,
-          :meth:`batch_sample`) ``max_tokens > 1``, :meth:`apply` fires
-          once per step, and the final-step capture is correct but earlier
-          steps are discarded - callers of those methods don't read
-          ``_captured_batch`` anyway.
-        * Concurrent reads/writes are serialized by ``_lock``, so a
-          consumer thread calling :meth:`get_logprobs` never observes a
-          half-written tensor.
+        def __getattr__(self, name):
+            return getattr(self._base, name)
+
+        def __call__(self, logits, input_batch):
+            req_ids = input_batch.req_ids
+            n = input_batch.num_reqs
+            cu = input_batch.cu_num_logits_np
+            ours = []
+            for i in range(n):
+                if req_ids[i].startswith(_REQ_PREFIX):
+                    ours.append(i)
+                    lo, hi = int(cu[i]), int(cu[i + 1])
+                    if hi > lo:
+                        # The last position's row is the next-token distribution
+                        # at the request's current context (mid prefill chunks
+                        # produce no logits and are skipped).
+                        row = torch.log_softmax(logits[hi - 1].float(), dim=-1)
+                        self._deliver(req_ids[i], row)
+            if len(ours) == n:
+                return SamplerOutput(
+                    sampled_token_ids=logits.new_zeros((n, 1), dtype=torch.int64),
+                    logprobs_tensors=None,
+                    num_nans=None,
+                    num_sampled=logits.new_zeros(n, dtype=torch.int32),
+                    num_rejected=logits.new_zeros(n, dtype=torch.int32),
+                )
+            out = self._base(logits, input_batch)
+            if ours:
+                idx = torch.tensor(ours, device=out.num_sampled.device)
+                out.num_sampled = out.num_sampled.clone()
+                out.num_sampled[idx] = 0
+            return out
+
+    class GenlmScheduler(AsyncScheduler):  # pragma: no cover
+        """Owns genlm requests' life and death directly — no engine front door.
+
+        Callers submit (births, appends, reaps) through a thread-safe inbox
+        drained at the top of ``schedule()``, so all queue mutation happens on
+        the engine's own thread. An appended token makes a request schedulable
+        for exactly one step; unappended requests are skipped by the stock
+        accounting (``num_new_tokens == 0``), resident and free. Placeholder
+        discipline: genlm tokens never materialize from the sampler, so async
+        scheduling's output placeholders are zeroed for them after every
+        schedule — otherwise the run-ahead accounting would corrupt.
         """
 
-        def __init__(self):
-            self._captured_batch = None  # [batch_size, vocab_size] tensor
-            self._lock = threading.Lock()
+        GENLM_PARAMS = (
+            None  # set lazily; SamplingParams at class-def time races env setup
+        )
 
-        def apply(self, logits: torch.Tensor) -> torch.Tensor:
-            """Capture logprobs and pass through logits unchanged.
-
-            Overwrites any previously captured batch; see class docstring.
-            """
-            # Do the clone outside the critical section so readers aren't blocked
-            # on the full [batch, vocab] copy.
-            captured = torch.log_softmax(logits, dim=-1, dtype=logits.dtype).clone()
-            with self._lock:
-                self._captured_batch = captured
-            return logits
-
-        def is_argmax_invariant(self) -> bool:
-            """Return True since we don't modify logits."""
-            return True
-
-        def update_state(self, batch_update) -> None:
-            """No state updates needed."""
-            pass
-
-        def get_logprobs(self, batch_index=0):
-            """Get captured logprobs for a batch index."""
-            with self._lock:
-                if self._captured_batch is None:
-                    return None
-                if batch_index >= self._captured_batch.shape[0]:
-                    return None
-                return self._captured_batch[batch_index].clone()
-
-        def get_all_logprobs(self):
-            """Get all captured logprobs as a batch tensor."""
-            with self._lock:
-                if self._captured_batch is None:
-                    return None
-                return self._captured_batch.clone()
-
-        def clear(self):
-            """Clear captured logprobs."""
-            with self._lock:
-                self._captured_batch = None
-
-    class LaneSampler(Sampler):  # pragma: no cover
-        """A ``Sampler`` that serves resident lanes: publishes each step's
-        log-probability rows to their lanes and blocks until every published
-        lane feeds or closes (the feed barrier). Scoring one-shots are captured
-        per request and resolved to their futures. With no lanes or scores
-        live, defers verbatim to the stock sampler.
-
-        Row -> request identity reads ``model_runner.input_batch.req_ids``
-        (vLLM appends a hyphen-free ``-{8hex}`` to every caller id, so the
-        last-dash split is safe). A row handle scheduled only partially this
-        step is stalled: flushed and re-added at its lanes' contexts, nothing
-        published — control never observes a partial view-set.
-        """
-
-        def __init__(self, logprobs_mode, model_runner, server):
-            super().__init__(logprobs_mode=logprobs_mode)
-            self._model_runner = model_runner
-            self._server = server
-
-        def _row_rids(self, num_rows):
-            req_ids = self._model_runner.input_batch.req_ids
-            return [int(r.rsplit("-", 1)[0]) for r in req_ids[:num_rows]]
-
-        def forward(
-            self,
-            logits,
-            sampling_metadata,
-            predict_bonus_token=False,
-            logprobs_mode_override=None,
-        ):
-            server = self._server
-            ledger = server.ledger
-            if not ledger.lanes and not server._scores:
-                return super().forward(
-                    logits,
-                    sampling_metadata,
-                    predict_bonus_token=predict_bonus_token,
-                    logprobs_mode_override=logprobs_mode_override,
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._genlm_inbox = []
+            self._genlm_lock = threading.Lock()
+            self._genlm_ids = set()
+            self.genlm_block_hasher = None  # bound by AsyncVirtualLM.from_name
+            if GenlmScheduler.GENLM_PARAMS is None:
+                GenlmScheduler.GENLM_PARAMS = SamplingParams(
+                    n=1, max_tokens=1 << 20, ignore_eos=True, detokenize=False
                 )
 
-            logits = logits.to(torch.float32)
-            logits = self.apply_logits_processors(
-                logits, sampling_metadata, predict_bonus_token
-            )
-            for processor in sampling_metadata.logitsprocs.argmax_invariant:
-                logits = processor.apply(logits)
-            logprobs = torch.log_softmax(logits, dim=-1)
+        def genlm_submit(self, births, appends, reaps):
+            """births: (req_id, prompt_ids, lora_request); appends: (req_id,
+            token); reaps: req_id. Thread-safe; applied before the next
+            schedule pass."""
+            with self._genlm_lock:
+                self._genlm_inbox.append((births, appends, reaps))
 
-            rids = self._row_rids(logits.shape[0])
-            sampled = torch.zeros(len(rids), dtype=torch.int64, device=logits.device)
+        def has_requests(self):
+            # The engine tests this before calling schedule(), so a submission
+            # still in the inbox has to count as work or it would never drain.
+            with self._genlm_lock:
+                if self._genlm_inbox:
+                    return True
+            return super().has_requests()
 
-            # Scoring one-shots: resolve each future on its own loop.
-            for i, rid in enumerate(rids):
-                entry = server._scores.get(rid)
-                if entry is not None:
-                    loop, fut = entry
-                    row = logprobs[i].detach().cpu()
-                    loop.call_soon_threadsafe(
-                        lambda f=fut, r=row: f.done() or f.set_result(r)
+        def schedule(self, *args, **kwargs):
+            self._genlm_drain()
+            return super().schedule(*args, **kwargs)
+
+        def _genlm_drain(self):
+            with self._genlm_lock:
+                batch, self._genlm_inbox = self._genlm_inbox, []
+            for births, appends, reaps in batch:
+                for req_id, token in appends:
+                    request = self.requests.get(req_id)
+                    if request is not None:
+                        request.append_output_token_ids(int(token))
+                for req_id, prompt_ids, lora_request in births:
+                    request = Request(
+                        request_id=req_id,
+                        prompt_token_ids=list(prompt_ids),
+                        sampling_params=self.GENLM_PARAMS,
+                        pooling_params=None,
+                        lora_request=lora_request,
+                        block_hasher=self.genlm_block_hasher,
                     )
+                    self._genlm_ids.add(req_id)
+                    self.add_request(request)
+                if reaps:
+                    live = [r for r in reaps if r in self.requests]
+                    if live:
+                        self.finish_requests(live, RequestStatus.FINISHED_ABORTED)
+                    self._genlm_ids.difference_update(reaps)
 
-            # Lanes: assemble complete row handles, stall the rest.
-            present = {}  # rid -> batch index, lanes only
-            for i, rid in enumerate(rids):
-                if rid in ledger.lanes:
-                    present[rid] = i
-            by_handle = {}
-            for rid in present:
-                lane = ledger.lanes[rid]
-                by_handle.setdefault(id(lane.row), (lane.row, []))[1].append(rid)
-            rows_out = {}
-            for row_handle, handle_rids in by_handle.values():
-                if len(handle_rids) == len(row_handle.lanes):
-                    for rid in handle_rids:
-                        rows_out[rid] = logprobs[present[rid]].detach().cpu()
-                else:
-                    ledger.restall(row_handle)
+        def _update_after_schedule(self, scheduler_output):
+            super()._update_after_schedule(scheduler_output)
+            for req_id in scheduler_output.num_scheduled_tokens:
+                if req_id in self._genlm_ids:
+                    request = self.requests.get(req_id)
+                    if request is not None:
+                        request.num_output_placeholders = 0
 
-            fed = ledger.publish_and_wait(rows_out)
-            for rid, token in fed.items():
-                sampled[present[rid]] = int(token)
+        def genlm_apply_now(self):
+            """Apply queued submissions without waiting for a schedule pass. Only
+            safe while no engine step is in flight (the caller owns the crank)."""
+            self._genlm_drain()
 
-            return SamplerOutput(
-                sampled_token_ids=sampled.to(torch.int32).unsqueeze(-1),
-                logprobs_tensors=None,
-            )
+        def genlm_kv_usage(self):
+            """Fraction of the KV block pool in use (thread-safe int reads)."""
+            pool = self.kv_cache_manager.block_pool
+            return 1.0 - pool.get_num_free_blocks() / pool.num_gpu_blocks
+
+    # from_name needs the shim installed while ``LLM(...)`` constructs the
+    # model runner; the runner reaches its ModelState through this module
+    # function, wrapped once here.
+    _PENDING_DELIVER = None
+    _orig_init_model_state = _gpu_model_runner.init_model_state
+
+    def _init_model_state_with_capture(vllm_config, model, encoder_cache, device):
+        state = _orig_init_model_state(vllm_config, model, encoder_cache, device)
+        deliver = _PENDING_DELIVER
+        if deliver is not None:
+            orig_custom = state.custom_sampler
+
+            def custom_sampler(sampler):
+                custom = orig_custom(sampler)
+                base, rejection = custom if custom is not None else (sampler, None)
+                return _CaptureSampler(base, deliver), rejection
+
+            state.custom_sampler = custom_sampler
+        return state
+
+    _gpu_model_runner.init_model_state = _init_model_state_with_capture
 
     class AsyncVirtualLM(AsyncLM):  # pragma: no cover
-        """Async language model using vLLM v1 with global logits processor.
+        """Batched logprobs server over resident vLLM requests.
 
-        This implementation uses vLLM v1's in-process mode with a global
-        logits processor to efficiently capture full vocabulary log probabilities.
+        Concurrent ``next_token_logprobs`` calls collect in an autobatch
+        window (await-0 drain: the window fires when a full event-loop pass
+        adds no new asks; ``timeout`` adds a cooperative linger only while no
+        crank is running). The executor diffs each context against its
+        resident request — an exact one-token extension appends that token; a
+        miss births a request — and cranks ``engine.step()`` on a worker
+        thread until every asked row has been captured. Identical contexts in
+        one window share one row.
         """
-
-        supports_lanes = True  # serves resident decode lanes (open_lane)
-
-        default_params = {
-            "max_tokens": 1,
-            "n": 1,
-            "detokenize": False,
-            "stop": None,
-            "ignore_eos": True,
-        }
 
         def __init__(
             self,
             llm_engine,
-            logprobs_capture,
             cache_size=0,
             cache_opts=None,
-            batch_size=20,
-            timeout=0.02,
+            timeout=0.0,
         ):
             """Initialize an `AsyncVirtualLM` instance.
 
             Args:
                 llm_engine (LLM): The vLLM engine instance.
-                logprobs_capture (GlobalLogprobsCapture): The global logprobs capture processor.
                 cache_size (int, optional): Maximum size of the output cache. If 0, caching is disabled. Defaults to 0.
                 cache_opts (dict, optional): Additional options to pass to the [`OutputCache`][genlm.backend.cache.OutputCache] constructor. Defaults to None (no extra options).
-                batch_size (int, optional): Maximum queries to process in one batch during auto-batching. Defaults to 20.
-                timeout (float, optional): Seconds to wait after the first queued query before processing the current batch. The batch also fires immediately when ``batch_size`` is reached. Defaults to 0.02.
-
-            Note:
-                The cache stores the log probabilities for previously seen token sequences to avoid redundant requests. KV caching is handled internally by the vLLM engine.
-                ``batch_next_token_logprobs_sync`` bypasses this cache and always re-evaluates; the other three logprobs methods consult it.
+                timeout (float, optional): Cooperative linger in seconds spent once per window while no engine crank is running, letting late concurrent callers join the batch. Defaults to 0.
             """
             self.llm_engine = llm_engine
-            self.logprobs_capture = logprobs_capture
-            # The engine-native sampler, swapped in once by from_name (None until
-            # then, and on any non-engine construction path). Detached except for
-            self.ledger = LaneLedger()
-            self._scores = {}  # scoring rid -> (loop, future)
-            self._score_adds = []  # queued (rid, token_ids, lora_name)
-            self._lane_thread = None
-            self._stop_lanes = None
             self.tokenizer = llm_engine.get_tokenizer()
+            self.timeout = timeout
             self.cache = (
                 OutputCache(maxsize=cache_size, **(cache_opts or {}))
                 if cache_size > 0
                 else None
             )
+
             # name -> LoRARequest; every forward selects its adapter per request
             # via ``lora_name`` (``None`` = base). Ids are monotonic: vLLM caches
             # adapter weights by int id, so an id must never be reused for
@@ -291,13 +278,21 @@ else:
             self._lora_requests = {}
             self._next_lora_id = 1
 
-            self.queries = []
-            self.batch_size = batch_size
-            self.timeout = timeout
-            self.timer = None
-
-            self.sample_queries = []
-            self.sample_timer = None
+            # (tuple(context ids), lora_name) -> resident request id, in
+            # recency order (re-inserted on every touch) for LRU eviction.
+            self._residents = {}
+            self._extra_rids = []  # duplicate-content residents, reaped at release
+            self._evictions = []
+            self._max_residents = 1 << 30  # tightened by from_name
+            self._next_rid = 0
+            self._pending = {}  # req_id -> [asyncio futures]
+            self._pending_lock = threading.Lock()
+            self._loop = None
+            self._queries = []
+            self._window_armed = False
+            self._cranking = False
+            self._sched = None  # bound by from_name
+            self._core = None  # in-process engine-core client; the crank turns it
 
             super().__init__(tokenizer=self.tokenizer)
 
@@ -322,45 +317,44 @@ else:
                 "enable_prefix_caching": True,
                 "disable_log_stats": True,
                 "gpu_memory_utilization": 0.9,
-                # Pinned off for the lane port: revisit once lanes settle.
-                "async_scheduling": False,
+                "async_scheduling": True,
+                "scheduler_cls": GenlmScheduler,
                 **(engine_opts or {}),
             }
 
-            llm = LLM(model=model_name, tokenizer=model_name, **engine_opts)
+            global _PENDING_DELIVER
+            deliver_box = {}
+            _PENDING_DELIVER = lambda req_id, row: deliver_box["fn"](req_id, row)  # noqa: E731
+            try:
+                llm = LLM(model=model_name, tokenizer=model_name, **engine_opts)
+            finally:
+                _PENDING_DELIVER = None
 
-            logprobs_capture = GlobalLogprobsCapture()
-            model_runner = cls._get_model_runner(llm)
-            model_runner.input_batch.logitsprocs.argmax_invariant.append(
-                logprobs_capture
-            )
+            inst = cls(llm, **kwargs)
+            deliver_box["fn"] = inst._deliver
 
-            # Install the lane sampler ONCE. With no lanes or scores live it
-            # defers verbatim to the stock sampler, so normal generation and the
-            # next_token_logprobs paths are byte-unaffected.
-            inst = cls(llm, logprobs_capture, **kwargs)
-            model_runner.sampler = LaneSampler(
-                logprobs_mode=model_runner.model_config.logprobs_mode,
-                model_runner=model_runner,
-                server=inst,
+            # The crank turns the engine core directly: our requests emit no
+            # tokens, so LLMEngine's output processor has nothing to do and
+            # would only reject requests it never registered.
+            inst._core = llm.llm_engine.engine_core
+            engine_core = inst._core.engine_core
+            sched = engine_core.scheduler
+            if not isinstance(sched, GenlmScheduler):
+                raise RuntimeError(
+                    f"engine scheduler is {type(sched).__name__}, not GenlmScheduler"
+                )
+            sched.genlm_block_hasher = engine_core.request_block_hasher
+            inst._sched = sched
+            inst._max_residents = max(
+                8, llm.llm_engine.vllm_config.scheduler_config.max_num_seqs - 8
             )
             return inst
-
-        @staticmethod
-        def _get_model_runner(llm):
-            """Walk the vLLM v1 internals to reach the driver worker's model runner.
-
-            This path is brittle against vLLM refactors, so it lives in one
-            place and is reused by ``from_name`` (to inject the logits
-            processor) and ``underlying_model``.
-            """
-            engine_core = llm.llm_engine.engine_core.engine_core
-            return engine_core.model_executor.driver_worker.worker.model_runner
 
         @property
         def underlying_model(self):
             """Access the underlying model for advanced use cases."""
-            return self._get_model_runner(self.llm_engine).model
+            engine_core = self.llm_engine.llm_engine.engine_core.engine_core
+            return engine_core.model_executor.driver_worker.worker.model_runner.model
 
         def add_new_lora(self, lora_path, lora_name="lora_1"):
             """Register a LoRA adapter under ``lora_name``.
@@ -381,8 +375,19 @@ else:
             self._lora_requests[lora_name] = LoRARequest(lora_name, lid, lora_path)
 
         def remove_lora(self, lora_name):
-            """Unregister ``lora_name`` and evict its weights from the engine."""
+            """Unregister ``lora_name`` and evict its weights from the engine.
+            Residents under the adapter are reaped first: their KV would outlive
+            the weights that produced it."""
             req = self._lora_requests.pop(lora_name)
+            stale = [
+                rid for (_, name), rid in self._residents.items() if name == lora_name
+            ]
+            for key in [k for k in self._residents if k[1] == lora_name]:
+                del self._residents[key]
+            if stale:
+                self._sched.genlm_submit([], [], stale)
+                self._sched.genlm_apply_now()
+                self._core.get_output()
             self.llm_engine.llm_engine.remove_lora(req.lora_int_id)
             # OutputCache keys are (ids, lora_name); a later re-register under this
             # name must not serve the old adapter's logprobs.
@@ -393,11 +398,10 @@ else:
             """Per-request LoRARequest for ``lora_name`` (``None`` = base, LoRA off)."""
             return None if lora_name is None else self._lora_requests[lora_name]
 
+        # -- the window -----------------------------------------------------
+
         async def next_token_logprobs(self, token_ids, lora_name=None):
             """Request log probabilities of next token asynchronously with auto-batching.
-
-            Concurrent calls are auto-batched into ``LLM.generate()`` calls (one per
-            distinct LoRA adapter) for efficiency. Use with ``await``.
 
             Args:
                 token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
@@ -407,109 +411,174 @@ else:
                 result (torch.Tensor): Normalized log probability tensor.
             """
             key = (tuple(token_ids), lora_name)
-
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
 
-            future = asyncio.get_running_loop().create_future()
-            self._add_query(token_ids, future, lora_name)
+            self._loop = asyncio.get_running_loop()
+            future = self._loop.create_future()
+            self._queries.append((key, future))
+            if not self._window_armed:
+                self._window_armed = True
+                try:
+                    await self._collect()
+                finally:
+                    self._window_armed = False
+                queries, self._queries = self._queries, []
+                self._execute(queries)
             result = await future
 
             if self.cache is not None:
                 self.cache[key] = result
-
             return result
 
-        def _add_query(self, token_ids, future, lora_name=None):
-            """Add a query to be evaluated in the next batch.
+        async def _collect(self):
+            """Hold the window open: return once a full event-loop pass adds no
+            new ask, after one cooperative linger (skipped while a crank is
+            already turning — its frames do the batching).
 
-            The timeout is measured from the *first* queued query, not the most
-            recent one: we only arm the timer when the queue transitions from
-            empty to non-empty. This prevents starvation when queries trickle in
-            faster than ``self.timeout`` but never fill a batch.
+            Run by the window's first caller, never a background task: window
+            state must not outlive the loop the callers are on."""
+            lingered = self._cranking or not self.timeout
+            while True:
+                n = len(self._queries)
+                await asyncio.sleep(0)
+                if len(self._queries) > n:
+                    continue
+                if lingered:
+                    return
+                lingered = True
+                await asyncio.sleep(self.timeout)
 
-            Args:
-                token_ids (list[int]): Token IDs representing the query prompt.
-                future (asyncio.Future): Future to store the result in.
-            """
-            self.queries.append((token_ids, future, lora_name))
+        def _execute(self, queries):
+            """Reconcile one window's contexts into the scheduler and make sure
+            a crank is turning."""
+            self._evict_under_pressure()
+            grouped = {}
+            for key, future in queries:
+                grouped.setdefault(key, []).append(future)
 
-            if len(self.queries) >= self.batch_size:
-                if self.timer:
-                    self.timer.cancel()
-                    self.timer = None
-                self._batch_evaluate()
-            elif self.timer is None:
-                self.timer = asyncio.get_running_loop().call_later(
-                    self.timeout, self._batch_evaluate
-                )
+            births, appends = [], []
+            claimed = set()  # requests this window already speaks for
+            for (ids, lora_name), futures in sorted(
+                grouped.items(), key=lambda kv: len(kv[0][0])
+            ):
+                rid = None
+                if ids:
+                    # A resident is extendable once, and only when it owes no row:
+                    # a window can hold both a context and its extension (a critic
+                    # leaf trails the draw leaf), and one request cannot serve both.
+                    cand = self._residents.get((ids[:-1], lora_name))
+                    if (
+                        cand is not None
+                        and cand not in claimed
+                        and cand not in self._pending
+                    ):
+                        del self._residents[(ids[:-1], lora_name)]
+                        rid = cand
+                        appends.append((rid, ids[-1]))
+                        self._residents[(ids, lora_name)] = rid
+                if rid is None:
+                    rid = self._mint()
+                    births.append((rid, ids, self._lora_request_for(lora_name)))
+                    if (ids, lora_name) in self._residents:
+                        self._extra_rids.append(rid)  # duplicate content
+                    else:
+                        self._residents[(ids, lora_name)] = rid
+                        self._evict_over_cap()
+                claimed.add(rid)
+                with self._pending_lock:
+                    self._pending[rid] = futures
 
-        def _batch_evaluate(self):
-            """Process all queued queries, one batched ``generate()`` per distinct LoRA
-            adapter (a single ``generate`` applies one adapter to all its prompts)."""
-            queries, self.queries = self.queries, []
-            if not queries:
+            reaps = self._take_evictions()
+            self._sched.genlm_submit(births, appends, reaps)
+            if not self._cranking:
+                asyncio.create_task(self._crank())
+
+        def _mint(self):
+            self._next_rid += 1
+            return f"{_REQ_PREFIX}{self._next_rid}"
+
+        def _evict_over_cap(self):
+            while len(self._residents) > self._max_residents:
+                if not self._evict_oldest_idle():
+                    return
+
+        def _evict_under_pressure(self):
+            """Reap the oldest-recency residents when the KV block pool runs
+            hot: an idle resident is CPU-free but pins its blocks. Freed blocks
+            keep their prefix-cache hashes, so a reaped path that returns
+            rebirths with a cache-hit prefill."""
+            if self._sched is None or self._sched.genlm_kv_usage() < 0.9:
+                return
+            for _ in range(max(1, len(self._residents) // 8)):
+                if not self._evict_oldest_idle():
+                    return
+
+        def _evict_oldest_idle(self):
+            """Evict the oldest resident with no row in flight; False if none."""
+            for key, rid in self._residents.items():
+                if rid not in self._pending:
+                    del self._residents[key]
+                    self._evictions.append(rid)
+                    return True
+            return False
+
+        def _take_evictions(self):
+            evictions, self._evictions = self._evictions, []
+            return evictions
+
+        async def _crank(self):
+            """Single-flight: step the engine off-loop until every pending row
+            has been captured. Later windows piggyback on the running crank."""
+            if self._cranking:
+                return
+            self._cranking = True
+            try:
+                while self._pending:
+                    if not self._sched.has_requests():
+                        # Rows are owed but the engine holds nothing for them:
+                        # a request was lost, and stepping would spin forever.
+                        with self._pending_lock:
+                            owed = list(self._pending)
+                            self._pending.clear()
+                        raise RuntimeError(f"engine dropped requests {owed}")
+                    await asyncio.to_thread(self._core.get_output)
+            finally:
+                self._cranking = False
+            if self._pending:
+                asyncio.create_task(self._crank())
+
+        def _deliver(self, req_id, row):
+            """Capture-shim callback (engine thread): hand ``req_id``'s row to
+            its awaiting futures on the event loop."""
+            with self._pending_lock:
+                futures = self._pending.pop(req_id, None)
+            if not futures or self._loop is None:
                 return
 
-            if self.timer:
-                self.timer.cancel()
-                self.timer = None
+            def _resolve():
+                for i, f in enumerate(futures):
+                    if not f.done():
+                        f.set_result(row if i == 0 else row.clone())
 
-            if self.logprobs_capture is None:
-                exc = RuntimeError("Cannot use model after cleanup() has been called")
-                for _, future, _ in queries:
-                    future.set_exception(exc)
+            try:
+                self._loop.call_soon_threadsafe(_resolve)
+            except RuntimeError:
+                pass  # the run's loop closed; the rows have no reader
+
+        async def release_all(self):
+            """Reap every resident request (end of an inference run). Waits out
+            any turning crank so the reap lands on a quiet engine."""
+            reaps = list(self._residents.values()) + self._extra_rids
+            self._residents.clear()
+            self._extra_rids = []
+            if not reaps or self._sched is None:
                 return
-
-            if self._lane_thread is not None and self._lane_thread.is_alive():
-                # The lane engine owns the decode loop: score through it (a
-                # max_tokens=1 request rides the running steps via chunked
-                # prefill; the sampler resolves the future from its row).
-                loop = asyncio.get_running_loop()
-                for token_ids, future, lora_name in queries:
-                    rid = self.ledger._mint()
-                    self._scores[rid] = (loop, future)
-                    self._score_adds.append((rid, list(token_ids), lora_name))
-                self.ledger.submitted.set()
-                return
-
-            # Group by LoRA (one generate each), and dedup identical prompts within each.
-            by_lora = defaultdict(lambda: defaultdict(list))
-            for token_ids, future, lora_name in queries:
-                by_lora[lora_name][tuple(token_ids)].append(future)
-
-            for lora_name, query_groups in by_lora.items():
-                unique_token_ids = list(query_groups.keys())
-                self.logprobs_capture.clear()
-                prompts = [
-                    TokensPrompt(prompt_token_ids=list(token_ids))
-                    for token_ids in unique_token_ids
-                ]
-                try:
-                    self.llm_engine.generate(
-                        prompts=prompts,
-                        sampling_params=SamplingParams(**self.default_params),
-                        lora_request=self._lora_request_for(lora_name),
-                        use_tqdm=False,
-                    )
-                    all_logprobs = self.logprobs_capture.get_all_logprobs()
-                    assert all_logprobs is not None, "Logprobs should be captured"
-                    assert all_logprobs.shape[0] == len(unique_token_ids), (
-                        f"Expected {len(unique_token_ids)} logprobs, got {all_logprobs.shape[0]}"
-                    )
-                    for i, key in enumerate(unique_token_ids):
-                        logprobs = all_logprobs[i]
-                        futures = query_groups[key]
-                        if len(futures) == 1:
-                            futures[0].set_result(logprobs)
-                        else:
-                            for future in futures:
-                                future.set_result(logprobs.clone())
-                except Exception as exc:
-                    for futures in query_groups.values():
-                        for future in futures:
-                            if not future.done():
-                                future.set_exception(exc)
+            self._sched.genlm_submit([], [], reaps)
+            while self._cranking:
+                await asyncio.sleep(0.001)
+            self._sched.genlm_apply_now()
+            self._core.get_output()  # carry the freed rows to the model runner
 
         def reset_async_queries(self):
             """Clear any pending queries from the queue.
@@ -517,185 +586,45 @@ else:
             Use this method when an exception prevented an inference algorithm
             from executing to completion.
             """
-            self.queries = []
-            if self.timer:
-                self.timer.cancel()
-                self.timer = None
+            self._queries = []
+            with self._pending_lock:
+                self._pending.clear()
 
-            self.sample_queries = []
-            if self.sample_timer:
-                self.sample_timer.cancel()
-                self.sample_timer = None
+        # -- sync paths -----------------------------------------------------
 
         def next_token_logprobs_sync(self, token_ids, lora_name=None):
             """Request log probabilities of next token synchronously.
-
-            Does not support auto-batching. For batched sync calls, use
-            ``batch_next_token_logprobs_sync`` instead.
 
             Args:
                 token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
                 lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
 
             Returns:
-                (torch.Tensor): Normalized log probability tensor.
+                result (torch.Tensor): Normalized log probability tensor.
             """
-            key = (tuple(token_ids), lora_name)
-
-            if self.cache is not None and key in self.cache:
-                return self.cache[key]
-
-            if self.logprobs_capture is None:
-                raise RuntimeError("Cannot use model after cleanup() has been called")
-
-            if self._lane_thread is not None and self._lane_thread.is_alive():
-                raise RuntimeError(
-                    "sync logprobs cannot run while the lane engine is stepping; "
-                    "use the async path (it scores through the running loop)."
-                )
-            self.logprobs_capture.clear()
-
-            self.llm_engine.generate(
-                prompts=TokensPrompt(prompt_token_ids=list(token_ids)),
-                sampling_params=SamplingParams(**self.default_params),
-                lora_request=self._lora_request_for(lora_name),
-                use_tqdm=False,
-            )
-
-            result = self.logprobs_capture.get_logprobs(batch_index=0)
-            assert result is not None, "Logprobs should be captured by global processor"
-
-            if self.cache is not None:
-                self.cache[key] = result
-
-            return result
+            return asyncio.run(self.next_token_logprobs(token_ids, lora_name=lora_name))
 
         def batch_next_token_logprobs_sync(self, token_ids_list, lora_name=None):
-            """
-            Request log probabilities of next tokens in a batch synchronously.
+            """Batch request log probabilities for multiple token sequences synchronously.
 
             Args:
-                token_ids_list (list[list[int]]): A list of token ID lists, each representing a prompt to the language model.
+                token_ids_list (list[list[int]]): A list of token ID lists.
                 lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
 
             Returns:
-                (torch.Tensor): A tensor of normalized log probability tensors, one for each prompt in the input list.
-
-            Note:
-                This method does not consult the output cache (unlike the async batch path,
-                which delegates to the cached ``next_token_logprobs``). Every prompt is
-                re-evaluated.
+                (torch.Tensor): A tensor of log probability tensors.
             """
-            if self.logprobs_capture is None:
-                raise RuntimeError("Cannot use model after cleanup() has been called")
-            if self._lane_thread is not None and self._lane_thread.is_alive():
-                raise RuntimeError(
-                    "sync logprobs cannot run while the lane engine is stepping; "
-                    "use the async path (it scores through the running loop)."
-                )
-            # Clear any stale captured logprobs
-            self.logprobs_capture.clear()
-
-            # Create prompts for batch
-            prompts = [
-                TokensPrompt(prompt_token_ids=list(token_ids))
-                for token_ids in token_ids_list
-            ]
-
-            # Generate one token for each prompt
-            self.llm_engine.generate(
-                prompts=prompts,
-                sampling_params=SamplingParams(**self.default_params),
-                lora_request=self._lora_request_for(lora_name),
-                use_tqdm=False,
+            return asyncio.run(
+                self.batch_next_token_logprobs(token_ids_list, lora_name=lora_name)
             )
-
-            # Get all captured logprobs at once (optimized - single clone)
-            all_logprobs = self.logprobs_capture.get_all_logprobs()
-            assert all_logprobs is not None, "Logprobs should be captured"
-            assert all_logprobs.shape[0] == len(token_ids_list), (
-                f"Expected {len(token_ids_list)} logprobs, got {all_logprobs.shape[0]}"
-            )
-
-            return all_logprobs
 
         def clear_cache(self):
             """Clear output cache."""
             if self.cache:
                 self.cache.clear()
 
-        def open_lane(self, prompt_ids, *, lora_name=None, row=None, pool_key=None):
-            """Open a resident decode lane; starts the engine thread on first use.
-
-            The engine steps whenever every published lane has fed or closed
-            (the feed barrier in :class:`~genlm.backend.llm.lane.LaneLedger`),
-            parks when nothing is live, and serves scoring one-shots from the
-            same loop."""
-            if self._lane_thread is None or not self._lane_thread.is_alive():
-                self._stop_lanes = threading.Event()
-                self._lane_thread = threading.Thread(
-                    target=self._lane_loop, daemon=True
-                )
-                self._lane_thread.start()
-            return self.ledger.open_lane(
-                prompt_ids, lora_name=lora_name, row=row, pool_key=pool_key
-            )
-
-        def close_lane_engine(self):
-            """Stop the lane engine thread; open lanes error on their next read."""
-            if self._lane_thread is not None:
-                self._stop_lanes.set()
-                self.ledger.submitted.set()
-                self._lane_thread.join(timeout=30.0)
-                self._lane_thread = None
-
-        def _lane_loop(self):
-            """The lane engine: drain lane adds/aborts and scoring adds into the
-            vLLM engine, step it while anything is live, park on empty. The
-            sampler (:class:`LaneSampler`) publishes rows and holds the feed
-            barrier inside ``engine.step()``."""
-            engine = self.llm_engine.llm_engine
-            decode_params = SamplingParams(
-                n=1,
-                max_tokens=1 << 20,  # control closes lanes; engine cap is a net
-                detokenize=False,
-                ignore_eos=True,
-            )
-            gone = set()  # engine-finished rids; an abort for one is a no-op
-            while not self._stop_lanes.is_set():
-                adds, aborts = self.ledger.drain()
-                score_adds, self._score_adds = self._score_adds, []
-                for rid in aborts:
-                    if rid not in gone:
-                        with contextlib.suppress(Exception):
-                            engine.abort_request([str(rid)])
-                for lane in adds:
-                    engine.add_request(
-                        str(lane.rid),
-                        TokensPrompt(prompt_token_ids=list(lane.context)),
-                        decode_params,
-                        lora_request=self._lora_request_for(lane.lora_name),
-                    )
-                for rid, token_ids, lora_name in score_adds:
-                    engine.add_request(
-                        str(rid),
-                        TokensPrompt(prompt_token_ids=token_ids),
-                        SamplingParams(**self.default_params),
-                        lora_request=self._lora_request_for(lora_name),
-                    )
-                if not engine.has_unfinished_requests():
-                    self.ledger.submitted.wait(timeout=0.05)
-                    self.ledger.submitted.clear()
-                    continue
-                for out in engine.step():
-                    if out.finished:
-                        rid = int(out.request_id.rsplit("-", 1)[0])
-                        gone.add(rid)
-                        self._scores.pop(rid, None)
-
         def cleanup(self):
             """Explicitly clean up GPU resources. Call this when done with the model."""
-            self.close_lane_engine()
             self._cleanup_engine()
 
         def __enter__(self):
@@ -730,144 +659,13 @@ else:
             * ``AssertionError`` is raised by vLLM's
               ``destroy_distributed_environment`` if it's called twice.
             * ``RuntimeError`` can surface from CUDA when the driver is
-              already being torn down.
-
-            Anything else is re-raised so real bugs are not swallowed.
+              tearing down at the same time.
             """
+            if getattr(self, "_engine_cleaned", False):
+                return
+            self._engine_cleaned = True
             try:
-                # ``import gc`` can itself raise ImportError when ``__del__`` is
-                # invoked after ``sys.meta_path`` has been torn down at
-                # interpreter shutdown, so it lives inside the try block.
-                import gc
-
-                # Clear our references
-                if hasattr(self, "logprobs_capture"):
-                    if self.logprobs_capture is not None:
-                        self.logprobs_capture.clear()
-                    self.logprobs_capture = None
-
-                # Delete the engine to free GPU memory
-                if hasattr(self, "llm_engine") and self.llm_engine is not None:
-                    del self.llm_engine
-                    self.llm_engine = None
-
-                # Force garbage collection
-                gc.collect()
-
-                # Clear CUDA cache
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
-
-                # Clean up distributed state
                 destroy_model_parallel()
                 destroy_distributed_environment()
-            except (
-                ImportError,
-                AttributeError,
-                AssertionError,
-                RuntimeError,
-            ) as e:
-                # Best-effort log; during interpreter shutdown logging itself
-                # may already be torn down, in which case silently drop.
-                with contextlib.suppress(Exception):
-                    logging.getLogger(__name__).debug(
-                        "AsyncVirtualLM cleanup raised %s: %s",
-                        type(e).__name__,
-                        e,
-                    )
-
-        def _add_sample_query(
-            self, prompt_token_ids, sampling_params, future, lora_name=None
-        ):
-            """Enqueue a ``sample()`` request; mirrors ``_add_query`` for the logprobs path."""
-            self.sample_queries.append(
-                (prompt_token_ids, sampling_params, future, lora_name)
-            )
-            if len(self.sample_queries) >= self.batch_size:
-                if self.sample_timer:
-                    self.sample_timer.cancel()
-                    self.sample_timer = None
-                self._batch_sample_evaluate()
-            elif self.sample_timer is None:
-                self.sample_timer = asyncio.get_running_loop().call_later(
-                    self.timeout, self._batch_sample_evaluate
-                )
-
-        def _batch_sample_evaluate(self):
-            """Dispatch queued ``sample()`` requests, one batched ``generate()`` call
-            per distinct LoRA adapter."""
-            queries, self.sample_queries = self.sample_queries, []
-            if not queries:
-                return
-            if self.sample_timer:
-                self.sample_timer.cancel()
-                self.sample_timer = None
-            if self.logprobs_capture is None:
-                exc = RuntimeError("Cannot use model after cleanup() has been called")
-                for _, _, future, _ in queries:
-                    future.set_exception(exc)
-                return
-            by_lora = defaultdict(list)
-            for query in queries:
-                by_lora[query[3]].append(query)
-            for lora_name, group in by_lora.items():
-                try:
-                    outputs = self.llm_engine.generate(
-                        prompts=[
-                            TokensPrompt(prompt_token_ids=t) for t, _, _, _ in group
-                        ],
-                        sampling_params=[sp for _, sp, _, _ in group],
-                        lora_request=self._lora_request_for(lora_name),
-                        use_tqdm=False,
-                    )
-                    assert len(outputs) == len(group)
-                    for output, (_, _, future, _) in zip(outputs, group):
-                        future.set_result(list(output.outputs[0].token_ids))
-                except Exception as exc:
-                    for _, _, future, _ in group:
-                        if not future.done():
-                            future.set_exception(exc)
-
-        async def sample(
-            self,
-            prompt_token_ids,
-            max_tokens,
-            eos_token_ids,
-            temperature=1.0,
-            seed=None,
-            lora_name=None,
-        ):
-            """Sample from the language model.
-
-            Concurrent calls are auto-batched into a single ``LLM.generate()``
-            so vLLM continuous-batches the decode steps. Use with ``await``.
-
-            Args:
-                prompt_token_ids (list[int]): The token IDs of the prompt.
-                eos_token_ids (list[int]): The token IDs of the end-of-sequence tokens.
-                temperature (float, optional): The temperature to use to rescale the logits. Defaults to 1.0.
-                max_tokens (int): The maximum number of tokens to generate.
-                seed (int, optional): The seed for the random number generator. Defaults to None.
-                lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
-
-            Returns:
-                (list[int]): The sampled token IDs.
-            """
-            future = asyncio.get_running_loop().create_future()
-            self._add_sample_query(
-                list(prompt_token_ids),
-                SamplingParams(
-                    n=1,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    seed=seed,
-                    stop=[self.byte_vocab[i].decode() for i in eos_token_ids],
-                ),
-                future,
-                lora_name,
-            )
-            token_ids = await future
-            if token_ids and token_ids[-1] in eos_token_ids:
-                token_ids = token_ids[:-1]
-            return token_ids
+            except (ImportError, AttributeError, AssertionError, RuntimeError):
+                pass

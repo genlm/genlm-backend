@@ -1,6 +1,5 @@
 import asyncio
 import json
-import threading
 from collections import defaultdict
 from functools import partial
 from pathlib import Path
@@ -9,7 +8,6 @@ import torch
 
 from genlm.backend.cache import OutputCache
 from genlm.backend.llm.base import AsyncLM
-from genlm.backend.llm.lane import LaneLedger
 
 try:
     import mlx.core as mx
@@ -51,8 +49,7 @@ else:
 
     def _wired(model):
         """Keep ``model``'s weights resident for the enclosed work. The stream is
-        resolved per call, never stored -- MLX streams are thread-affine and the burst
-        runs on a worker thread."""
+        resolved per call, never stored -- MLX streams are thread-affine."""
         return wired_limit(model, [mx.default_stream(mx.default_device())])
 
     def _to_torch(a):
@@ -169,8 +166,8 @@ else:
         """LoRA weight sets over one model.
 
         MLX attaches adapters to the model itself, so the model is wrapped once, on the
-        first registration, and a lane is then only the ``lora_*`` arrays to install --
-        adapters share the base weights rather than copying them. The base lane is the
+        first registration, and an adapter is then only the ``lora_*`` arrays to install --
+        adapters share the base weights rather than copying them. The base is the
         all-zero set the wrap starts from, which leaves base forwards bit-exact.
         """
 
@@ -235,14 +232,11 @@ else:
         Next-token log-probs are memoized per exact context.
         """
 
-        supports_lanes = True  # serves resident decode lanes (open_lane)
-
         def __init__(
             self,
             mlx_lm_model,
             tokenizer,
-            batch_size=5,
-            timeout=0.001,
+            timeout=0.0,
             prefill_step_size=2048,
             cache_size=0,
             cache_opts=None,
@@ -252,8 +246,8 @@ else:
             Args:
                 mlx_lm_model: The MLX language model instance.
                 tokenizer: The tokenizer for encoding/decoding text.
-                batch_size (int, optional): Maximum number of queries to batch together.
-                timeout (float, optional): Seconds to wait before running a short batch.
+                timeout (float, optional): Cooperative linger in seconds spent once
+                    per batch window, letting late concurrent callers join. Defaults to 0.
                 prefill_step_size (int, optional): Tokens per prefill chunk.
                 cache_size (int, optional): Maximum size of the output cache. If 0,
                     caching is disabled. Defaults to 0.
@@ -262,24 +256,15 @@ else:
                     Defaults to None (no extra options).
             """
             self.mlx_lm_model = mlx_lm_model
-            self.batch_size = batch_size
             self.timeout = timeout
             self.prefill_step_size = prefill_step_size
-            self.timer = None
             self.queries = []
+            self._window_armed = False
             self.adapters = _Adapters(mlx_lm_model)
-            # KV rows never cross adapters, so each lane keeps its own pool.
+            # KV rows never cross adapters, so each adapter keeps its own pool.
             self.slots = defaultdict(
                 partial(_SlotPool, mlx_lm_model, prefill_step_size)
             )
-            # Resident decode lanes: KV rows per adapter in ``lane_slots``, driven by
-            # the lane engine thread; ``_mlx_lock`` serializes it against one-shots.
-            self.ledger = LaneLedger()
-            self.lane_slots = defaultdict(
-                partial(_SlotPool, mlx_lm_model, prefill_step_size)
-            )
-            self._mlx_lock = threading.Lock()
-            self._lane_thread = None
             self.cache = (
                 OutputCache(maxsize=cache_size, **(cache_opts or {}))
                 if cache_size > 0
@@ -326,94 +311,19 @@ else:
             self.clear_cache()
 
         def clear_cache(self):
-            """Drop the memoized log-probs and every lane's live KV rows."""
+            """Drop the memoized log-probs and every pool's live KV rows."""
             if self.cache is not None:
                 self.cache.clear()
             self.slots.clear()
-            self.lane_slots.clear()
             mx.clear_cache()
-
-        def open_lane(self, prompt_ids, *, lora_name=None, row=None, pool_key=None):
-            """Open a resident decode lane; starts the engine thread on first use.
-
-            The engine steps whenever every open lane has fed or closed
-            (:class:`~genlm.backend.llm.lane.Lane`), parks when no lanes are live,
-            and interleaves one-shot forwards between steps via ``_mlx_lock``."""
-            if self._lane_thread is None or not self._lane_thread.is_alive():
-                self._lane_thread = threading.Thread(
-                    target=self._lane_loop, daemon=True
-                )
-                self._stop_lanes = threading.Event()
-                self._lane_thread.start()
-            return self.ledger.open_lane(
-                prompt_ids, lora_name=lora_name, row=row, pool_key=pool_key
-            )
-
-        def close_lane_engine(self):
-            """Stop the lane engine thread; open lanes error on their next read."""
-            if self._lane_thread is not None:
-                self._stop_lanes.set()
-                self.ledger.submitted.set()
-                self._lane_thread.join(timeout=10.0)
-                self._lane_thread = None
-
-        def _lane_loop(self):
-            """The lane engine: cohort stepping, no cross-cohort barrier.
-
-            Lanes sharing a ``pool_key`` are one cohort with their own KV pools
-            (one per adapter). A cohort steps when every one of its live lanes has
-            consumed-and-fed its warm (``not lane.warm``), so cohorts pace
-            independently — one cohort's boundary never stalls another's steps.
-            ``_SlotPool.logits`` discovers per-batch reuse: a post-feed step
-            advances the live KV; a reopened lane's prefix re-lays."""
-            live = {}  # rid -> Lane, engine-side residency
-            while not self._stop_lanes.is_set():
-                adds, aborts = self.ledger.drain()
-                for rid in aborts:
-                    live.pop(rid, None)
-                for lane in adds:
-                    live[lane.rid] = lane
-                cohorts = defaultdict(list)
-                for lane in live.values():
-                    cohorts[lane.pool_key].append(lane)
-                ready = [
-                    lanes
-                    for lanes in cohorts.values()
-                    if all(not ln.warm for ln in lanes)
-                ]
-                if not ready:
-                    self.ledger.submitted.wait(timeout=0.05)
-                    self.ledger.submitted.clear()
-                    continue
-                for lanes in ready:
-                    rows = {}
-                    by_lora = defaultdict(list)
-                    for ln in lanes:
-                        by_lora[ln.lora_name].append(ln)
-                    with self._mlx_lock, _wired(self.mlx_lm_model):
-                        for lora_name, cohort in by_lora.items():
-                            self.adapters.select(lora_name)
-                            pool = self.lane_slots[(lanes[0].pool_key, lora_name)]
-                            logits = pool.logits([list(ln.context) for ln in cohort])
-                            logits = logits.astype(mx.float32)
-                            logprobs = logits - mx.logsumexp(
-                                logits, axis=-1, keepdims=True
-                            )
-                            mx.eval(logprobs)
-                            out = _to_torch(logprobs)
-                            for i, ln in enumerate(cohort):
-                                rows[ln.rid] = out[i]
-                    self.ledger.publish(rows)
 
         def reset_async_queries(self):
             """Drop queued queries. Use after an exception left them unresolved."""
             self.queries = []
 
         def _forward(self, prompts, lora_name):
-            """Next-token log-probs under one adapter, ``[len(prompts), vocab]``.
-            Serialized against the lane engine thread: one-shots run between its
-            decode steps."""
-            with self._mlx_lock, _wired(self.mlx_lm_model):
+            """Next-token log-probs under one adapter, ``[len(prompts), vocab]``."""
+            with _wired(self.mlx_lm_model):
                 self.adapters.select(lora_name)
                 logits = self.slots[lora_name].logits(prompts).astype(mx.float32)
                 logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
@@ -437,26 +347,26 @@ else:
                         self.cache[key] = logprobs[row]
             return out
 
-        def _add_query(self, key, future):
-            """Queue a query, running the batch once it is full or the timer fires.
+        async def _collect(self):
+            """Hold the batch window open: return once a full event-loop pass
+            adds no new query (so a whole concurrent gather lands in one batch),
+            after one cooperative ``timeout`` linger for late callers.
 
-            The timer is armed on the empty-to-nonempty transition, so a steady trickle
-            of queries cannot starve the batch.
-            """
-            self.queries.append((key, future))
-            if len(self.queries) >= self.batch_size:
-                if self.timer:
-                    self.timer.cancel()
-                    self.timer = None
-                self._batch_evaluate()
-            elif self.timer is None:
-                self.timer = asyncio.get_running_loop().call_later(
-                    self.timeout, self._batch_evaluate
-                )
+            Run by the window's first caller, never a background task: window
+            state must not outlive the loop the callers are on."""
+            lingered = not self.timeout
+            while True:
+                n = len(self.queries)
+                await asyncio.sleep(0)
+                if len(self.queries) > n:
+                    continue
+                if lingered:
+                    return
+                lingered = True
+                await asyncio.sleep(self.timeout)
 
         def _batch_evaluate(self):
             """Resolve every queued query in one forward, deduplicating equal prompts."""
-            self.timer = None
             queries, self.queries = self.queries, []
             if not queries:
                 return
@@ -484,7 +394,14 @@ else:
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
             future = asyncio.get_running_loop().create_future()
-            self._add_query(key, future)
+            self.queries.append((key, future))
+            if not self._window_armed:
+                self._window_armed = True
+                try:
+                    await self._collect()
+                finally:
+                    self._window_armed = False
+                self._batch_evaluate()
             return await future
 
         def next_token_logprobs_sync(self, token_ids, lora_name=None):

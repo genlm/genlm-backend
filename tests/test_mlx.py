@@ -22,7 +22,6 @@ def model_name(request):
 @pytest.fixture(scope="module")
 def async_llm(model_name):
     llm_opts = {
-        "batch_size": 3 if model_name == "openai-community/gpt2" else 1,
         "cache_size": 4,
     }
     return load_model_by_name(model_name, backend="mlx", llm_opts=llm_opts)
@@ -124,28 +123,21 @@ async def test_batch_timeout(async_llm):
 
 
 @pytest.mark.asyncio
-async def test_full_batch_size(async_llm):
+async def test_window_batches_concurrent_asks(async_llm):
+    # A concurrent gather lands in one window and resolves as one batch.
     async_llm.clear_cache()
-
-    try:
-        old_batch_size = async_llm.batch_size
-        old_timeout = async_llm.timeout
-        async_llm.batch_size = 2
-        async_llm.timeout = 10
-
-        await asyncio.gather(
-            async_llm.next_token_logprobs([0]), async_llm.next_token_logprobs([1])
-        )
-    finally:
-        async_llm.batch_size = old_batch_size
-        async_llm.timeout = old_timeout
+    a, b = await asyncio.gather(
+        async_llm.next_token_logprobs([0]), async_llm.next_token_logprobs([1])
+    )
+    assert a.ndim == 1 and b.ndim == 1
 
 
 @pytest.mark.asyncio
 async def test_reset_async_queries(async_llm):
-    # A queued query can be dropped without ever running.
-    old = (async_llm.batch_size, async_llm.timeout)
-    async_llm.batch_size, async_llm.timeout = 100, 60
+    # A queued query can be dropped without ever running (the window's linger
+    # holds it in the queue long enough to reset).
+    old_timeout = async_llm.timeout
+    async_llm.timeout = 60
     try:
         test_prompt = async_llm.tokenizer.encode("Test prompt")
         task = asyncio.ensure_future(async_llm.next_token_logprobs(test_prompt))
@@ -154,7 +146,7 @@ async def test_reset_async_queries(async_llm):
         assert not task.done()
         task.cancel()
     finally:
-        async_llm.batch_size, async_llm.timeout = old
+        async_llm.timeout = old_timeout
 
 
 def test_from_name_with_options(model_name):
@@ -162,11 +154,9 @@ def test_from_name_with_options(model_name):
 
     model = AsyncMlxLM.from_name(
         model_name,
-        batch_size=10,
         timeout=0.01,
     )
 
-    assert model.batch_size == 10
     assert model.timeout == 0.01
 
 
