@@ -149,6 +149,8 @@ else:
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self._fed_tokens = {}  # appends awaiting the runner
+            self._fed_seq = 0  # attaches stamped; the runner wrap acks each one
+            self._fed_acked = 0
 
         def feed_token(self, request, token):
             request.append_output_token_ids(int(token))
@@ -157,9 +159,26 @@ else:
         def schedule(self, *args, **kwargs):
             output = super().schedule(*args, **kwargs)
             if self._fed_tokens:
+                # The wrap acks after writing the last-sampled buffer. Allow two
+                # outstanding attaches (async run-ahead executes behind the
+                # schedule); further lag means the wrap is not running and every
+                # decode is forwarding token 0.
+                self._fed_seq += 1
+                if self._fed_acked < self._fed_seq - 2:
+                    raise RuntimeError(
+                        "the runner is not consuming fed tokens: the "
+                        "update_requests wrap is not installed or not running "
+                        "(decodes would silently forward token 0)"
+                    )
+                seq = self._fed_seq
                 output.fed_tokens = self._fed_tokens
+                output.fed_ack = lambda: self._fed_ack(seq)
                 self._fed_tokens = {}
             return output
+
+        def _fed_ack(self, seq):
+            if seq > self._fed_acked:
+                self._fed_acked = seq
 
         def _update_after_schedule(self, scheduler_output):
             super()._update_after_schedule(scheduler_output)
@@ -218,6 +237,7 @@ else:
                 states.last_sampled_tokens[
                     torch.tensor(idxs, dtype=torch.int64, device=device)
                 ] = torch.tensor(tokens, dtype=torch.int64, device=device).unsqueeze(1)
+            scheduler_output.fed_ack()
 
     _gpu_model_runner.GPUModelRunner.update_requests = _update_requests_with_appends
 
