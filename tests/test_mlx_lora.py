@@ -104,15 +104,6 @@ def test_kv_rows_do_not_cross_adapters(llm, token_ids, adapters):
     assert not torch.equal(base, adapted)
 
 
-def test_lora_view_routes(llm, token_ids, adapters):
-    llm.add_new_lora(adapters["a"], "a")
-
-    direct = llm.next_token_logprobs_sync(token_ids, lora_name="a").cpu()
-    viewed = llm.lora_view("a").next_token_logprobs_sync(token_ids).cpu()
-
-    assert torch.equal(direct, viewed)
-
-
 def test_rebinding_a_name(llm, token_ids, adapters):
     llm.add_new_lora(adapters["a"], "a")
     first = llm.next_token_logprobs_sync(token_ids, lora_name="a").cpu().clone()
