@@ -78,11 +78,11 @@ if not HAS_VLLM:
 else:
     logging.getLogger("vllm").setLevel(logging.WARNING)
 
-    _REQ_PREFIX = "genlm-"
+    _REQ_PREFIX = "resident-"
     _STOP = object()  # crank-shutdown sentinel
 
     class _CaptureSampler:  # pragma: no cover
-        """Sits in the model runner's sampler slot. For genlm requests it
+        """Sits in the model runner's sampler slot. For resident requests it
         captures the full-vocabulary log-probability row (device-resident) and
         reports zero sampled tokens — the scheduler then appends nothing and
         the request idles until its next token arrives from the caller. All
@@ -125,33 +125,33 @@ else:
                 out.num_sampled[idx] = 0
             return out
 
-    class GenlmScheduler(AsyncScheduler):  # pragma: no cover
+    class BackendScheduler(AsyncScheduler):  # pragma: no cover
         """Two duties for caller-fed requests, both consequences of their
         tokens arriving from the caller instead of the sampler.
 
-        ``genlm_append`` runs on the engine thread between steps; each
+        ``feed_token`` runs on the engine thread between steps; each
         appended token also rides the next ``SchedulerOutput`` for a
         worker-side wrap to write into the runner's last-sampled buffer —
         that buffer, not the request's token list, is where a decode step
         reads its input token. Miss it and every decode forwards token 0
         while all scheduler-side bookkeeping looks healthy. And
-        ``num_output_placeholders`` is zeroed for genlm requests every
+        ``num_output_placeholders`` is zeroed for resident requests every
         schedule, or async run-ahead accounting corrupts.
         """
 
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
-            self._genlm_new_tokens = {}  # appends awaiting the runner
+            self._fed_tokens = {}  # appends awaiting the runner
 
-        def genlm_append(self, request, token):
+        def feed_token(self, request, token):
             request.append_output_token_ids(int(token))
-            self._genlm_new_tokens[request.request_id] = int(token)
+            self._fed_tokens[request.request_id] = int(token)
 
         def schedule(self, *args, **kwargs):
             output = super().schedule(*args, **kwargs)
-            if self._genlm_new_tokens:
-                output.genlm_appends = self._genlm_new_tokens
-                self._genlm_new_tokens = {}
+            if self._fed_tokens:
+                output.fed_tokens = self._fed_tokens
+                self._fed_tokens = {}
             return output
 
         def _update_after_schedule(self, scheduler_output):
@@ -197,7 +197,7 @@ else:
 
     def _update_requests_with_appends(self, scheduler_output):
         _orig_update_requests(self, scheduler_output)
-        appends = getattr(scheduler_output, "genlm_appends", None)
+        appends = getattr(scheduler_output, "fed_tokens", None)
         if appends:
             states = self.req_states
             idxs, tokens = [], []
@@ -292,7 +292,7 @@ else:
                 "disable_log_stats": True,
                 "gpu_memory_utilization": 0.9,
                 "async_scheduling": True,
-                "scheduler_cls": GenlmScheduler,
+                "scheduler_cls": BackendScheduler,
                 **(engine_opts or {}),
             }
 
@@ -318,9 +318,9 @@ else:
             inst._core = llm.llm_engine.engine_core
             engine_core = inst._core.engine_core
             sched = engine_core.scheduler
-            if not isinstance(sched, GenlmScheduler):
+            if not isinstance(sched, BackendScheduler):
                 raise RuntimeError(
-                    f"engine scheduler is {type(sched).__name__}, not GenlmScheduler"
+                    f"engine scheduler is {type(sched).__name__}, not BackendScheduler"
                 )
             inst._sched = sched
             inst._block_hasher = engine_core.request_block_hasher
@@ -328,7 +328,7 @@ else:
                 8, llm.llm_engine.vllm_config.scheduler_config.max_num_seqs - 8
             )
             inst._crank = threading.Thread(
-                target=inst._crank_loop, name="genlm-crank", daemon=True
+                target=inst._crank_loop, name="crank", daemon=True
             )
             inst._crank.start()
             return inst
@@ -541,7 +541,7 @@ else:
                         self._forget(cand)  # engine dropped it (e.g. preempt races)
                     else:
                         rid = cand
-                        self._sched.genlm_append(request, ids[-1])
+                        self._sched.feed_token(request, ids[-1])
                         self._move(rid, key)
                 if rid is None:
                     rid = self._mint()

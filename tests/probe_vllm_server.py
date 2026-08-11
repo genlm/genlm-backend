@@ -29,7 +29,7 @@ def table_matches_engine(lm):
     """The residency table and the engine must hold exactly the same requests
     whenever the engine owes nothing."""
     ours = sorted(lm._requests)
-    theirs = sorted(r for r in lm._sched.requests if r.startswith("genlm-"))
+    theirs = sorted(r for r in lm._sched.requests if r.startswith("resident-"))
     return ours == theirs, f"table={len(ours)} engine={len(theirs)}"
 
 
@@ -61,11 +61,11 @@ async def main():
     check("population.decode", True, f"{n_rows} rows x 10 steps")
     check("population.table", *table_matches_engine(lm))
 
-    # -- 2. placeholder discipline: all genlm requests at 0 -------------------
+    # -- 2. placeholder discipline: all resident requests at 0 -------------------
     bad = [
         r.request_id
         for r in sched.requests.values()
-        if r.request_id.startswith("genlm-") and r.num_output_placeholders != 0
+        if r.request_id.startswith("resident-") and r.num_output_placeholders != 0
     ]
     check("placeholders.zero", not bad, f"nonzero={bad}")
 
@@ -173,7 +173,7 @@ async def main():
 
     # -- 8. dead requests actually left the engine -----------------------------
     await lm.release_all()
-    live = [r for r in sched.requests if r.startswith("genlm-")]
+    live = [r for r in sched.requests if r.startswith("resident-")]
     check("release.engine", not live, f"live={live}")
 
     print("ALL PROBES PASSED", flush=True)
