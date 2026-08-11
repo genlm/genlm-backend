@@ -22,6 +22,7 @@ import warnings
 import threading
 import torch
 import logging
+from collections import Counter
 
 from genlm.backend.llm.base import AsyncLM
 
@@ -90,7 +91,7 @@ else:
 
         def __init__(self, base, deliver):
             self._base = base
-            self._deliver = deliver  # (req_id, row) -> None
+            self._deliver = deliver  # ({req_id: row}) -> None, one call per frame
 
         def __getattr__(self, name):
             return getattr(self._base, name)
@@ -99,7 +100,7 @@ else:
             req_ids = input_batch.req_ids
             n = input_batch.num_reqs
             cu = input_batch.cu_num_logits_np
-            ours = []
+            ours, rows_at = [], []
             for i in range(n):
                 if req_ids[i].startswith(_REQ_PREFIX):
                     ours.append(i)
@@ -108,8 +109,14 @@ else:
                         # The last position's row is the next-token distribution
                         # at the request's current context (mid prefill chunks
                         # produce no logits and are skipped).
-                        row = torch.log_softmax(logits[hi - 1].float(), dim=-1)
-                        self._deliver(req_ids[i], row)
+                        rows_at.append((req_ids[i], hi - 1))
+            if rows_at:
+                # One gather + one normalize for the whole frame; the copy also
+                # un-aliases vLLM's live logits buffer, which the next forward
+                # overwrites. Delivered rows are views of this block.
+                idx = torch.tensor([pos for _, pos in rows_at], device=logits.device)
+                block = torch.log_softmax(logits.index_select(0, idx).float(), dim=-1)
+                self._deliver({rid: block[j] for j, (rid, _) in enumerate(rows_at)})
             if len(ours) == n:
                 return SamplerOutput(
                     sampled_token_ids=logits.new_zeros((n, 1), dtype=torch.int64),
@@ -180,7 +187,7 @@ else:
                 box["armed"] = True
                 custom = orig_custom(sampler)
                 base, rejection = custom if custom is not None else (sampler, None)
-                deliver = lambda req_id, row: box["deliver"](req_id, row)  # noqa: E731
+                deliver = lambda rows: box["deliver"](rows)  # noqa: E731
                 return _CaptureSampler(base, deliver), rejection
 
             state.custom_sampler = custom_sampler
@@ -255,6 +262,11 @@ else:
             # Crank-owned state: the crank thread is the only reader and
             # writer of everything below (the in-process engine runs
             # schedule() and the capture shim on that same thread).
+            # Batching breadcrumbs: ("cohort", n)/("steps", n) histograms plus
+            # "appends"/"births"/"shared" totals. Crank-thread writes; snapshot
+            # via take_stats().
+            self.stats = Counter()
+
             self._requests = {}  # rid -> (tuple(ids), lora_name), recency order
             self._by_content = {}  # (tuple(ids), lora_name) -> rid
             self._pending = {}  # rid -> [(future, loop)]; row or exception, never silence
@@ -399,8 +411,28 @@ else:
             Returns:
                 result (torch.Tensor): Normalized log probability tensor.
             """
-            if not token_ids:
-                raise ValueError("token_ids must not be empty")
+            rows = await self.batch_next_token_logprobs(
+                [token_ids], lora_name=lora_name
+            )
+            return rows[0]
+
+        async def batch_next_token_logprobs(self, token_ids_list, lora_name=None):
+            """Batch request log probabilities for multiple token sequences.
+
+            The whole batch enters the window as one set of asks; concurrent
+            callers (batched or single) meet there and land on the crank as one
+            cohort. The window is held open by its first caller until a full
+            event-loop pass adds no new ask -- callers reach their asks at
+            different depths of a `gather` tree, and each level is another
+            scheduler turn.
+
+            Args:
+                token_ids_list (list[list[int]]): A list of token ID lists.
+                lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
+
+            Returns:
+                (torch.Tensor): A ``[N, vocab]`` tensor of normalized log probabilities.
+            """
             if self._crank is None:
                 raise RuntimeError(
                     "engine crank not running; construct via from_name()"
@@ -411,18 +443,20 @@ else:
                 lora_request = self._lora_requests[lora_name]
             else:
                 raise ValueError(f"unknown LoRA adapter: {lora_name!r}")
+            if any(not token_ids for token_ids in token_ids_list):
+                raise ValueError("token_ids must not be empty")
 
             loop = asyncio.get_running_loop()
-            future = loop.create_future()
-            key = (tuple(token_ids), lora_name)
-            self._queries.append((key, lora_request, future, loop))
+            futures = []
+            for token_ids in token_ids_list:
+                future = loop.create_future()
+                futures.append(future)
+                self._queries.append(
+                    ((tuple(token_ids), lora_name), lora_request, future, loop)
+                )
             if not self._window_armed:
                 self._window_armed = True
                 try:
-                    # Callers reach their asks at different depths of a
-                    # `gather` tree, and each level is another scheduler turn;
-                    # yield until a turn adds nothing, so the whole cohort
-                    # lands in one flush.
                     while True:
                         n = len(self._queries)
                         await asyncio.sleep(0)
@@ -432,7 +466,7 @@ else:
                 finally:
                     self._window_armed = False
                 self._work.put(("asks", cohort, None, None))
-            return await future
+            return torch.stack(await asyncio.gather(*futures))
 
         # -- the crank ----------------------------------------------------------
 
@@ -451,9 +485,11 @@ else:
                 try:
                     self._handle(item)
                     stalled = 0
+                    steps = 0
                     while self._pending:
                         served = self._served
                         self._core.get_output()
+                        steps += 1
                         while True:
                             try:
                                 nxt = self._work.get_nowait()
@@ -475,6 +511,8 @@ else:
                                 )
                         else:
                             stalled = 0
+                    if steps:
+                        self.stats[("steps", steps)] += 1
                 except BaseException as exc:
                     self._fail_owed(exc)
                 if stopping:
@@ -526,6 +564,8 @@ else:
             for key, lora_request, future, loop in cohort:
                 entry = grouped.setdefault(key, (lora_request, []))
                 entry[1].append((future, loop))
+            self.stats[("cohort", len(cohort))] += 1
+            self.stats["shared"] += len(cohort) - len(grouped)
 
             for key in sorted(grouped, key=lambda k: len(k[0])):
                 lora_request, waiters = grouped[key]
@@ -543,6 +583,7 @@ else:
                         rid = cand
                         self._sched.feed_token(request, ids[-1])
                         self._move(rid, key)
+                        self.stats["appends"] += 1
                 if rid is None:
                     rid = self._mint()
                     self._sched.add_request(
@@ -556,6 +597,7 @@ else:
                         )
                     )
                     self._admit(rid, key)
+                    self.stats["births"] += 1
                 self._pending[rid] = waiters
 
             self._reap_over_cap()
@@ -566,15 +608,31 @@ else:
 
         # -- delivery -----------------------------------------------------------
 
-        def _deliver(self, req_id, row):
+        def _deliver(self, rows):
             """Capture-shim callback (crank thread, inside the engine step):
-            hand ``req_id``'s row to its awaiting futures on their loops."""
-            waiters = self._pending.pop(req_id, None)
-            if not waiters:
-                return
-            self._served += 1
-            for i, (future, loop) in enumerate(waiters):
-                self._resolve(loop, future, row if i == 0 else row.clone())
+            resolve the frame's owed futures, one callback per event loop, so
+            a whole population becomes runnable in the same loop pass."""
+            by_loop = {}
+            for req_id, row in rows.items():
+                waiters = self._pending.pop(req_id, None)
+                if not waiters:
+                    continue
+                self._served += 1
+                for i, (future, loop) in enumerate(waiters):
+                    by_loop.setdefault(loop, []).append(
+                        (future, row if i == 0 else row.clone())
+                    )
+            for loop, items in by_loop.items():
+
+                def _set(items=items):
+                    for future, result in items:
+                        if not future.done():
+                            future.set_result(result)
+
+                try:
+                    loop.call_soon_threadsafe(_set)
+                except RuntimeError:
+                    pass  # the loop closed; the rows have no reader
 
         def _fail_owed(self, exc):
             owed, self._pending = self._pending, {}
@@ -658,6 +716,11 @@ else:
         async def release_all(self):
             """Reap every idle request (end of an inference run)."""
             await self._run_on_crank("release")
+
+        def take_stats(self):
+            """Snapshot and reset the batching breadcrumbs."""
+            stats, self.stats = self.stats, Counter()
+            return stats
 
         # -- sync paths -----------------------------------------------------
 
