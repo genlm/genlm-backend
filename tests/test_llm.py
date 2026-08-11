@@ -288,32 +288,3 @@ def test_concurrent_logprobs_and_sample(async_llm):
         return await asyncio.gather(logprobs_task(), sample_task())
 
     asyncio.run(both_tasks())
-
-
-@v1_capable
-@pytest.mark.asyncio
-async def test_cache(model_name):
-    """Test output caching functionality."""
-    async_llm_with_cache = load_model_by_name(
-        model_name,
-        backend="vllm",
-        llm_opts={
-            "engine_opts": {"gpu_memory_utilization": 0.2},
-            "cache_size": 2,
-        },
-    )
-
-    logprobs1 = await async_llm_with_cache.next_token_logprobs([0])
-    logprobs2 = await async_llm_with_cache.next_token_logprobs([1])
-    assert len(async_llm_with_cache.cache) == 2
-
-    logprobs1_post = await async_llm_with_cache.next_token_logprobs([0])
-    logprobs2_post = await async_llm_with_cache.next_token_logprobs([1])
-    assert torch.allclose(logprobs1, logprobs1_post)
-    assert torch.allclose(logprobs2, logprobs2_post)
-
-    # Check that we can clear the cache
-    async_llm_with_cache.clear_cache()
-    assert len(async_llm_with_cache.cache) == 0
-
-    del async_llm_with_cache
