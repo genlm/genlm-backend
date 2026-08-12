@@ -161,10 +161,9 @@ def test_from_name_with_options(model_name):
 
 
 def test_batch_evaluate_empty_queries(async_llm):
-    # An empty queue flushes harmlessly (the timer can fire after a reset).
-    async_llm.queries = []
-    async_llm._batch_evaluate()
-    assert len(async_llm.queries) == 0
+    # An empty cohort flushes harmlessly (a reset can empty the window's queue).
+    async_llm._batch_evaluate([])
+    assert len(async_llm._queries) == 0
 
 
 def test_sample_seeded(async_llm):

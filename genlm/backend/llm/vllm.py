@@ -234,9 +234,9 @@ else:
                     tokens.append(token)
             if idxs:
                 device = states.last_sampled_tokens.device
-                states.last_sampled_tokens[
-                    torch.tensor(idxs, dtype=torch.int64, device=device)
-                ] = torch.tensor(tokens, dtype=torch.int64, device=device).unsqueeze(1)
+                both = torch.tensor(idxs + tokens, dtype=torch.int64, device=device)
+                k = len(idxs)
+                states.last_sampled_tokens[both[:k]] = both[k:].unsqueeze(1)
             scheduler_output.fed_ack()
 
     _gpu_model_runner.GPUModelRunner.update_requests = _update_requests_with_appends
@@ -274,10 +274,6 @@ else:
             # this map.
             self._lora_requests = {}
             self._next_lora_id = 1
-
-            # Loop-side window state.
-            self._queries = []
-            self._window_armed = False
 
             # Crank-owned state: the crank thread is the only reader and
             # writer of everything below (the in-process engine runs
@@ -467,24 +463,14 @@ else:
                 raise ValueError("token_ids must not be empty")
 
             loop = asyncio.get_running_loop()
-            futures = []
-            for token_ids in token_ids_list:
-                future = loop.create_future()
-                futures.append(future)
-                self._queries.append(
+            futures = [loop.create_future() for _ in token_ids_list]
+            cohort = await self._window_cohort(
+                [
                     ((tuple(token_ids), lora_name), lora_request, future, loop)
-                )
-            if not self._window_armed:
-                self._window_armed = True
-                try:
-                    while True:
-                        n = len(self._queries)
-                        await asyncio.sleep(0)
-                        if len(self._queries) == n:
-                            break
-                    cohort, self._queries = self._queries, []
-                finally:
-                    self._window_armed = False
+                    for token_ids, future in zip(token_ids_list, futures)
+                ]
+            )
+            if cohort is not None:
                 self._work.put(("asks", cohort, None, None))
             return torch.stack(await asyncio.gather(*futures))
 
@@ -498,15 +484,13 @@ else:
             the exception; the thread survives for the next item."""
             while True:
                 item = self._work.get()
-                if item is _STOP:
-                    self._fail_owed(RuntimeError("backend was shut down"))
-                    return
-                stopping = False
+                stopping = item is _STOP
                 try:
-                    self._handle(item)
+                    if not stopping:
+                        self._handle(item)
                     stalled = 0
                     steps = 0
-                    while self._pending:
+                    while not stopping and self._pending:
                         served = self._served
                         self._core.get_output()
                         steps += 1

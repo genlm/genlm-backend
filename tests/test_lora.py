@@ -196,7 +196,7 @@ def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list, lor
     reference_llm.set_lora(lora_path)
     logits_async = (
         asyncio.run(
-            async_llm.lora_view("lora_1").batch_next_token_logprobs(token_ids_list)
+            async_llm.batch_next_token_logprobs(token_ids_list, lora_name="lora_1")
         )
         .float()
         .cpu()
@@ -343,7 +343,7 @@ def test_batch_next_token_logprobs_agreement(
     )
     wants = (
         asyncio.run(
-            async_llm.lora_view("lora_1").batch_next_token_logprobs(token_ids_list)
+            async_llm.batch_next_token_logprobs(token_ids_list, lora_name="lora_1")
         )
         .cpu()
         .numpy()

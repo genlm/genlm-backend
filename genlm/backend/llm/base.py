@@ -19,6 +19,38 @@ class AsyncLM(ABC):
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
         self.byte_vocab, self.str_vocab = decode_vocab(self.tokenizer)
+        # Batch-window state: concurrent asks meet in ``_queries``.
+        self._queries = []
+        self._window_armed = False
+
+    async def _window_cohort(self, entries, *, linger=0.0):
+        """Meet concurrent asks in a batch window: append ``entries`` (a batch
+        enters as ONE set of asks, before any yield) and, if nobody holds the
+        window yet, hold it open until a full event-loop pass adds no new ask
+        (after one cooperative ``linger`` sleep for late callers, when
+        nonzero). Returns the drained cohort to the holding caller -- who
+        evaluates it in their own coroutine, never a background task (window
+        state must not outlive the loop its callers are on) -- and ``None`` to
+        everyone else."""
+        self._queries.extend(entries)
+        if self._window_armed:
+            return None
+        self._window_armed = True
+        try:
+            lingered = not linger
+            while True:
+                n = len(self._queries)
+                await asyncio.sleep(0)
+                if len(self._queries) > n:
+                    continue
+                if lingered:
+                    break
+                lingered = True
+                await asyncio.sleep(linger)
+            cohort, self._queries = self._queries, []
+            return cohort
+        finally:
+            self._window_armed = False
 
     @abstractmethod
     async def next_token_logprobs(self, token_ids, lora_name=None):

@@ -253,8 +253,6 @@ else:
             self.mlx_lm_model = mlx_lm_model
             self.timeout = timeout
             self.prefill_step_size = prefill_step_size
-            self.queries = []
-            self._window_armed = False
             self.adapters = _Adapters(mlx_lm_model)
             # KV rows never cross adapters, so each adapter keeps its own pool.
             self.slots = defaultdict(
@@ -314,7 +312,7 @@ else:
 
         def reset_async_queries(self):
             """Drop queued queries. Use after an exception left them unresolved."""
-            self.queries = []
+            self._queries = []
 
         def _forward(self, prompts, lora_name):
             """Next-token log-probs under one adapter, ``[len(prompts), vocab]``."""
@@ -342,29 +340,10 @@ else:
                         self.cache[key] = logprobs[row]
             return out
 
-        async def _collect(self):
-            """Hold the batch window open: return once a full event-loop pass
-            adds no new query (so a whole concurrent gather lands in one batch),
-            after one cooperative ``timeout`` linger for late callers.
-
-            Run by the window's first caller, never a background task: window
-            state must not outlive the loop the callers are on."""
-            lingered = not self.timeout
-            while True:
-                n = len(self.queries)
-                await asyncio.sleep(0)
-                if len(self.queries) > n:
-                    continue
-                if lingered:
-                    return
-                lingered = True
-                await asyncio.sleep(self.timeout)
-
-        def _batch_evaluate(self):
-            """Resolve every queued query in one forward, deduplicating equal
+        def _batch_evaluate(self, queries):
+            """Resolve a window cohort in one forward, deduplicating equal
             prompts. Every future gets its row or the exception — a failed
             forward must not leave co-window callers waiting forever."""
-            queries, self.queries = self.queries, []
             if not queries:
                 return
             futures = defaultdict(list)
@@ -398,14 +377,9 @@ else:
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
             future = asyncio.get_running_loop().create_future()
-            self.queries.append((key, future))
-            if not self._window_armed:
-                self._window_armed = True
-                try:
-                    await self._collect()
-                finally:
-                    self._window_armed = False
-                self._batch_evaluate()
+            cohort = await self._window_cohort([(key, future)], linger=self.timeout)
+            if cohort is not None:
+                self._batch_evaluate(cohort)
             return await future
 
         def next_token_logprobs_sync(self, token_ids, lora_name=None):
