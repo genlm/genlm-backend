@@ -48,13 +48,18 @@ if not HAS_MLX:
 else:
 
     def _wired(model):
-        """Keep ``model``'s weights resident for the enclosed work. The stream is
-        resolved per call, never stored -- MLX streams are thread-affine."""
+        """Keep ``model``'s weights resident for the enclosed work.
+
+        MLX streams are thread-affine, so the stream is resolved per call, never stored.
+        """
         return wired_limit(model, [mx.default_stream(mx.default_device())])
 
     def _to_torch(a):
-        """MLX array as a torch tensor over the same buffer. bfloat16 is narrowed
-        first: callers hand these to numpy, which has no bfloat16."""
+        """MLX array as a torch tensor over the same buffer.
+
+        bfloat16 is narrowed to float16 first: callers hand these to numpy, which has
+        no bfloat16.
+        """
         if a.dtype == mx.bfloat16:
             a = a.astype(mx.float16)
         return torch.from_dlpack(a)
@@ -62,9 +67,13 @@ else:
     class _SlotPool:
         """The model's live KV rows: row ``i`` holds exactly the tokens in ``seqs[i]``.
 
-        Rows are extended, gathered, or replaced wholesale -- never rebuilt from stored
-        pieces, so a batch that walks forward from the previous one copies nothing. A
-        repeated source in a gather forks that row; an omitted one is dropped.
+        Rows are extended, gathered, or replaced wholesale, never rebuilt from stored
+        pieces. In a gather, a repeated source forks that row and an omitted one is
+        dropped.
+
+        Attributes:
+            seqs (list[list[int]]): Tokens held by each live row.
+            cache (list|None): Per-layer MLX caches backing the rows.
         """
 
         def __init__(self, model, prefill_step_size):
@@ -77,12 +86,19 @@ else:
             self.seqs, self.cache = [], None
 
         def logits(self, prompts):
-            """Final-position logits for ``prompts``, one row each, leaving the pool
-            holding exactly them. A batch whose rows each extend a live row by the same
-            non-empty delta continues that row's KV; anything else is prefilled.
+            """Final-position logits for ``prompts``, one row each.
 
-            Discovers what to reuse. A caller that already knows its own ancestry calls
-            :meth:`advance` instead."""
+            Leaves the pool holding exactly ``prompts``. A batch whose rows each extend
+            a live row by the same non-empty delta continues that row's KV; anything
+            else is prefilled. A caller that already knows its own ancestry calls
+            :meth:`advance` instead.
+
+            Args:
+                prompts (list[list[int]]): Token ids each row must hold.
+
+            Returns:
+                (mx.array): ``[len(prompts), vocab]`` final-position logits.
+            """
             sources, shared = zip(*map(self._source, prompts))
             deltas = [p[n:] for p, n in zip(prompts, shared)]
             if self._continues(sources, deltas):
@@ -90,11 +106,19 @@ else:
             return self._prefill(prompts)
 
         def advance(self, sources, deltas):
-            """Re-lay the rows as ``sources`` -- repeat an index to fork that row, omit
-            one to drop it -- then forward one equal-length token block per row.
+            """Re-lay the rows as ``sources``, then forward one token block per row.
 
-            A reorder needs row-sliceable caches; a recurrent state has none, so there the
-            rows are rebuilt by prefilling what they would have held."""
+            A repeated index forks that row; an omitted one is dropped. Re-laying needs
+            row-sliceable caches, so rows backed by a recurrent state are rebuilt by
+            prefilling what they would have held.
+
+            Args:
+                sources (list[int]): Live row each new row continues.
+                deltas (list[list[int]]): Equal-length token block to append per row.
+
+            Returns:
+                (mx.array): ``[len(sources), vocab]`` final-position logits.
+            """
             if not self._relayable(sources):
                 return self._prefill(
                     [self.seqs[s] + d for s, d in zip(sources, deltas)]
@@ -120,8 +144,10 @@ else:
 
         def _continues(self, sources, deltas):
             """Whether the pool can carry this batch forward instead of reprefilling.
+
             The deltas must share one non-zero length so they forward as one block;
-            whether the rows can be re-laid is :meth:`advance`'s to decide."""
+            whether the rows can be re-laid is decided in :meth:`advance`.
+            """
             if self.cache is None or None in sources:
                 return False
             return len({len(d) for d in deltas}) == 1 and bool(deltas[0])
@@ -160,18 +186,23 @@ else:
     class _Adapters:
         """LoRA weight sets over one model.
 
-        MLX attaches adapters to the model itself, so the model is wrapped once, on the
-        first registration, and an adapter is then only the ``lora_*`` arrays to install --
-        adapters share the base weights rather than copying them. The base is the
-        all-zero set the wrap starts from, which leaves base forwards bit-exact.
+        MLX attaches adapters to the model itself, so the model is wrapped once, at the
+        first registration, and an adapter is then only the ``lora_*`` arrays to
+        install; adapters share the base weights rather than copying them. The base set
+        is the all-zero one the wrap starts from, leaving base forwards bit-exact.
+
+        Attributes:
+            sets (dict): Name -> ``[(parameter path, array)]``, ``None`` being the base.
+            layout (tuple|None): ``(num_layers, lora_parameters)`` the wrap used.
+            installed (list|None): The weight set currently on the model, held by
+                identity; `add` rebinds a name to a fresh list, so a rebind invalidates
+                it.
         """
 
         def __init__(self, model):
             self.model = model
-            self.sets = {}  # name -> [(parameter path, array)], None being the base
-            self.layout = None  # (num_layers, lora_parameters) the wrap used
-            # The weight set currently on the model, by identity. ``add`` rebinds a name
-            # to a fresh list, so a rebind invalidates itself.
+            self.sets = {}
+            self.layout = None
             self.installed = None
 
         def add(self, name, path):
@@ -263,8 +294,8 @@ else:
                 if cache_size > 0
                 else None
             )
-            # mlx_lm.load hands back a TokenizerWrapper: it adds streaming detokenize but
-            # is not callable like a HuggingFace tokenizer, so unwrap to the real one.
+            # mlx_lm.load returns a TokenizerWrapper, which adds streaming detokenize
+            # but is not callable like the HuggingFace tokenizer AsyncLM expects.
             super().__init__(tokenizer=getattr(tokenizer, "_tokenizer", tokenizer))
 
         @classmethod
@@ -282,9 +313,10 @@ else:
             return cls(model, tokenizer, **kwargs)
 
         def add_new_lora(self, lora_path, lora_name="lora_1"):
-            """Register the adapter at ``lora_path`` under ``lora_name``, rebinding the
-            name if it already exists. Every adapter on a model must share the layout
-            the first one wrapped it with.
+            """Register the adapter at ``lora_path`` under ``lora_name``.
+
+            Re-registering a name rebinds it. Every adapter on a model must share the
+            layout the first one wrapped it with.
 
             Args:
                 lora_path (str): Directory holding ``adapter_config.json`` and
@@ -324,8 +356,10 @@ else:
             return _to_torch(logprobs)
 
         def _resolve(self, keys):
-            """``{key: logprobs}`` for distinct ``(context, lora_name)`` keys, forwarding
-            the uncached ones one batch per adapter and memoizing them."""
+            """``{key: logprobs}`` for distinct ``(context, lora_name)`` keys.
+
+            Uncached keys are forwarded one batch per adapter, then memoized.
+            """
             out, todo = {}, defaultdict(list)
             for key in keys:
                 if self.cache is not None and key in self.cache:
@@ -341,9 +375,11 @@ else:
             return out
 
         def _batch_evaluate(self, queries):
-            """Resolve a window cohort in one forward, deduplicating equal
-            prompts. Every future gets its row or the exception — a failed
-            forward must not leave co-window callers waiting forever."""
+            """Resolve a window cohort in one forward, deduplicating equal prompts.
+
+            Every future gets its row or the exception; a failed forward would
+            otherwise leave the co-window callers awaiting.
+            """
             if not queries:
                 return
             futures = defaultdict(list)

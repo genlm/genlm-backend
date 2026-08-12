@@ -55,7 +55,7 @@ else:
         """
         req = Request(
             input_text="",
-            # sglang carries token ids as an "q" array and concatenates onto it.
+            # sglang concatenates onto input_ids, which must be a "q" array.
             input_ids=array("q", token_ids),
             input_embeds=None,
             mm_inputs=None,
@@ -128,10 +128,8 @@ else:
                 "model_path": model_id,
                 "grammar_backend": "none",
                 "allow_auto_truncate": False,
-                # ``_batch_evaluate`` drives the scheduler with sglang's NORMAL event
-                # loop shape (plan -> run_batch -> process_batch_result). The overlap
-                # loop defers results through ``result_queue`` instead, so asking for it
-                # here would not match how we step the batch.
+                # `_batch_evaluate` steps sglang's normal event loop directly; the
+                # overlap loop defers results through `result_queue` and yields none.
                 "disable_overlap_schedule": True,
                 "mem_fraction_static": 0.9,  # default value is 0.9
             }
@@ -142,8 +140,8 @@ else:
             # sglang reads its config through a process-wide runtime context, so a
             # Scheduler cannot be constructed until this process publishes one.
             publish(server_args, role="scheduler")
-            # Ranks by keyword: sglang keeps inserting parallelism axes into this
-            # signature, and positionally the trailing args silently change meaning.
+            # Ranks by keyword: sglang's parallelism axes shift position across
+            # versions, and positional trailing args silently change meaning.
             mod = Scheduler(
                 server_args,
                 port_args,
@@ -156,10 +154,9 @@ else:
                 dp_rank=0,
             )
             mod.result_queue = deque()
-            # A constructed Scheduler is not yet runnable: run_event_loop establishes
-            # these two, then dispatches into a loop that never returns, so an embedded
-            # driver has to set them itself. The schedule stream is redrawn while it
-            # aliases the forward stream, which would erase scheduler/forward overlap.
+            # `run_event_loop` establishes these two before dispatching into a loop that
+            # never returns, so an embedded driver sets them itself. A schedule stream
+            # aliasing the forward stream erases scheduler/forward overlap.
             mod.schedule_stream = mod.device_module.Stream(priority=0)
             redraws = 0
             while (
@@ -354,10 +351,9 @@ else:
             sched = self.model
             sched.process_input_requests(requests)
 
-            # sglang's own normal event loop, drained instead of served forever: the
-            # planner is handed the running and previous batches and returns a plan, and
-            # its `running_batch` has to be carried back for the next call to see it.
-            # The whole loop runs on the schedule stream, as `run_event_loop` does.
+            # sglang's normal event loop, drained rather than served forever. The
+            # planner only sees `running_batch` if it is carried back across calls, and
+            # the loop runs on the schedule stream.
             with sched.device_module.StreamContext(sched.schedule_stream):
                 while True:
                     plan = sched.get_next_batch_to_run(

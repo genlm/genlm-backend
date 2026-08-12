@@ -4,14 +4,15 @@ requests.
 The public surface is ``next_token_logprobs`` / ``batch_next_token_logprobs``;
 concurrent calls meet in an autobatch window and execute as one batch. Behind
 the window, each distinct growing context holds a resident engine request:
-extending a context by one token appends that token to its request (a request
-whose next token hasn't arrived is skipped by the scheduler — resident and
-free), and the full-vocabulary row for every step leaves through a capture
-shim in the model runner's sampler slot. All engine interaction — residency,
-eviction, stepping — happens on one backend-owned crank thread; the in-process
-engine runs ``schedule()`` on its caller's thread, so that state is
-single-threaded by construction. Callers only ever await rows — or the
-exception that took them.
+extending a context by one token appends that token to its request, and a
+request whose next token has not arrived is skipped by the scheduler, so it
+stays resident at no cost. The full-vocabulary row for every step leaves
+through a capture shim in the model runner's sampler slot.
+
+All engine interaction (residency, eviction, stepping) happens on one
+backend-owned crank thread; the in-process engine runs ``schedule()`` on its
+caller's thread, so that state is single-threaded by construction. Every ask
+resolves with a row or with an exception.
 """
 
 import os
@@ -28,8 +29,8 @@ from genlm.backend.llm.base import AsyncLM
 
 
 try:
-    # In-process v1 engine with the V2 (MRv2) model runner. These env vars must
-    # be set BEFORE vllm is imported for the first time in this process.
+    # In-process v1 engine with the V2 (MRv2) model runner. These env vars only
+    # take effect if set before vllm is first imported in this process.
     if "vllm" in sys.modules:
         warnings.warn(
             "vllm was imported before genlm.backend.llm.vllm; engine-mode env "
@@ -40,8 +41,8 @@ try:
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     # flashinfer's JIT needs CUDA_HOME at runtime; compute nodes lack it.
     os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
-    # One runner, one seam: the capture shim installs via MRv2's
-    # ModelState.custom_sampler hook, so force MRv2 for every architecture.
+    # The capture shim installs through MRv2's ModelState.custom_sampler hook,
+    # so every architecture must run under MRv2.
     os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
@@ -83,11 +84,14 @@ else:
     _STOP = object()  # crank-shutdown sentinel
 
     class _CaptureSampler:  # pragma: no cover
-        """Sits in the model runner's sampler slot. For resident requests it
-        captures the full-vocabulary log-probability row (device-resident) and
-        reports zero sampled tokens — the scheduler then appends nothing and
-        the request idles until its next token arrives from the caller. All
-        other requests defer verbatim to the wrapped stock sampler."""
+        """Shim occupying the model runner's sampler slot.
+
+        For a resident request it captures the full-vocabulary
+        log-probability row (device-resident) and reports zero sampled
+        tokens, so the scheduler appends nothing and the request idles until
+        its next token arrives from the caller. Every other request defers
+        verbatim to the wrapped stock sampler.
+        """
 
         def __init__(self, base, deliver):
             self._base = base
@@ -111,9 +115,9 @@ else:
                         # produce no logits and are skipped).
                         rows_at.append((req_ids[i], hi - 1))
             if rows_at:
-                # One gather + one normalize for the whole frame; the copy also
+                # One gather + one normalize for the whole frame. The copy also
                 # un-aliases vLLM's live logits buffer, which the next forward
-                # overwrites. Delivered rows are views of this block.
+                # overwrites; delivered rows are views of this block.
                 idx = torch.tensor([pos for _, pos in rows_at], device=logits.device)
                 block = torch.log_softmax(logits.index_select(0, idx).float(), dim=-1)
                 self._deliver({rid: block[j] for j, (rid, _) in enumerate(rows_at)})
@@ -133,17 +137,17 @@ else:
             return out
 
     class BackendScheduler(AsyncScheduler):  # pragma: no cover
-        """Two duties for caller-fed requests, both consequences of their
-        tokens arriving from the caller instead of the sampler.
+        """Scheduler for requests whose tokens arrive from the caller rather
+        than from the sampler.
 
-        ``feed_token`` runs on the engine thread between steps; each
-        appended token also rides the next ``SchedulerOutput`` for a
-        worker-side wrap to write into the runner's last-sampled buffer —
-        that buffer, not the request's token list, is where a decode step
-        reads its input token. Miss it and every decode forwards token 0
-        while all scheduler-side bookkeeping looks healthy. And
-        ``num_output_placeholders`` is zeroed for resident requests every
-        schedule, or async run-ahead accounting corrupts.
+        ``feed_token`` runs on the engine thread between steps; each appended
+        token also rides the next ``SchedulerOutput`` for a worker-side wrap
+        to write into the runner's last-sampled buffer. That buffer, not the
+        request's token list, is where a decode step reads its input token:
+        miss it and every decode forwards token 0 while all scheduler-side
+        bookkeeping looks healthy. ``num_output_placeholders`` is zeroed for
+        resident requests on every schedule, or async run-ahead accounting
+        corrupts.
         """
 
         def __init__(self, *args, **kwargs):
@@ -188,11 +192,11 @@ else:
                     if request is not None:
                         request.num_output_placeholders = 0
 
-    # from_name needs the shim installed while ``LLM(...)`` constructs the
-    # model runner; the runner reaches its ModelState through this module
-    # function, wrapped once here. The box carries the deliver callback and
-    # an "armed" flag from_name asserts on — the hook moving in a vLLM
-    # upgrade must fail loudly, not serve sampled tokens silently.
+    # The shim must be installed while ``LLM(...)`` constructs the model
+    # runner, which reaches its ModelState through this module function,
+    # wrapped once here. The box carries the deliver callback and an "armed"
+    # flag from_name asserts on, so a hook that moves in a vLLM upgrade fails
+    # loudly instead of silently serving sampled tokens.
     _PENDING_CAPTURE = None
     _orig_init_model_state = _gpu_model_runner.init_model_state
 
@@ -216,9 +220,9 @@ else:
 
     # The runner reads a generated position's input token from its per-request
     # last-sampled buffer, which the capture sampler leaves untouched. Appends
-    # ride the SchedulerOutput; writing them here — after the stock request
-    # updates, before input preparation — makes the forward consume the
-    # appended token instead of a stale zero.
+    # ride the SchedulerOutput and must be written here, after the stock
+    # request updates and before input preparation, or the forward consumes a
+    # stale zero instead of the appended token.
     _orig_update_requests = _gpu_model_runner.GPUModelRunner.update_requests
 
     def _update_requests_with_appends(self, scheduler_output):
@@ -245,13 +249,13 @@ else:
         """Batched logprobs server over resident vLLM requests.
 
         Concurrent ``next_token_logprobs`` calls collect in an autobatch
-        window (await-0 drain: the window fires when a full event-loop pass
-        adds no new asks) and land on the crank thread as one cohort. The
-        crank reconciles each cohort against the residency table — an exact
-        one-token extension of an idle resident appends that token; anything
-        else births a request — then steps the engine until every owed row
-        has been captured; cohorts arriving mid-crank ride the running
-        frames. Identical contexts in one cohort share one row.
+        window, which fires when a full event-loop pass adds no new ask, and
+        land on the crank thread as one cohort. The crank reconciles each
+        cohort against the residency table: an exact one-token extension of
+        an idle resident appends that token, anything else births a request.
+        It then steps the engine until every owed row has been captured, and
+        cohorts arriving mid-crank ride the running frames. Identical
+        contexts in one cohort share one row.
         """
 
         def __init__(self, llm_engine):
@@ -269,7 +273,7 @@ else:
             # name -> LoRARequest; every forward selects its adapter per request
             # via ``lora_name`` (``None`` = base). Ids are monotonic: vLLM caches
             # adapter weights by int id, so an id must never be reused for
-            # different weights (re-registering a name gets a fresh id). Asks
+            # different weights (re-registering a name takes a fresh id). Asks
             # resolve their LoRARequest loop-side, so the crank never reads
             # this map.
             self._lora_requests = {}
@@ -279,13 +283,13 @@ else:
             # writer of everything below (the in-process engine runs
             # schedule() and the capture shim on that same thread).
             # Batching breadcrumbs: ("cohort", n)/("steps", n) histograms plus
-            # "appends"/"births"/"shared" totals. Crank-thread writes; snapshot
-            # via take_stats().
+            # "appends"/"births"/"shared" totals, written on the crank thread
+            # and snapshotted via take_stats().
             self.stats = Counter()
 
             self._requests = {}  # rid -> (tuple(ids), lora_name), recency order
             self._by_content = {}  # (tuple(ids), lora_name) -> rid
-            self._pending = {}  # rid -> [(future, loop)]; row or exception, never silence
+            self._pending = {}  # rid -> [(future, loop)]; owed a row or an exception
             self._served = 0  # rows delivered; the crank's progress signal
             self._next_rid = 0
             self._max_residents = 1 << 30  # tightened by from_name
@@ -372,12 +376,11 @@ else:
         def add_new_lora(self, lora_path, lora_name="lora_1"):
             """Register a LoRA adapter under ``lora_name``.
 
-            Re-registering an existing name purges the name's requests (their
-            KV came from the old weights) and binds ``lora_path`` under a
-            fresh id — a training loop pushes updated weights with this one
-            call. Forwards select the adapter per call via ``lora_name=``.
-            The purge is queued before the rebind returns, so any later ask
-            under the name births against the new weights.
+            Re-registering an existing name purges the name's requests, whose
+            KV came from the weights being replaced, and binds ``lora_path``
+            under a fresh id. The purge is queued before the rebind returns,
+            so any later ask under the name births against the incoming
+            weights. Forwards select the adapter per call via ``lora_name=``.
 
             Args:
                 lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
@@ -392,15 +395,20 @@ else:
 
         async def remove_lora(self, lora_name):
             """Unregister ``lora_name`` and evict its weights from the engine.
-            The adapter's requests are reaped first — their KV would outlive
-            the weights that produced it."""
+
+            The adapter's requests are reaped first: their KV must not outlive
+            the weights that produced it.
+
+            Args:
+                lora_name (str): Name of the adapter to remove.
+            """
             req = self._lora_requests.pop(lora_name)
             await self._run_on_crank("remove_lora", (lora_name, req.lora_int_id))
 
         def _purge_adapter(self, lora_name):
-            """(crank) Drop every request under ``lora_name``: fail rows still
-            owed (the weights are changing under them) and finish the engine
-            requests."""
+            """(crank) Drop every request under ``lora_name``: fail the rows
+            still owed, whose weights are changing under them, and finish the
+            engine requests."""
             stale = [
                 rid for rid, (_, name) in self._requests.items() if name == lora_name
             ]
@@ -438,9 +446,8 @@ else:
             The whole batch enters the window as one set of asks; concurrent
             callers (batched or single) meet there and land on the crank as one
             cohort. The window is held open by its first caller until a full
-            event-loop pass adds no new ask -- callers reach their asks at
-            different depths of a `gather` tree, and each level is another
-            scheduler turn.
+            event-loop pass adds no new ask, since callers reach their asks at
+            different depths of a `gather` tree.
 
             Args:
                 token_ids_list (list[list[int]]): A list of token ID lists.
@@ -477,11 +484,11 @@ else:
         # -- the crank ----------------------------------------------------------
 
         def _crank_loop(self):
-            """Single-flight by construction: the one thread that touches the
+            """Single-flight by construction: the only thread that touches the
             engine. Handle a work item, step until no row is owed (handling
             items that arrive mid-crank between steps), sleep on the queue.
-            Owns the pending contract — on any failure every owed future gets
-            the exception; the thread survives for the next item."""
+            On any failure every owed future receives the exception and the
+            thread survives for the next item."""
             while True:
                 item = self._work.get()
                 stopping = item is _STOP
@@ -524,8 +531,8 @@ else:
                     return
 
         def _handle(self, item):
-            """(crank) Execute one work item. Barrier items resolve their own
-            future — with the result or the failure; ask cohorts leave their
+            """(crank) Execute one work item. A barrier item resolves its own
+            future with the result or the failure; an ask cohort leaves its
             futures in ``_pending`` for delivery or ``_fail_owed``."""
             kind, arg, future, loop = item
             if kind == "asks":
@@ -554,7 +561,8 @@ else:
             """(crank) One cohort against the residency table. Shortest first:
             a context is reconciled before any extension of it, so a chain
             (c, c+1, c+2) in one cohort resolves parent-first. A failure
-            mid-cohort fails every ask in it — no future is left behind."""
+            mid-cohort fails every ask in the cohort, leaving no future
+            unresolved."""
             try:
                 self._reconcile_inner(cohort)
             except BaseException as exc:
@@ -614,8 +622,8 @@ else:
 
         def _deliver(self, rows):
             """Capture-shim callback (crank thread, inside the engine step):
-            resolve the frame's owed futures, one callback per event loop, so
-            a whole population becomes runnable in the same loop pass."""
+            resolve the frame's owed futures with one callback per event loop,
+            so a whole population becomes runnable in the same loop pass."""
             by_loop = {}
             for req_id, row in rows.items():
                 waiters = self._pending.pop(req_id, None)

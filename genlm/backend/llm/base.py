@@ -19,19 +19,31 @@ class AsyncLM(ABC):
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
         self.byte_vocab, self.str_vocab = decode_vocab(self.tokenizer)
-        # Batch-window state: concurrent asks meet in ``_queries``.
+        # Batch-window state; concurrent asks collect in ``_queries``.
         self._queries = []
         self._window_armed = False
 
     async def _window_cohort(self, entries, *, linger=0.0):
-        """Meet concurrent asks in a batch window: append ``entries`` (a batch
-        enters as ONE set of asks, before any yield) and, if nobody holds the
-        window yet, hold it open until a full event-loop pass adds no new ask
-        (after one cooperative ``linger`` sleep for late callers, when
-        nonzero). Returns the drained cohort to the holding caller -- who
-        evaluates it in their own coroutine, never a background task (window
-        state must not outlive the loop its callers are on) -- and ``None`` to
-        everyone else."""
+        """Meet concurrent asks in a batch window.
+
+        ``entries`` are appended before any yield, so a whole batch enters as
+        one set of asks. The first caller to arm the window holds it open
+        until a full event-loop pass adds no new ask (preceded by one
+        cooperative ``linger`` sleep for late callers, when nonzero) and
+        receives the drained cohort; every other caller receives ``None``.
+        The holding caller must evaluate the cohort in its own coroutine and
+        never in a background task: window state must not outlive the loop
+        its callers are on.
+
+        Args:
+            entries (list): Asks to add to the current window.
+            linger (float, optional): Seconds to sleep once for late callers.
+                Defaults to 0.0, which skips the sleep.
+
+        Returns:
+            (list | None): The drained cohort for the caller holding the
+                window, ``None`` for every other caller.
+        """
         self._queries.extend(entries)
         if self._window_armed:
             return None
@@ -115,9 +127,10 @@ class AsyncLM(ABC):
         )
 
     def add_new_lora(self, lora_path, lora_name):
-        """Register a LoRA adapter under ``lora_name``; re-registering an existing
-        name rebinds it to the new weights. Forwards select the adapter per call
-        via ``lora_name=``.
+        """Register a LoRA adapter under ``lora_name``.
+
+        Re-registering an existing name rebinds it to the weights at
+        ``lora_path``. Forwards select the adapter per call via ``lora_name=``.
 
         Args:
             lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
@@ -140,14 +153,14 @@ class AsyncLM(ABC):
         )  # pragma: no cover
 
     def set_lora(self, lora_path, lora_name):
-        """Removed: adapter selection is per-request now."""
+        """Unsupported: adapter selection is per-request, via ``lora_name=``."""
         raise RuntimeError(
             "set_lora() was removed: there is no active-adapter global anymore. "
             "Pass lora_name= per call (next_token_logprobs/sample/...)."
         )
 
     def clear_lora(self):
-        """Removed: ``lora_name=None`` (the default) is the base model."""
+        """Unsupported: ``lora_name=None`` (the default) is the base model."""
         raise RuntimeError(
             "clear_lora() was removed: omit lora_name (None = base model)."
         )

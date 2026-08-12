@@ -180,9 +180,8 @@ class AsyncTransformer(AsyncLM):
     def add_new_lora(self, lora_path, lora_name="lora_1"):
         """Register a LoRA adapter under ``lora_name``.
 
-        Re-registering an existing name evicts the old weights and binds the
-        name to ``lora_path`` — a training loop pushes updated weights with this
-        one call. Forwards select the adapter per call via ``lora_name=``.
+        Re-registering a name evicts its weights and rebinds it to ``lora_path``.
+        Forwards select the adapter per call via ``lora_name=``.
 
         Args:
             lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
@@ -200,9 +199,15 @@ class AsyncTransformer(AsyncLM):
     def _activate(self, lora_name):
         """Set the model's peft state for a forward under ``lora_name`` (``None`` = base).
 
-        Only manages adapters registered via ``add_new_lora``; a model whose adapters
-        live outside the transformers peft mixin (e.g. a peft training wrapper sharing
-        the weights) is left untouched in the ``None`` case.
+        Only adapters registered via ``add_new_lora`` are managed. A model whose
+        adapters live outside the transformers peft mixin (e.g. a peft training wrapper
+        sharing the weights) is left untouched under ``None``.
+
+        Args:
+            lora_name (str|None): Adapter to activate, or None for the base model.
+
+        Raises:
+            ValueError: If ``lora_name`` has not been registered.
         """
         loaded = getattr(self.model, "_hf_peft_config_loaded", False)
         if lora_name is None:
@@ -234,8 +239,8 @@ class AsyncTransformer(AsyncLM):
         for query in queries:
             by_lora[query.lora_name].append(query)
         for lora_name, group in by_lora.items():
-            # Trap per group and fail its futures: an exception escaping a timer
-            # callback would leave the awaiting callers hung forever.
+            # An exception escaping this timer callback would hang every awaiting
+            # caller, so a failed group fails its own futures.
             try:
                 self._activate(lora_name)
                 self._evaluate_queries(group)
