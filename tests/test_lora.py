@@ -83,10 +83,6 @@ def test_unknown_lora_error(transformer_llm):
         transformer_llm.next_token_logprobs_uncached([0], lora_name="lora_2")
 
 
-# Note: "lora_extra_vocab_size" is 256, so async has an increased vocab size
-# "lora_extra_vocab_size" will be removed in vllm v0.12.0 (genlm-backend uses vllm v0.10.0)
-# This does not happen with the reference llm since the vocab size is set using the hf tokenizer (decode)
-# and then logprobs=vocab_length is set in SamplingParameters in vllm
 @v1_capable
 def test_next_token_logprobs(async_llm, reference_llm, token_ids_list, lora_path):
     async_llm.add_new_lora(lora_path)
@@ -104,16 +100,11 @@ def test_next_token_logprobs(async_llm, reference_llm, token_ids_list, lora_path
         async_vocab = logits_async.shape[0]
         ref_vocab = logits_ref.shape[0]
 
-        assert async_vocab == ref_vocab + 256, [
-            "Unexpected vocab mismatch. Async must have 256 more tokens.",
+        assert async_vocab == ref_vocab, [
+            "Unexpected vocab mismatch.",
             async_vocab,
             ref_vocab,
         ]
-        extra_logits = logits_async[-256:]
-        assert np.all(np.isneginf(extra_logits)), (
-            "Async extra logits are all -inf",
-            extra_logits,
-        )
         trimmed_async = logits_async[:ref_vocab]
         assert trimmed_async.shape == logits_ref.shape
 
@@ -136,16 +127,11 @@ def test_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list, lora
         async_vocab = logits_async.shape[0]
         ref_vocab = logits_ref.shape[0]
 
-        assert async_vocab == ref_vocab + 256, [
-            "Unexpected vocab mismatch. Async must have 256 more tokens because lora_extra_vocab_size=256.",
+        assert async_vocab == ref_vocab, [
+            "Unexpected vocab mismatch.",
             async_vocab,
             ref_vocab,
         ]
-        extra_logits = logits_async[-256:]
-        assert np.all(np.isneginf(extra_logits)), (
-            "Async extra logits are all -inf",
-            extra_logits,
-        )
         trimmed_async = logits_async[:ref_vocab]
         assert trimmed_async.shape == logits_ref.shape
 
@@ -171,18 +157,11 @@ def test_batch_next_token_logprobs_sync(
     async_vocab = logits_async.shape[1]
     ref_vocab = logits_ref.shape[1]
 
-    assert async_vocab == ref_vocab + 256, [
-        "Unexpected vocab mismatch. Async must have 256 more tokens.",
+    assert async_vocab == ref_vocab, [
+        "Unexpected vocab mismatch.",
         async_vocab,
         ref_vocab,
     ]
-
-    for logits in logits_async:
-        extra_logits = logits[-256:]
-        assert np.all(np.isneginf(extra_logits)), (
-            "Async extra logits are all -inf",
-            extra_logits,
-        )
     trimmed_async = logits_async[:, :ref_vocab]
     assert trimmed_async.shape == logits_ref.shape
     for i, (logit_async, logit_ref) in enumerate(zip(trimmed_async, logits_ref)):
@@ -208,17 +187,11 @@ def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list, lor
     async_vocab = logits_async.shape[1]
     ref_vocab = logits_ref.shape[1]
 
-    assert async_vocab == ref_vocab + 256, [
-        "Unexpected vocab mismatch. Async must have 256 more tokens.",
+    assert async_vocab == ref_vocab, [
+        "Unexpected vocab mismatch.",
         async_vocab,
         ref_vocab,
     ]
-    for logits in logits_async:
-        extra_logits = logits[-256:]
-        assert np.all(np.isneginf(extra_logits)), (
-            "Async extra logits are all -inf",
-            extra_logits,
-        )
     trimmed_async = logits_async[:, :ref_vocab]
     assert trimmed_async.shape == logits_ref.shape
     for i, (logit_async, logit_ref) in enumerate(zip(trimmed_async, logits_ref)):
@@ -251,16 +224,11 @@ def test_swapping_lora_requests(token_ids_list, async_llm, lora_path):
 
     for i, token_ids in enumerate(token_ids_list):
         assert (
-            compare(
-                logits_noswapped_lora[i][:-256], logits_swapped_lora[i][:-256]
-            ).max_rel_err
-            < 1e-3
+            compare(logits_noswapped_lora[i], logits_swapped_lora[i]).max_rel_err < 1e-3
         ), token_ids
     for i, token_ids in enumerate(token_ids_list):
         assert (
-            compare(
-                logits_noswapped_nolora[i][:-256], logits_swapped_nolora[i][:-256]
-            ).max_rel_err
+            compare(logits_noswapped_nolora[i], logits_swapped_nolora[i]).max_rel_err
             < 1e-3
         ), token_ids
 
@@ -294,7 +262,7 @@ def test_reregistration(async_llm, token_ids_list, lora_pair):
     assert np.abs(lp_shifted[finite] - lp_identity[finite]).max() > 1e-2
 
     asyncio.run(async_llm.remove_lora("reg"))
-    with pytest.raises(KeyError):
+    with pytest.raises(ValueError):
         asyncio.run(async_llm.next_token_logprobs(ids, lora_name="reg"))
 
 
