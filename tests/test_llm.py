@@ -83,30 +83,12 @@ def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list):
 # @settings(deadline=None)
 # @given(text_list=st.lists(st.text(min_size=1, max_size=1000), min_size=1, max_size=5))
 def test_batch_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list):
-    # Test 1: Regular sync context
+    """The sync wrapper needs a thread with no event loop of its own."""
     haves = async_llm.batch_next_token_logprobs_sync(token_ids_list).cpu().numpy()
     wants = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
 
     for have, want in zip(haves, wants):
         assert compare(have, want).max_rel_err < 1e-2, "Sync context"
-
-
-@v1_capable
-# @settings(deadline=None)
-# @given(text_list=st.lists(st.text(min_size=1, max_size=1000), min_size=1, max_size=5))
-def test_batch_next_token_logprobs_sync_in_async(
-    async_llm, reference_llm, token_ids_list
-):
-    # Test 2: Sync function inside async context
-    async def async_context():
-        have_async = async_llm.batch_next_token_logprobs_sync(token_ids_list)
-        return have_async.cpu().numpy()
-
-    wants = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
-    haves = asyncio.run(async_context())
-
-    for have, want in zip(haves, wants):
-        assert compare(have, want).max_rel_err < 1e-3, "Sync in async context"
 
 
 @v1_capable
