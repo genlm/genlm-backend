@@ -224,15 +224,20 @@ else:
             self._queue.put_nowait((token_ids, fut))
             return fut
 
-        async def next_token_logprobs(self, token_ids: List[int]):
+        async def next_token_logprobs(self, token_ids: List[int], lora_name=None):
             """Request log probabilities of next token. This version is asynchronous because it automatically batches concurrent requests; use with `await`.
 
             Args:
                 token_ids (list[int]): a list of token ids, representing a prompt to the language model.
+                lora_name (str, optional): Must be ``None``; this backend serves no adapters.
 
             Returns:
                 logprobs (torch.Tensor): a tensor of with the language model's log (normalized) probabilities for the next token following the prompt.
             """
+            if lora_name is not None:
+                raise ValueError(
+                    f"AsyncSGLTransformer has no adapter named {lora_name!r}"
+                )
             if not token_ids:
                 raise ValueError("Token ids must not be empty")
 
@@ -248,26 +253,36 @@ else:
 
             return out
 
-        def next_token_logprobs_sync(self, token_ids: List[int]):
+        def next_token_logprobs_sync(self, token_ids: List[int], lora_name=None):
             """Request log probabilities of next token synchronously.
 
             Args:
                 token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
+                lora_name (str, optional): Must be ``None``; this backend serves no adapters.
 
             Returns:
                 (torch.Tensor): Normalized log probability tensor.
             """
-            return self.batch_next_token_logprobs_sync([token_ids])[0]
+            return self.batch_next_token_logprobs_sync(
+                [token_ids], lora_name=lora_name
+            )[0]
 
-        def batch_next_token_logprobs_sync(self, token_ids_list: List[List[int]]):
+        def batch_next_token_logprobs_sync(
+            self, token_ids_list: List[List[int]], lora_name=None
+        ):
             """Request log probabilities of next tokens in a batch synchronously.
 
             Args:
                 token_ids_list (list[list[int]]): A list of token ID lists, each representing a prompt.
+                lora_name (str, optional): Must be ``None``; this backend serves no adapters.
 
             Returns:
                 (torch.Tensor): A tensor of normalized log probability tensors.
             """
+            if lora_name is not None:
+                raise ValueError(
+                    f"AsyncSGLTransformer has no adapter named {lora_name!r}"
+                )
             results = {}
             to_compute = []
 
