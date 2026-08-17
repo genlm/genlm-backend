@@ -244,7 +244,12 @@ def test_concurrent_sample_calls_share_a_window(async_llm):
     stats = async_llm.take_stats()
 
     assert len(outputs) == len(prompts)
-    cohorts = {size: n for (kind, size), n in stats.items() if kind == "cohort"}
+    # Counter keys are either ("cohort", size) / ("steps", n) or a bare string.
+    cohorts = [
+        key[1]
+        for key in stats
+        if isinstance(key, tuple) and len(key) == 2 and key[0] == "cohort"
+    ]
     assert cohorts, f"no cohorts recorded: {dict(stats)}"
     assert max(cohorts) == len(prompts), (
         f"expected a cohort of {len(prompts)}, saw sizes {sorted(cohorts)}"
