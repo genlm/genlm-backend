@@ -43,13 +43,16 @@ For LoRA support:
 pip install genlm-backend[lora]
 ```
 
-LoRA adapters are selected **per request**: register an adapter once with
-`add_new_lora(path, name)`, then pass `lora_name=name` to any forward
-(`next_token_logprobs`, `sample`, ...) or bind a handle with `lora_view(name)`;
-omitting `lora_name` (i.e. `None`) runs the base model. Re-registering an
-existing name rebinds it to new weights (old weights and caches are evicted) —
-a training loop pushes each update with the same `add_new_lora(new_path, name)`
-call. `remove_lora(name)` evicts an adapter explicitly.
+Adapters are selected per request. Register one with `add_new_lora(path, name)`, then pass
+`lora_name=name` to any forward; omit it to run the base model. Re-registering a name
+rebinds it to the weights at the new path and evicts the old weights and their caches, so a
+training loop can push each update through the same call. `remove_lora(name)` drops an
+adapter.
+
+```python
+llm.add_new_lora("/path/to/adapter", "reviewer")
+logps = await llm.next_token_logprobs(token_ids, lora_name="reviewer")
+```
 
 ## 🧪 Example: Autobatched Sequential Importance Sampling with LLMs
 
