@@ -1,8 +1,11 @@
 import pytest
-import asyncio
-import torch
-from arsenal.maths import compare
-from genlm.backend.llm import load_model_by_name, AsyncMlxLM
+
+pytest.importorskip("mlx")
+
+import asyncio  # noqa: E402
+import torch  # noqa: E402
+from arsenal.maths import compare  # noqa: E402
+from genlm.backend.llm import load_model_by_name, AsyncMlxLM  # noqa: E402
 
 
 TOLERANCES = {

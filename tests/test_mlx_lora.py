@@ -1,13 +1,16 @@
 import json
 
-import mlx.core as mx
-import mlx_lm
 import pytest
-import torch
-from mlx.utils import tree_flatten
-from mlx_lm.tuner.utils import linear_to_lora_layers
 
-from genlm.backend.llm import AsyncMlxLM
+pytest.importorskip("mlx")
+
+import mlx.core as mx  # noqa: E402
+import mlx_lm  # noqa: E402
+import torch  # noqa: E402
+from mlx.utils import tree_flatten  # noqa: E402
+from mlx_lm.tuner.utils import linear_to_lora_layers  # noqa: E402
+
+from genlm.backend.llm import AsyncMlxLM  # noqa: E402
 
 
 MODEL_NAME = "openai-community/gpt2"

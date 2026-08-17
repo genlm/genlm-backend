@@ -40,4 +40,4 @@ jobs:
           pip install -r requirements-dev.txt
       - name: Run Tests
         run: |
-          python -m pytest tests --ignore=tests/test_mlx.py
+          python -m pytest tests
