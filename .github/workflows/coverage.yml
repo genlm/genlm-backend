@@ -87,45 +87,17 @@ jobs:
           files: ./coverage.json
           slug: genlm/genlm-backend
 
-  test_mlx_coverage:
-    runs-on: macos-14
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - uses: actions/setup-python@v4
-        with:
-          python-version: 3.11.5
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install -U pip
-          pip install -e .[mlx]
-          pip install -r requirements-dev.txt
-
-      - name: Run MLX tests
-        run: |
-          coverage run --source=genlm/backend -m pytest tests/test_mlx.py tests/test_mlx_lora.py
-          coverage json --omit "*/test*"
-          coverage report --omit "*/test*"
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          fail_ci_if_error: false
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage.json
-          slug: genlm/genlm-backend
+  # MLX has no CI job: torch's MPS allocator does not work on the hosted macOS
+  # images, which refuse even KiB-sized allocations, and mlx rows reach torch as
+  # `mps` tensors through dlpack. Run them on an Apple Silicon machine instead:
+  #   pytest tests/test_mlx.py tests/test_mlx_lora.py
 
   gpu-gate:
     # The single required status check for GPU tests.
     # Passes when the GPU jobs succeed OR are intentionally skipped
     # (skip-gpu-tests label, or non-PR paths); fails on failure/cancelled
     # (including the watchdog cancel or GitHub's 24h queue cancel).
-    # Intentionally gates only the GPU jobs; test_mlx_coverage has its own check.
+    # Gates the GPU jobs only.
     if: ${{ always() }}
     needs: [test_vllm_coverage, test_sgl_coverage]
     runs-on: ubuntu-latest
