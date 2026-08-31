@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 
 from genlm.backend.cache import OutputCache
-from genlm.backend.llm.base import AsyncLM
+from genlm.backend.llm.base import AsyncLM, UNKNOWN_ADAPTER, batch_abandoned
 
 try:
     import mlx.core as mx
@@ -229,12 +229,12 @@ else:
 
         def remove(self, name):
             if name is None or self.sets.pop(name, None) is None:
-                raise ValueError(f"no adapter named {name!r}")
+                raise ValueError(UNKNOWN_ADAPTER.format(name))
 
         def select(self, name):
             """Install ``name``'s weights; ``None`` restores the base."""
             if name is not None and name not in self.sets:
-                raise ValueError(f"no adapter named {name!r}")
+                raise ValueError(UNKNOWN_ADAPTER.format(name))
             if self.layout is None:
                 return
             weights = self.sets[name]
@@ -342,10 +342,6 @@ else:
             self.slots.clear()
             mx.clear_cache()
 
-        def reset_async_queries(self):
-            """Drop queued queries. Use after an exception left them unresolved."""
-            self._queries = []
-
         def _forward(self, prompts, lora_name):
             """Next-token log-probs under one adapter, ``[len(prompts), vocab]``."""
             with _wired(self.mlx_lm_model):
@@ -375,10 +371,10 @@ else:
             return out
 
         def _batch_evaluate(self, queries):
-            """Resolve a window cohort in one forward, deduplicating equal prompts.
+            """Resolve a batch in one forward, deduplicating equal prompts.
 
-            Every future gets its row or the exception; a failed forward would
-            otherwise leave the co-window callers awaiting.
+            Every future gets its row or a failure; a failed forward would
+            otherwise leave the co-callers awaiting.
             """
             if not queries:
                 return
@@ -387,15 +383,22 @@ else:
                 futures[key].append(future)
             try:
                 logprobs = self._resolve(list(futures))
+            except Exception as exc:
+                self._fail_all(futures, exc)
+                raise
             except BaseException as exc:
-                for waiting in futures.values():
-                    for future in waiting:
-                        if not future.done():
-                            future.set_exception(exc)
+                self._fail_all(futures, batch_abandoned(exc))
                 raise
             for key, waiting in futures.items():
                 for future in waiting:
                     future.set_result(logprobs[key])
+
+        @staticmethod
+        def _fail_all(futures, exc):
+            for waiting in futures.values():
+                for future in waiting:
+                    if not future.done():
+                        future.set_exception(exc)
 
         async def next_token_logprobs(self, token_ids, lora_name=None):
             """Next-token log-probs for `token_ids`, batched with concurrent requests.
@@ -413,7 +416,7 @@ else:
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
             future = asyncio.get_running_loop().create_future()
-            cohort = await self._window_cohort([(key, future)], linger=self.timeout)
+            cohort = await self._join_batch([(key, future)], linger=self.timeout)
             if cohort is not None:
                 self._batch_evaluate(cohort)
             return await future

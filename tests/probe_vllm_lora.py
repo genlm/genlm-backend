@@ -3,8 +3,8 @@
 Exercises the adapter surface at row grain, no genlm-control involved: the
 adapter actually changing the distribution, base and adapter asks sharing one
 cohort, residency split per (context, lora), rows against an independent HF
-fp32 arm carrying the same adapter, rebind purging the name's residents, and
-removal evicting the weights.
+fp32 arm carrying the same adapter, rebind purging the name's residents, a rebind
+landing mid-batch binding the incoming weights, and removal evicting them.
 
     python tests/probe_vllm_lora.py [adapter_id]
 """
@@ -118,8 +118,25 @@ async def main():
         "rebind.serves", len(stale) == 1, f"vk residents after rebind+ask: {len(stale)}"
     )
 
-    # -- 6. removal evicts the name -------------------------------------------
-    await lm.remove_lora("vk")
+    # -- 6. a rebind mid-batch binds the incoming weights ----------------------
+    # The ask sits in the batch while the rebind lands. Bound at ask time it would
+    # birth under the outgoing id and every extension would ride old-weight KV.
+    fresh = list(prompt) + [lm.tokenizer.encode(" very")[-1]]
+    task = asyncio.ensure_future(lm.next_token_logprobs(fresh, lora_name="vk"))
+    await asyncio.sleep(0)  # the ask is queued and holding the batch
+    lm.add_new_lora(path, "vk")
+    want_id = lm._lora_requests["vk"].lora_int_id
+    await task
+    rid = next(r for r, (_, name) in lm._requests.items() if name == "vk")
+    served_id = lm._sched.requests[rid].lora_request.lora_int_id
+    check(
+        "rebind.midbatch",
+        served_id == want_id,
+        f"served under id={served_id}, incoming binding is {want_id}",
+    )
+
+    # -- 7. removal evicts the name -------------------------------------------
+    lm.remove_lora("vk")
     try:
         await lm.next_token_logprobs(prompt, lora_name="vk")
         removed = False

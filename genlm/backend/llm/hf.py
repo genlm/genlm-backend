@@ -8,7 +8,7 @@ from transformers import BitsAndBytesConfig
 from transformers import DynamicCache
 
 from genlm.backend.cache import TokenTrie
-from genlm.backend.llm.base import AsyncLM
+from genlm.backend.llm.base import AsyncLM, UNKNOWN_ADAPTER
 
 
 class Query:
@@ -215,10 +215,7 @@ class AsyncTransformer(AsyncLM):
                 self.model.disable_adapters()
         else:
             if not loaded or lora_name not in self.model.peft_config:
-                raise ValueError(
-                    f"A LoRA adapter named '{lora_name}' has not been loaded yet. "
-                    "Call add_new_lora() first."
-                )
+                raise ValueError(UNKNOWN_ADAPTER.format(lora_name))
             self.model.set_adapter(lora_name)
             self.model.enable_adapters()
 

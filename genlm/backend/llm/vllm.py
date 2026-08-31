@@ -3,7 +3,7 @@ requests.
 
 The public surface is ``next_token_logprobs`` / ``batch_next_token_logprobs``;
 concurrent calls meet in an autobatch window and execute as one batch. Behind
-the window, each distinct growing context holds a resident engine request:
+it, each distinct growing context holds a resident engine request:
 extending a context by one token appends that token to its request, and a
 request whose next token has not arrived is skipped by the scheduler, so it
 stays resident at no cost. The full-vocabulary row for every step leaves
@@ -25,7 +25,7 @@ import torch
 import logging
 from collections import Counter
 
-from genlm.backend.llm.base import AsyncLM
+from genlm.backend.llm.base import AsyncLM, UNKNOWN_ADAPTER
 
 
 try:
@@ -82,6 +82,9 @@ else:
 
     _REQ_PREFIX = "resident-"
     _STOP = object()  # crank-shutdown sentinel
+
+    def _drop_rows(rows):  # pragma: no cover
+        """Row sink for a cleaned-up model: the instance that owned them is gone."""
 
     class _CaptureSampler:  # pragma: no cover
         """Shim occupying the model runner's sampler slot.
@@ -343,6 +346,8 @@ else:
 
             inst = cls(llm, **kwargs)
             box["deliver"] = inst._deliver
+            # The shim reaches `inst` through this box; cleanup cuts it there.
+            inst._capture_box = box
 
             # The crank turns the engine core directly: our requests emit no
             # tokens, so LLMEngine's output processor has nothing to do and
@@ -378,9 +383,10 @@ else:
 
             Re-registering an existing name purges the name's requests, whose
             KV came from the weights being replaced, and binds ``lora_path``
-            under a fresh id. The purge is queued before the rebind returns,
-            so any later ask under the name births against the incoming
-            weights. Forwards select the adapter per call via ``lora_name=``.
+            under a fresh id. Asks bind their adapter as they leave the batch,
+            after the purge is queued, so every ask dispatched from here on
+            births against the incoming weights. Forwards select the adapter
+            per call via ``lora_name=``.
 
             Args:
                 lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
@@ -393,37 +399,30 @@ else:
             self._next_lora_id += 1
             self._lora_requests[lora_name] = LoRARequest(lora_name, lid, lora_path)
 
-        async def remove_lora(self, lora_name):
+        def remove_lora(self, lora_name):
             """Unregister ``lora_name`` and evict its weights from the engine.
 
-            The adapter's requests are reaped first: their KV must not outlive
-            the weights that produced it.
+            The name stops resolving immediately; the adapter's requests are
+            reaped on the crank before the weights go, since their KV must not
+            outlive what produced it.
 
             Args:
                 lora_name (str): Name of the adapter to remove.
             """
             req = self._lora_requests.pop(lora_name)
-            await self._run_on_crank("remove_lora", (lora_name, req.lora_int_id))
+            self._work.put(("remove_lora", (lora_name, req.lora_int_id), None, None))
 
         def _purge_adapter(self, lora_name):
-            """(crank) Drop every request under ``lora_name``: fail the rows
-            still owed, whose weights are changing under them, and finish the
-            engine requests."""
-            stale = [
-                rid for rid, (_, name) in self._requests.items() if name == lora_name
-            ]
-            exc = RuntimeError(
-                f"adapter {lora_name!r} was rebound or removed mid-forward"
+            """(crank) Retire every request under ``lora_name``: their weights are
+            changing under them."""
+            self._retire(
+                [rid for rid, (_, name) in self._requests.items() if name == lora_name],
+                RuntimeError(
+                    f"adapter {lora_name!r} was rebound or removed mid-forward"
+                ),
             )
-            for rid in stale:
-                waiters = self._pending.pop(rid, None)
-                if waiters:
-                    self._fail_waiters(waiters, exc)
-                self._forget(rid)
-            if stale:
-                self._sched.finish_requests(stale, RequestStatus.FINISHED_ABORTED)
 
-        # -- the window -------------------------------------------------------
+        # -- the batch --------------------------------------------------------
 
         async def next_token_logprobs(self, token_ids, lora_name=None):
             """Request log probabilities of next token asynchronously with auto-batching.
@@ -443,11 +442,11 @@ else:
         async def batch_next_token_logprobs(self, token_ids_list, lora_name=None):
             """Batch request log probabilities for multiple token sequences.
 
-            The whole batch enters the window as one set of asks; concurrent
-            callers (batched or single) meet there and land on the crank as one
-            cohort. The window is held open by its first caller until a full
-            event-loop pass adds no new ask, since callers reach their asks at
-            different depths of a `gather` tree.
+            The whole batch enters as one set of asks; concurrent callers
+            (batched or single) meet there and land on the crank as one cohort.
+            The batch is held open by its first caller until a full event-loop
+            pass adds no new ask, since callers reach their asks at different
+            depths of a `gather` tree.
 
             Args:
                 token_ids_list (list[list[int]]): A list of token ID lists.
@@ -456,30 +455,53 @@ else:
             Returns:
                 (torch.Tensor): A ``[N, vocab]`` tensor of normalized log probabilities.
             """
-            if self._crank is None:
-                raise RuntimeError(
-                    "engine crank not running; construct via from_name()"
-                )
-            if lora_name is None:
-                lora_request = None
-            elif lora_name in self._lora_requests:
-                lora_request = self._lora_requests[lora_name]
-            else:
-                raise ValueError(f"unknown LoRA adapter: {lora_name!r}")
+            self._check_alive()
+            if lora_name is not None and lora_name not in self._lora_requests:
+                raise ValueError(UNKNOWN_ADAPTER.format(lora_name))
             if any(not token_ids for token_ids in token_ids_list):
                 raise ValueError("token_ids must not be empty")
 
             loop = asyncio.get_running_loop()
             futures = [loop.create_future() for _ in token_ids_list]
-            cohort = await self._window_cohort(
+            cohort = await self._join_batch(
                 [
-                    ((tuple(token_ids), lora_name), lora_request, future, loop)
+                    ((tuple(token_ids), lora_name), loop, future)
                     for token_ids, future in zip(token_ids_list, futures)
                 ]
             )
             if cohort is not None:
-                self._work.put(("asks", cohort, None, None))
+                asks = self._bind_adapters(cohort)
+                if asks:
+                    self._work.put(("asks", asks, None, None))
             return torch.stack(await asyncio.gather(*futures))
+
+        def _check_alive(self):
+            if self._crank is None:
+                raise RuntimeError(
+                    "engine crank not running: this model was cleaned up"
+                    if getattr(self, "_engine_cleaned", False)
+                    else "engine crank not running; construct via from_name()"
+                )
+
+        def _bind_adapters(self, cohort):
+            """Resolve each ask's adapter as the batch is dispatched.
+
+            A rebind during the batch queues its purge ahead of this dispatch, so
+            these asks birth against the incoming weights. Nothing yields between
+            here and the ``_work`` put, so no rebind can land in between.
+            """
+            bound = []
+            for key, loop, future in cohort:
+                lora_name = key[1]
+                if lora_name is None:
+                    bound.append((key, None, loop, future))
+                elif lora_name in self._lora_requests:
+                    bound.append((key, self._lora_requests[lora_name], loop, future))
+                else:  # removed while this ask sat in the batch
+                    self._resolve(
+                        loop, future, exc=ValueError(UNKNOWN_ADAPTER.format(lora_name))
+                    )
+            return bound
 
         # -- the crank ----------------------------------------------------------
 
@@ -566,14 +588,14 @@ else:
             try:
                 self._reconcile_inner(cohort)
             except BaseException as exc:
-                for _, _, future, loop in cohort:
+                for _, _, loop, future in cohort:
                     self._resolve(loop, future, exc=exc)
                 raise
 
         def _reconcile_inner(self, cohort):
             self._reap_under_pressure()
             grouped = {}
-            for key, lora_request, future, loop in cohort:
+            for key, lora_request, loop, future in cohort:
                 entry = grouped.setdefault(key, (lora_request, []))
                 entry[1].append((future, loop))
             self.stats[("cohort", len(cohort))] += 1
@@ -647,9 +669,13 @@ else:
                     pass  # the loop closed; the rows have no reader
 
         def _fail_owed(self, exc):
-            owed, self._pending = self._pending, {}
-            for waiters in owed.values():
-                self._fail_waiters(waiters, exc)
+            """(crank) Retire every request owing a row.
+
+            Only the owed ones: they were born or fed in the cohort that failed, so
+            their engine state is the state nobody can vouch for. An idle resident
+            that is genuinely broken is retired when it next owes a row.
+            """
+            self._retire(list(self._pending), exc)
 
         def _fail_waiters(self, waiters, exc):
             for future, loop in waiters:
@@ -670,16 +696,36 @@ else:
                 pass  # the loop closed; the result has no reader
 
         async def _run_on_crank(self, kind, arg=None):
-            if self._crank is None:
-                raise RuntimeError(
-                    "engine crank not running; construct via from_name()"
-                )
+            self._check_alive()
             loop = asyncio.get_running_loop()
             future = loop.create_future()
             self._work.put((kind, arg, future, loop))
             return await future
 
         # -- the residency table ----------------------------------------------
+
+        def _retire(self, rids, exc):
+            """(crank) Fail what ``rids`` owe and drop them from the table and the
+            engine.
+
+            A retired request is gone from the index, so a later ask rebirths rather
+            than extending a request whose state nobody can vouch for. Never raises:
+            one caller is the crank loop's own failure handler, where an exception
+            would kill the thread and hang every ask after it.
+            """
+            rids = list(rids)
+            for rid in rids:
+                waiters = self._pending.pop(rid, None)
+                if waiters:
+                    self._fail_waiters(waiters, exc)
+                self._forget(rid)
+            if rids:
+                try:
+                    self._sched.finish_requests(rids, RequestStatus.FINISHED_ABORTED)
+                except BaseException:  # pragma: no cover
+                    logging.getLogger(__name__).exception(
+                        "could not finish retired requests %s", rids
+                    )
 
         def _admit(self, rid, key):
             """Register a live request at ``key``. A newcomer takes the content
@@ -785,12 +831,19 @@ else:
             self._cleanup_engine()
 
         def _cleanup_engine(self):
-            """Stop the crank and tear down vLLM's distributed state. Runs from
-            both :meth:`cleanup` and :meth:`__del__`, so it must be idempotent
-            and survive interpreter shutdown: ``ImportError``/``AttributeError``
-            arise when ``__del__`` runs after ``sys.meta_path`` is torn down,
-            ``AssertionError`` when vLLM's teardown is called twice, and
-            ``RuntimeError`` when CUDA is tearing down at the same time."""
+            """Stop the crank, release the engine and tear down vLLM's distributed
+            state.
+
+            ``_crank`` goes to ``None`` so a post-cleanup ask raises rather than
+            queueing work nothing will turn. The capture shim holds this instance
+            through the box's ``deliver``; clearing it is what leaves the engine
+            graph collectable.
+
+            Runs from both :meth:`cleanup` and :meth:`__del__`, so it must be
+            idempotent and survive interpreter shutdown: ``ImportError`` and
+            ``AttributeError`` arise once ``sys.meta_path`` is torn down,
+            ``AssertionError`` from a second vLLM teardown, ``RuntimeError`` from a
+            concurrent CUDA teardown."""
             if getattr(self, "_engine_cleaned", False):
                 return
             self._engine_cleaned = True
@@ -798,7 +851,23 @@ else:
             if crank is not None and crank.is_alive():
                 self._work.put(_STOP)
                 crank.join(timeout=10)
+            self._crank = None
+            # Only release what the crank can no longer reach: a crank that
+            # outlived its join would fault on the handles this drops.
+            released = crank is None or not crank.is_alive()
             try:
+                import gc
+
+                box = getattr(self, "_capture_box", None)
+                if box is not None:
+                    box["deliver"] = _drop_rows
+                if released:
+                    self._sched = self._core = self._block_hasher = None
+                    self.llm_engine = None
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
                 destroy_model_parallel()
                 destroy_distributed_environment()
             except (ImportError, AttributeError, AssertionError, RuntimeError):

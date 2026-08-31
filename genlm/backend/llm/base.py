@@ -6,6 +6,33 @@ from abc import ABC, abstractmethod
 from genlm.backend.tokenization import decode_vocab
 
 
+# One spelling across every backend, so callers can match on it.
+UNKNOWN_ADAPTER = "unknown LoRA adapter: {!r}; register it with add_new_lora()"
+
+
+class BatchAbandoned(RuntimeError):
+    """The caller holding a batch died before it could be dispatched."""
+
+
+def batch_abandoned(exc):
+    """The failure handed to callers whose batch holder died.
+
+    Never the cause itself: a ``CancelledError`` given to a caller who never asked
+    for one leaves their task cancelled and skips their ``except Exception``.
+    """
+    abandoned = BatchAbandoned(f"batch holder did not survive it: {exc!r}")
+    abandoned.__cause__ = exc
+    return abandoned
+
+
+def fail_futures(entries, exc):
+    """Resolve each entry's future -- its last element -- with ``exc``."""
+    for entry in entries:
+        future = entry[-1]
+        if not future.done():
+            future.set_exception(exc)
+
+
 class AsyncLM(ABC):
     """Abstract base class for asynchronous language models.
 
@@ -19,50 +46,62 @@ class AsyncLM(ABC):
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
         self.byte_vocab, self.str_vocab = decode_vocab(self.tokenizer)
-        # Batch-window state; concurrent asks collect in ``_queries``.
-        self._queries = []
-        self._window_armed = False
+        # Batch state; concurrent asks collect in ``_batch_queue``.
+        self._batch_queue = []
+        self._batch_armed = False
 
-    async def _window_cohort(self, entries, *, linger=0.0):
-        """Meet concurrent asks in a batch window.
+    async def _join_batch(self, entries, *, linger=0.0):
+        """Join the batch of concurrent asks on this event loop.
 
         ``entries`` are appended before any yield, so a whole batch enters as
-        one set of asks. The first caller to arm the window holds it open
-        until a full event-loop pass adds no new ask (preceded by one
-        cooperative ``linger`` sleep for late callers, when nonzero) and
-        receives the drained cohort; every other caller receives ``None``.
-        The holding caller must evaluate the cohort in its own coroutine and
-        never in a background task: window state must not outlive the loop
-        its callers are on.
+        one set of asks. The first caller to arm the batch holds it open until
+        a full event-loop pass adds no new ask (preceded by one cooperative
+        ``linger`` sleep for late callers, when nonzero) and receives the
+        drained batch; every other caller receives ``None``. The holding
+        caller must evaluate the batch in its own coroutine and never in a
+        background task: batch state must not outlive the loop its callers
+        are on.
+
+        An entry is a tuple ending in its future. A holder that dies before
+        handing the batch off fails every other queued future rather than
+        orphaning it, so an entry is always resolved exactly once.
 
         Args:
-            entries (list): Asks to add to the current window.
+            entries (list): Asks to add to the current batch, each ending in
+                its future.
             linger (float, optional): Seconds to sleep once for late callers.
                 Defaults to 0.0, which skips the sleep.
 
         Returns:
-            (list | None): The drained cohort for the caller holding the
-                window, ``None`` for every other caller.
+            (list | None): The drained batch for the caller holding it,
+                ``None`` for every other caller.
         """
-        self._queries.extend(entries)
-        if self._window_armed:
+        self._batch_queue.extend(entries)
+        if self._batch_armed:
             return None
-        self._window_armed = True
+        self._batch_armed = True
         try:
             lingered = not linger
             while True:
-                n = len(self._queries)
+                n = len(self._batch_queue)
                 await asyncio.sleep(0)
-                if len(self._queries) > n:
+                if len(self._batch_queue) > n:
                     continue
                 if lingered:
                     break
                 lingered = True
                 await asyncio.sleep(linger)
-            cohort, self._queries = self._queries, []
+            cohort, self._batch_queue = self._batch_queue, []
             return cohort
+        except BaseException as exc:
+            cohort, self._batch_queue = self._batch_queue, []
+            # Not this caller's own entries: it is unwinding past its ``await``,
+            # so an exception set there is only ever logged as never retrieved.
+            mine = {id(e) for e in entries}
+            fail_futures([e for e in cohort if id(e) not in mine], batch_abandoned(exc))
+            raise
         finally:
-            self._window_armed = False
+            self._batch_armed = False
 
     @abstractmethod
     async def next_token_logprobs(self, token_ids, lora_name=None):
@@ -289,7 +328,7 @@ class MockAsyncLM(AsyncLM):
             (torch.Tensor): Normalized log probability tensor.
         """
         if lora_name is not None:
-            raise ValueError(f"MockAsyncLM has no adapter named {lora_name!r}")
+            raise ValueError(UNKNOWN_ADAPTER.format(lora_name))
         return self._get_logprobs(token_ids)
 
     def next_token_logprobs_sync(self, token_ids, lora_name=None):
@@ -303,7 +342,7 @@ class MockAsyncLM(AsyncLM):
             (torch.Tensor): Normalized log probability tensor.
         """
         if lora_name is not None:
-            raise ValueError(f"MockAsyncLM has no adapter named {lora_name!r}")
+            raise ValueError(UNKNOWN_ADAPTER.format(lora_name))
         return self._get_logprobs(token_ids)
 
     def _get_logprobs(self, token_ids):

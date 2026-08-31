@@ -6,7 +6,7 @@ from collections import deque
 import torch
 
 from genlm.backend.cache import OutputCache
-from genlm.backend.llm.base import AsyncLM
+from genlm.backend.llm.base import AsyncLM, UNKNOWN_ADAPTER
 
 try:
     from sglang.srt.server_args import PortArgs, ServerArgs
@@ -235,9 +235,7 @@ else:
                 logprobs (torch.Tensor): a tensor of with the language model's log (normalized) probabilities for the next token following the prompt.
             """
             if lora_name is not None:
-                raise ValueError(
-                    f"AsyncSGLTransformer has no adapter named {lora_name!r}"
-                )
+                raise ValueError(UNKNOWN_ADAPTER.format(lora_name))
             if not token_ids:
                 raise ValueError("Token ids must not be empty")
 
@@ -280,9 +278,7 @@ else:
                 (torch.Tensor): A tensor of normalized log probability tensors.
             """
             if lora_name is not None:
-                raise ValueError(
-                    f"AsyncSGLTransformer has no adapter named {lora_name!r}"
-                )
+                raise ValueError(UNKNOWN_ADAPTER.format(lora_name))
             results = {}
             to_compute = []
 

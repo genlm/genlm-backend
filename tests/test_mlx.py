@@ -6,6 +6,7 @@ import asyncio  # noqa: E402
 import torch  # noqa: E402
 from arsenal.maths import compare  # noqa: E402
 from genlm.backend.llm import load_model_by_name, AsyncMlxLM  # noqa: E402
+from genlm.backend.llm.base import BatchAbandoned  # noqa: E402
 
 
 TOLERANCES = {
@@ -136,18 +137,26 @@ async def test_window_batches_concurrent_asks(async_llm):
 
 
 @pytest.mark.asyncio
-async def test_reset_async_queries(async_llm):
-    # A queued query can be dropped without ever running (the window's linger
-    # holds it in the queue long enough to reset).
+async def test_abandoned_batch_fails_co_callers(async_llm):
+    """A cancelled batch holder must fail its co-callers, not orphan them, and never
+    with its own CancelledError: that leaves their tasks cancelled and skips their
+    `except Exception`."""
     old_timeout = async_llm.timeout
-    async_llm.timeout = 60
+    async_llm.timeout = 60  # linger, so the holder is still in the batch to cancel
     try:
-        test_prompt = async_llm.tokenizer.encode("Test prompt")
-        task = asyncio.ensure_future(async_llm.next_token_logprobs(test_prompt))
-        await asyncio.sleep(0)  # let it reach the queue
-        async_llm.reset_async_queries()
-        assert not task.done()
-        task.cancel()
+        prompts = [async_llm.tokenizer.encode(s) for s in ("one", "two", "three")]
+        tasks = [
+            asyncio.ensure_future(async_llm.next_token_logprobs(p)) for p in prompts
+        ]
+        await asyncio.sleep(0)  # everyone is queued; tasks[0] holds the batch
+        tasks[0].cancel()
+
+        results = await asyncio.gather(*tasks[1:], return_exceptions=True)
+        for result in results:
+            assert isinstance(result, BatchAbandoned)
+            assert not isinstance(result, asyncio.CancelledError)
+        assert all(not t.cancelled() for t in tasks[1:])
+        assert tasks[0].cancelled()
     finally:
         async_llm.timeout = old_timeout
 
@@ -166,7 +175,7 @@ def test_from_name_with_options(model_name):
 def test_batch_evaluate_empty_queries(async_llm):
     # An empty cohort flushes harmlessly (a reset can empty the window's queue).
     async_llm._batch_evaluate([])
-    assert len(async_llm._queries) == 0
+    assert len(async_llm._batch_queue) == 0
 
 
 def test_sample_seeded(async_llm):
