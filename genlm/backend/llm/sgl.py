@@ -1,10 +1,12 @@
 import asyncio
+import uuid
+from array import array
 from typing import Dict, List, Tuple, Optional
 from collections import deque
 import torch
 
 from genlm.backend.cache import OutputCache
-from genlm.backend.llm.base import AsyncLM
+from genlm.backend.llm.base import AsyncLM, UNKNOWN_ADAPTER
 
 try:
     from sglang.srt.server_args import PortArgs, ServerArgs
@@ -15,6 +17,9 @@ try:
         destroy_distributed_environment,
         destroy_model_parallel,
     )
+    from sglang.srt.runtime_context import publish
+    from sglang.srt.environ import envs
+    from sglang.srt.utils import is_cuda
 
     HAS_SGL = True
 except ImportError:  # pragma: no cover
@@ -50,16 +55,19 @@ else:
         """
         req = Request(
             input_text="",
-            input_ids=list(token_ids),
+            # sglang concatenates onto input_ids, which must be a "q" array.
+            input_ids=array("q", token_ids),
+            input_embeds=None,
             mm_inputs=None,
+            token_type_ids=None,
             sampling_params=SP,
             return_logprob=False,
             logprob_start_len=-1,
             top_logprobs_num=-1,
             token_ids_logprob=[],
             stream=False,
+            rid=uuid.uuid4().hex,
         )
-        req.regenerate_rid()
         return req
 
     class AsyncSGLTransformer(AsyncLM):
@@ -120,15 +128,45 @@ else:
                 "model_path": model_id,
                 "grammar_backend": "none",
                 "allow_auto_truncate": False,
-                "disable_overlap_schedule": False,
+                # `_batch_evaluate` steps sglang's normal event loop directly; the
+                # overlap loop defers results through `result_queue` and yields none.
+                "disable_overlap_schedule": True,
                 "mem_fraction_static": 0.9,  # default value is 0.9
             }
             if engine_opts:
                 _engine_opts.update(engine_opts)
             server_args = ServerArgs(**_engine_opts)
             port_args = PortArgs.init_new(server_args)
-            mod = Scheduler(server_args, port_args, gpu_id, 0, 0, 0, 0)
+            # sglang reads its config through a process-wide runtime context, so a
+            # Scheduler cannot be constructed until this process publishes one.
+            publish(server_args, role="scheduler")
+            # Ranks by keyword: sglang's parallelism axes shift position across
+            # versions, and positional trailing args silently change meaning.
+            mod = Scheduler(
+                server_args,
+                port_args,
+                gpu_id,
+                tp_rank=0,
+                moe_ep_rank=0,
+                pp_rank=0,
+                attn_cp_rank=0,
+                moe_dp_rank=0,
+                dp_rank=0,
+            )
             mod.result_queue = deque()
+            # `run_event_loop` establishes these two before dispatching into a loop that
+            # never returns, so an embedded driver sets them itself. A schedule stream
+            # aliasing the forward stream erases scheduler/forward overlap.
+            mod.schedule_stream = mod.device_module.Stream(priority=0)
+            redraws = 0
+            while (
+                getattr(mod.schedule_stream, "cuda_stream", None)
+                == getattr(mod.forward_stream, "cuda_stream", object())
+                and redraws < 64
+            ):
+                mod.schedule_stream = mod.device_module.Stream(priority=0)
+                redraws += 1
+            mod._war_barrier_enabled = is_cuda() or envs.SGLANG_ENABLE_WAR_BARRIER.get()
             return cls(mod, **kwargs)
 
         def clear_cache(self):
@@ -186,15 +224,18 @@ else:
             self._queue.put_nowait((token_ids, fut))
             return fut
 
-        async def next_token_logprobs(self, token_ids: List[int]):
+        async def next_token_logprobs(self, token_ids: List[int], lora_name=None):
             """Request log probabilities of next token. This version is asynchronous because it automatically batches concurrent requests; use with `await`.
 
             Args:
                 token_ids (list[int]): a list of token ids, representing a prompt to the language model.
+                lora_name (str, optional): Must be ``None``; this backend serves no adapters.
 
             Returns:
                 logprobs (torch.Tensor): a tensor of with the language model's log (normalized) probabilities for the next token following the prompt.
             """
+            if lora_name is not None:
+                raise ValueError(UNKNOWN_ADAPTER.format(lora_name))
             if not token_ids:
                 raise ValueError("Token ids must not be empty")
 
@@ -210,26 +251,34 @@ else:
 
             return out
 
-        def next_token_logprobs_sync(self, token_ids: List[int]):
+        def next_token_logprobs_sync(self, token_ids: List[int], lora_name=None):
             """Request log probabilities of next token synchronously.
 
             Args:
                 token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
+                lora_name (str, optional): Must be ``None``; this backend serves no adapters.
 
             Returns:
                 (torch.Tensor): Normalized log probability tensor.
             """
-            return self.batch_next_token_logprobs_sync([token_ids])[0]
+            return self.batch_next_token_logprobs_sync(
+                [token_ids], lora_name=lora_name
+            )[0]
 
-        def batch_next_token_logprobs_sync(self, token_ids_list: List[List[int]]):
+        def batch_next_token_logprobs_sync(
+            self, token_ids_list: List[List[int]], lora_name=None
+        ):
             """Request log probabilities of next tokens in a batch synchronously.
 
             Args:
                 token_ids_list (list[list[int]]): A list of token ID lists, each representing a prompt.
+                lora_name (str, optional): Must be ``None``; this backend serves no adapters.
 
             Returns:
                 (torch.Tensor): A tensor of normalized log probability tensors.
             """
+            if lora_name is not None:
+                raise ValueError(UNKNOWN_ADAPTER.format(lora_name))
             results = {}
             to_compute = []
 
@@ -310,22 +359,37 @@ else:
             if not requests:
                 return  # pragma: no cover
 
-            self.model.process_input_requests(requests)
+            sched = self.model
+            sched.process_input_requests(requests)
 
-            while batch := self.model.get_next_batch_to_run():
-                with torch.inference_mode():
-                    batch_result = self.model.run_batch(batch)
-                    self.model.process_batch_result(batch, batch_result)
-                    logprobs = torch.log_softmax(
-                        batch_result.logits_output.next_token_logits, dim=-1
-                    ).to("cpu")
+            # sglang's normal event loop, drained rather than served forever. The
+            # planner only sees `running_batch` if it is carried back across calls, and
+            # the loop runs on the schedule stream.
+            with sched.device_module.StreamContext(sched.schedule_stream):
+                while True:
+                    plan = sched.get_next_batch_to_run(
+                        running_batch=sched.running_batch,
+                        last_batch=sched.last_batch,
+                    )
+                    sched.running_batch = plan.running_batch
+                    batch = plan.batch_to_run
+                    sched.cur_batch_for_debug = batch
+                    if batch is None:
+                        break  # drained; the server loop would idle here instead
+                    with torch.inference_mode():
+                        batch_result = sched.run_batch(batch)
+                        sched.process_batch_result(batch, batch_result)
+                        logprobs = torch.log_softmax(
+                            batch_result.logits_output.next_token_logits, dim=-1
+                        ).to("cpu")
 
-                    for i, req in enumerate(batch.reqs):
-                        if req.finished():
-                            token_ids = self._rid_to_token_ids.pop(req.rid, None)
-                            if token_ids is None:
-                                continue  # pragma: no cover
-                            yield token_ids, logprobs[i]
+                        for i, req in enumerate(batch.reqs):
+                            if req.finished():
+                                token_ids = self._rid_to_token_ids.pop(req.rid, None)
+                                if token_ids is None:
+                                    continue  # pragma: no cover
+                                yield token_ids, logprobs[i]
+                    sched.last_batch = batch
 
         async def _background_loop(self):
             """Background task that processes queued requests from the queue."""

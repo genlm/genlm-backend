@@ -1,7 +1,7 @@
 """Functions to get the byte vocabulary from a HuggingFace tokenizer"""
 
+import json
 import re
-from transformers import AutoTokenizer
 
 
 class ByteDecoderError(Exception):
@@ -13,48 +13,90 @@ class ByteVocabError(Exception):
 
 
 def get_byte_vocab(tokenizer):
-    """Extract byte vocabulary from a tokenizer using various methods.
+    """Byte representation of every token, indexed by token id.
 
-    This function attempts to extract the byte representation of each token in the vocabulary
-    using multiple methods, trying each in sequence until one succeeds:
-
-    1. If the tokenizer has a byte_decoder attribute, attempt to use that directly
-    2. If the tokenizer has an sp_model (SentencePiece) attribute, use that
-    3. Try encoding the token strings directly
-    4. Fall back to using the default GPT2 byte decoder
+    The tokenizer's own decoder names the scheme: ``ByteLevel`` is the GPT-2 byte
+    alphabet, ``ByteFallback``/``Metaspace`` is SentencePiece's ``<0xXX>`` escapes and
+    ``▁`` space marker. A tokenizer declaring neither is rejected.
 
     Args:
         tokenizer: A Hugging Face tokenizer instance.
 
     Returns:
-        (list[byte]): List of byte representations of tokens.
+        (list[bytes]): Byte representation of each token.
 
     Raises:
-        ByteVocabError: If vocabulary cannot be decoded using any of the available methods.
+        ByteVocabError: If the tokenizer's byte encoding cannot be determined, or the
+            scheme it declares fails to round-trip.
     """
-    # Try byte decoder.
-    if hasattr(tokenizer, "byte_decoder"):
-        try:
-            byte_decoder = tokenizer.byte_decoder
-            check_byte_decoder(tokenizer, byte_decoder)
-            return get_byte_tokens_from_byte_decoder(tokenizer, byte_decoder)
-        except ByteDecoderError:
-            pass
-            # warnings.warn(f"Could not decode vocabulary using byte_decoder: {e!r}")
+    kinds = _decoder_kinds(tokenizer)
 
-    # Try SentencePiece model.
-    if hasattr(tokenizer, "sp_model"):
-        return get_byte_tokens_from_sp(tokenizer)
+    if kinds & {"ByteFallback", "Metaspace"}:
+        return get_byte_tokens_from_pieces(tokenizer)
 
-    # Try using GPT2 byte decoder.
-    try:
+    if "ByteLevel" in kinds:
         byte_decoder = _get_default_byte_decoder()
-        check_byte_decoder(tokenizer, byte_decoder)
+        try:
+            check_byte_decoder(tokenizer, byte_decoder)
+        except ByteDecoderError as e:
+            raise ByteVocabError(
+                "Tokenizer declares a ByteLevel decoder but does not round-trip under "
+                "the GPT-2 byte alphabet."
+            ) from e
         return get_byte_tokens_from_byte_decoder(tokenizer, byte_decoder)
+
+    if kinds:
+        raise ByteVocabError(
+            f"Cannot determine the byte encoding of {tokenizer.name_or_path!r}: its "
+            f"decoder is {sorted(kinds)}, which is neither ByteLevel nor SentencePiece."
+        )
+
+    # A tokenizer with no backend declares no scheme; `sp_model` marks SentencePiece,
+    # whose pieces are already `<0xXX>`-escaped.
+    if hasattr(tokenizer, "sp_model"):
+        return get_byte_tokens_from_pieces(tokenizer)
+
+    byte_decoder = (
+        getattr(tokenizer, "byte_decoder", None) or _get_default_byte_decoder()
+    )
+    try:
+        check_byte_decoder(tokenizer, byte_decoder)
     except ByteDecoderError as e:
         raise ByteVocabError(
-            "Could not decode vocabulary by falling back to GPT2 byte decoder."
+            f"Tokenizer {tokenizer.name_or_path!r} exposes no decoder to inspect and "
+            f"does not round-trip under the GPT-2 byte alphabet."
         ) from e
+    return get_byte_tokens_from_byte_decoder(tokenizer, byte_decoder)
+
+
+def _decoder_kinds(tokenizer):
+    """Decoder component names the tokenizer's backend declares.
+
+    Args:
+        tokenizer: A Hugging Face tokenizer instance
+
+    Returns:
+        (set): Component type names, e.g. ``{"Sequence", "Replace", "ByteFallback",
+            "Fuse"}``. Empty when the tokenizer has no backend.
+    """
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is None:
+        return set()
+    decoder = json.loads(backend.to_str()).get("decoder")
+    kinds = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            if isinstance(node.get("type"), str):
+                kinds.add(node["type"])
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(decoder)
+    return kinds
 
 
 def get_byte_tokens_from_byte_decoder(tokenizer, byte_decoder):
@@ -79,23 +121,17 @@ def get_byte_tokens_from_byte_decoder(tokenizer, byte_decoder):
     return byte_tokens
 
 
-def get_byte_tokens_from_sp(tokenizer):
-    """Convert tokens to their byte representations using a SentencePiece model.
+def get_byte_tokens_from_pieces(tokenizer):
+    """Convert SentencePiece token strings to bytes.
 
-    Uses the SentencePiece model's id_to_piece method to get the raw byte representation
-    of each token, handling special tokens separately. Converts any hex-encoded bytes
-    (in <0xXX> format) to their actual byte values and replaces the SentencePiece
-    prefix space marker with a regular space.
+    ``<0xXX>`` escapes become the byte they name and ``▁`` becomes a space; special
+    tokens are encoded directly.
 
     Args:
-        tokenizer: A Hugging Face tokenizer instance with a SentencePiece model
+        tokenizer: A Hugging Face tokenizer instance
 
     Returns:
-        byte_tokens (list[byte]): List of byte representations for each token in the vocabulary
-
-    Note:
-        Special tokens are handled by directly encoding their string representation,
-        while normal tokens go through the SentencePiece conversion process.
+        byte_tokens (list[bytes]): Byte representation of each token
     """
     special_tokens_map = {
         token_id: token for token, token_id in tokenizer.get_added_vocab().items()
@@ -109,7 +145,7 @@ def get_byte_tokens_from_sp(tokenizer):
             byte_coded = re.sub(
                 rb"<0x(..)>",
                 lambda x: bytes.fromhex(x[1].decode()),
-                tokenizer.sp_model.id_to_piece(i).encode(),
+                tokenizer.convert_ids_to_tokens(i).encode(),
             )
         byte_tokens[i] = byte_coded.replace(prefix_space, b" ")
     return byte_tokens
@@ -191,35 +227,34 @@ def _check_complex_roundtrip(tokenizer, byte_decoder):
         )
 
 
-# def _bytes_to_unicode():
-#    """Create a mapping from bytes to Unicode characters.
-#
-#    Returns:
-#        (dict): Mapping from byte values to Unicode characters
-#    """
-#    bs = (
-#        list(range(ord("!"), ord("~") + 1))
-#        + list(range(ord("¡"), ord("¬") + 1))
-#        + list(range(ord("®"), ord("ÿ") + 1))
-#    )
-#    cs = bs[:]
-#    n = 0
-#    for b in range(256):
-#        if b not in bs:
-#            bs.append(b)
-#            cs.append(256 + n)
-#            n += 1
-#    cs = [chr(n) for n in cs]
-#    return dict(zip(bs, cs))
+def _bytes_to_unicode():
+    """The canonical GPT-2 byte->unicode map (transformers' ``bytes_to_unicode``)."""
+    bs = (
+        list(range(ord("!"), ord("~") + 1))
+        + list(range(ord("¡"), ord("¬") + 1))
+        + list(range(ord("®"), ord("ÿ") + 1))
+    )
+    cs = bs[:]
+    n = 0
+    for b in range(256):
+        if b not in bs:
+            bs.append(b)
+            cs.append(256 + n)
+            n += 1
+    cs = [chr(n) for n in cs]
+    return dict(zip(bs, cs))
 
 
 def _get_default_byte_decoder():
     """Get the default GPT-2 byte decoder with additional special character mappings.
 
+    Built from ``_bytes_to_unicode``; transformers 5.x exposes no tokenizer attribute
+    to read the same map off.
+
     Returns:
         (dict): Mapping from characters to bytes including special characters
     """
-    byte_decoder = AutoTokenizer.from_pretrained("gpt2", use_fast=False).byte_decoder
+    byte_decoder = {ch: b for b, ch in _bytes_to_unicode().items()}
     byte_decoder.update(
         {
             " ": 32,

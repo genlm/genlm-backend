@@ -1,26 +1,26 @@
 import asyncio
-import warnings
-from genlm.backend.llm.base import AsyncLM
-from genlm.backend.cache import DynamicTokenTrie
+import json
 from collections import defaultdict
-import torch
-from dataclasses import dataclass
+from functools import partial
+from pathlib import Path
 
+import torch
+
+from genlm.backend.cache import OutputCache
+from genlm.backend.llm.base import AsyncLM, UNKNOWN_ADAPTER, batch_abandoned
 
 try:
+    import mlx.core as mx
     import mlx_lm
+    from mlx.utils import tree_flatten, tree_unflatten
     from mlx_lm.generate import (
-        generate_step,
-        wired_limit,
         _left_pad_prompts,
         _make_cache,
+        generate_step,
+        wired_limit,
     )
-    import mlx.core as mx
     from mlx_lm.sample_utils import make_sampler
-    from mlx_lm.models.cache import (
-        KVCache,
-        RotatingKVCache,
-    )
+    from mlx_lm.tuner.utils import linear_to_lora_layers
 
     HAS_MLX = True
 except ImportError:  # pragma: no cover
@@ -47,407 +47,410 @@ if not HAS_MLX:
 
 else:
 
-    @dataclass
-    class Query:
-        """A query to a language model, waiting to be batched.
+    def _wired(model):
+        """Keep ``model``'s weights resident for the enclosed work.
+
+        MLX streams are thread-affine, so the stream is resolved per call, never stored.
+        """
+        return wired_limit(model, [mx.default_stream(mx.default_device())])
+
+    def _to_torch(a):
+        """MLX array as a torch tensor over the same buffer.
+
+        bfloat16 is narrowed to float16 first: callers hand these to numpy, which has
+        no bfloat16.
+        """
+        if a.dtype == mx.bfloat16:
+            a = a.astype(mx.float16)
+        return torch.from_dlpack(a)
+
+    class _SlotPool:
+        """The model's live KV rows: row ``i`` holds exactly the tokens in ``seqs[i]``.
+
+        Rows are extended, gathered, or replaced wholesale, never rebuilt from stored
+        pieces. In a gather, a repeated source forks that row and an omitted one is
+        dropped.
 
         Attributes:
-            prompt (list[int]): Token IDs representing the input prompt.
-            future (asyncio.Future): Future object to store the result when
-                the query is processed.
-            past (mx.array, optional): Past key-value cache states from
-                previous computations. Defaults to None.
-            node (DynamicTokenTrie, optional): The cache node where this query
-                should be stored. Defaults to None.
-            next_token_index (int, optional): The index in the prompt where
-                new tokens start (after cached prefix). Defaults to None.
+            seqs (list[list[int]]): Tokens held by each live row.
+            cache (list|None): Per-layer MLX caches backing the rows.
         """
 
-        prompt: list[int]
-        future: asyncio.Future
-        past: mx.array | None = None
-        node: DynamicTokenTrie | None = None
-        next_token_index: int | None = None
+        def __init__(self, model, prefill_step_size):
+            self.model = model
+            self.prefill_step_size = prefill_step_size
+            self.seqs = []
+            self.cache = None
+
+        def reset(self):
+            self.seqs, self.cache = [], None
+
+        def logits(self, prompts):
+            """Final-position logits for ``prompts``, one row each.
+
+            Leaves the pool holding exactly ``prompts``. A batch whose rows each extend
+            a live row by the same non-empty delta continues that row's KV; anything
+            else is prefilled. A caller that already knows its own ancestry calls
+            :meth:`advance` instead.
+
+            Args:
+                prompts (list[list[int]]): Token ids each row must hold.
+
+            Returns:
+                (mx.array): ``[len(prompts), vocab]`` final-position logits.
+            """
+            sources, shared = zip(*map(self._source, prompts))
+            deltas = [p[n:] for p, n in zip(prompts, shared)]
+            if self._continues(sources, deltas):
+                return self.advance(list(sources), deltas)
+            return self._prefill(prompts)
+
+        def advance(self, sources, deltas):
+            """Re-lay the rows as ``sources``, then forward one token block per row.
+
+            A repeated index forks that row; an omitted one is dropped. Re-laying needs
+            row-sliceable caches, so rows backed by a recurrent state are rebuilt by
+            prefilling what they would have held.
+
+            Args:
+                sources (list[int]): Live row each new row continues.
+                deltas (list[list[int]]): Equal-length token block to append per row.
+
+            Returns:
+                (mx.array): ``[len(sources), vocab]`` final-position logits.
+            """
+            if not self._relayable(sources):
+                return self._prefill(
+                    [self.seqs[s] + d for s, d in zip(sources, deltas)]
+                )
+            self._gather(sources)
+            return self._extend(deltas)
+
+        def _relayable(self, sources):
+            """Whether the rows can be re-laid as ``sources`` in place."""
+            return list(sources) == list(range(len(self.seqs))) or all(
+                hasattr(c, "filter") for c in self.cache
+            )
+
+        def _source(self, prompt):
+            """``(row, n)`` for the live row whose tokens are the longest strict prefix
+            of ``prompt``, or ``(None, 0)``."""
+            best, best_n = None, 0
+            for i, seq in enumerate(self.seqs):
+                n = len(seq)
+                if best_n < n < len(prompt) and prompt[:n] == seq:
+                    best, best_n = i, n
+            return best, best_n
+
+        def _continues(self, sources, deltas):
+            """Whether the pool can carry this batch forward instead of reprefilling.
+
+            The deltas must share one non-zero length so they forward as one block;
+            whether the rows can be re-laid is decided in :meth:`advance`.
+            """
+            if self.cache is None or None in sources:
+                return False
+            return len({len(d) for d in deltas}) == 1 and bool(deltas[0])
+
+        def _gather(self, sources):
+            """Rebuild the rows from existing ones: new row ``i`` continues ``sources[i]``."""
+            if sources == list(range(len(self.seqs))):
+                return
+            idx = mx.array(sources, mx.int32)
+            for c in self.cache:
+                c.filter(idx)
+            self.seqs = [list(self.seqs[s]) for s in sources]
+
+        def _extend(self, deltas):
+            """Forward one equal-length token block per row."""
+            logits = self.model(mx.array(deltas, mx.int32), cache=self.cache)[:, -1, :]
+            for seq, delta in zip(self.seqs, deltas):
+                seq.extend(delta)
+            return logits
+
+        def _prefill(self, prompts):
+            """Left-padded batched prefill, replacing the pool."""
+            width = max(map(len, prompts))
+            self.cache = _make_cache(
+                self.model, [width - len(p) for p in prompts], max_kv_size=None
+            )
+            x = _left_pad_prompts(prompts, max_length=width)
+            while x.shape[1] > 1:
+                n = min(self.prefill_step_size, x.shape[1] - 1)
+                self.model(x[:, :n], cache=self.cache)
+                mx.eval([c.state for c in self.cache])
+                x = x[:, n:]
+            self.seqs = [list(p) for p in prompts]
+            return self.model(x, cache=self.cache)[:, -1, :]
+
+    class _Adapters:
+        """LoRA weight sets over one model.
+
+        MLX attaches adapters to the model itself, so the model is wrapped once, at the
+        first registration, and an adapter is then only the ``lora_*`` arrays to
+        install; adapters share the base weights rather than copying them. The base set
+        is the all-zero one the wrap starts from, leaving base forwards bit-exact.
+
+        Attributes:
+            sets (dict): Name -> ``[(parameter path, array)]``, ``None`` being the base.
+            layout (tuple|None): ``(num_layers, lora_parameters)`` the wrap used.
+            installed (list|None): The weight set currently on the model, held by
+                identity; `add` rebinds a name to a fresh list, so a rebind invalidates
+                it.
+        """
+
+        def __init__(self, model):
+            self.model = model
+            self.sets = {}
+            self.layout = None
+            self.installed = None
+
+        def add(self, name, path):
+            """Register the adapter at ``path`` under ``name``, rebinding if it exists."""
+            path = Path(path)
+            with open(path / "adapter_config.json") as fid:
+                config = json.load(fid)
+            kind = config.get("fine_tune_type", "lora")
+            if kind != "lora":
+                raise ValueError(f"MLX adapters must be 'lora', not {kind!r}")
+            layout = (config["num_layers"], config["lora_parameters"])
+            if self.layout is None:
+                linear_to_lora_layers(self.model, *layout)
+                self.layout = layout
+                self.sets[None] = self._installed()
+            elif layout != self.layout:
+                raise ValueError(
+                    f"adapter {name!r} wants layout {layout}, but the model is already "
+                    f"wrapped for {self.layout}; MLX wraps a model once, so every "
+                    f"adapter on it must share a layout"
+                )
+            weights = mx.load(str(path / "adapters.safetensors"))
+            self.sets[name] = [(k, v) for k, v in weights.items() if "lora_" in k]
+
+        def remove(self, name):
+            if name is None or self.sets.pop(name, None) is None:
+                raise ValueError(UNKNOWN_ADAPTER.format(name))
+
+        def select(self, name):
+            """Install ``name``'s weights; ``None`` restores the base."""
+            if name is not None and name not in self.sets:
+                raise ValueError(UNKNOWN_ADAPTER.format(name))
+            if self.layout is None:
+                return
+            weights = self.sets[name]
+            if weights is not self.installed:
+                self.model.update(tree_unflatten(weights))
+                self.installed = weights
+
+        def _installed(self):
+            """The adapter arrays currently on the model."""
+            return [
+                (k, v)
+                for k, v in tree_flatten(self.model.trainable_parameters())
+                if "lora_" in k
+            ]
 
     class AsyncMlxLM(AsyncLM):
-        """Asynchronous MLX-based language model wrapper.
+        """Asynchronous MLX language model.
 
-        This class provides an async interface to MLX language models with
-        automatic batching, caching, and KV cache management. It extends
-        AsyncLM to provide efficient batched inference with prefix caching.
-
-        The model automatically batches concurrent requests and uses a trie-based
-        cache to store computed log probabilities and KV states for reuse.
+        Concurrent requests are batched, and a batch whose prompts each walk forward
+        from the previous batch's continues the live KV rather than reprefilling.
+        Next-token log-probs are memoized per exact context.
         """
 
         def __init__(
             self,
             mlx_lm_model,
             tokenizer,
-            batch_size=5,
-            timeout=0.001,
+            timeout=0.0,
             prefill_step_size=2048,
-            cache_size=400,
+            cache_size=0,
+            cache_opts=None,
         ):
             """Initialize an `AsyncMlxLM` instance.
 
             Args:
                 mlx_lm_model: The MLX language model instance.
                 tokenizer: The tokenizer for encoding/decoding text.
-                batch_size (int, optional): Maximum number of queries to batch
-                    together.
-                timeout (float, optional): Maximum time in seconds to wait
-                    before processing a batch, even if batch_size is not met.
-                prefill_step_size (int, optional): Number of tokens to process
-                    per step during prompt prefilling.
-                cache_size (int, optional): Maximum number of KV cache entries
-                    to keep in memory.
+                timeout (float, optional): Cooperative linger in seconds spent once
+                    per batch window, letting late concurrent callers join. Defaults to 0.
+                prefill_step_size (int, optional): Tokens per prefill chunk.
+                cache_size (int, optional): Maximum size of the output cache. If 0,
+                    caching is disabled. Defaults to 0.
+                cache_opts (dict, optional): Additional options to pass to the
+                    [`OutputCache`][genlm.backend.cache.OutputCache] constructor.
+                    Defaults to None (no extra options).
             """
             self.mlx_lm_model = mlx_lm_model
-            self.tokenizer = tokenizer
-            self.cache = DynamicTokenTrie()
-            self.generation_stream = mx.new_stream(mx.default_device())
-            self.queries = []
             self.timeout = timeout
-            self.timer = None
             self.prefill_step_size = prefill_step_size
-            self.cache_size = cache_size
-
-            self.batch_size = batch_size
-            self.kv_cachable = self._kv_cachable(self.mlx_lm_model)
-            if not self.kv_cachable:
-                warnings.warn(
-                    f"Model {type(self.mlx_lm_model).__name__} does not support KV caching; "
-                    f"prefix caching will be disabled.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            super().__init__(tokenizer=self.tokenizer)
+            self.adapters = _Adapters(mlx_lm_model)
+            # KV rows never cross adapters, so each adapter keeps its own pool.
+            self.slots = defaultdict(
+                partial(_SlotPool, mlx_lm_model, prefill_step_size)
+            )
+            self.cache = (
+                OutputCache(maxsize=cache_size, **(cache_opts or {}))
+                if cache_size > 0
+                else None
+            )
+            # mlx_lm.load returns a TokenizerWrapper, which adds streaming detokenize
+            # but is not callable like the HuggingFace tokenizer AsyncLM expects.
+            super().__init__(tokenizer=getattr(tokenizer, "_tokenizer", tokenizer))
 
         @classmethod
         def from_name(cls, model_name, **kwargs):
-            """Create an `AsyncMlxLM` instance from a model name.
+            """Create an `AsyncMlxLM` from a model name or local path.
 
             Args:
-                model_name (str): Name of the model to load. Can be a Hugging Face
-                    model identifier or local path.
-                **kwargs: Additional arguments passed to `AsyncMlxLM` constructor,
-                    such as `batch_size`, `timeout`, `prefill_step_size`, `cache_size`.
+                model_name (str): HuggingFace model identifier or local path.
+                **kwargs: Additional arguments passed to the constructor.
 
             Returns:
-                AsyncMlxLM: An `AsyncMlxLM` instance with the loaded model and tokenizer.
+                AsyncMlxLM: The loaded model.
             """
-
             model, tokenizer = mlx_lm.load(model_name)
             return cls(model, tokenizer, **kwargs)
 
-        @staticmethod
-        def _to_torch(logprobs):
-            """Convert MLX arrays into PyTorch tensors."""
-            if logprobs.dtype == mx.bfloat16:
-                logprobs = logprobs.astype(mx.float16)
-            return torch.tensor(logprobs)
+        def add_new_lora(self, lora_path, lora_name="lora_1"):
+            """Register the adapter at ``lora_path`` under ``lora_name``.
 
-        @staticmethod
-        def _kv_cachable(mlx_lm_model):
-            """Check if an MLX model supports KV cache storage.
+            Re-registering a name rebinds it. Every adapter on a model must share the
+            layout the first one wrapped it with.
 
-            A model is KV-cacheable if all its cache layers are KVCache or
-            RotatingKVCache with keep=0.
+            Args:
+                lora_path (str): Directory holding ``adapter_config.json`` and
+                    ``adapters.safetensors``.
+                lora_name (str, optional): Name to select the adapter by.
             """
-            if not hasattr(mlx_lm_model, "make_cache"):
-                return True
-            cache = mlx_lm_model.make_cache()
-            return all(
-                isinstance(c, KVCache)
-                or (isinstance(c, RotatingKVCache) and c.keep == 0)
-                for c in cache
-            )
+            self.adapters.add(lora_name, lora_path)
+            self.clear_cache()
+
+        def remove_lora(self, lora_name):
+            """Unregister ``lora_name``.
+
+            Args:
+                lora_name (str): Name of the adapter to remove.
+            """
+            self.adapters.remove(lora_name)
+            self.clear_cache()
 
         def clear_cache(self):
-            """Clear the output cache and MLX device cache.
-
-            This method resets the internal token trie cache and clears
-            any cached arrays on the MLX device to free memory.
-            """
+            """Drop the memoized log-probs and every pool's live KV rows."""
             if self.cache is not None:
-                self.cache = DynamicTokenTrie()
+                self.cache.clear()
+            self.slots.clear()
             mx.clear_cache()
 
-        def walk_cache(self, token_ids):
-            """Walk the cache tree to find the deepest node matching a sequence of tokens.
+        def _forward(self, prompts, lora_name):
+            """Next-token log-probs under one adapter, ``[len(prompts), vocab]``."""
+            with _wired(self.mlx_lm_model):
+                self.adapters.select(lora_name)
+                logits = self.slots[lora_name].logits(prompts).astype(mx.float32)
+                logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
+                mx.eval(logprobs)
+            return _to_torch(logprobs)
 
-            Args:
-                token_ids (list[int]): Sequence of token IDs to follow in the cache tree
+        def _resolve(self, keys):
+            """``{key: logprobs}`` for distinct ``(context, lora_name)`` keys.
 
-            Returns:
-                tuple: A 5-tuple containing:
-                    - node: The deepest node in the cache tree that matches
-                        the token sequence, irregardless of whether its kv is cached or not
-                    - next_token_index: Number of tokens matched from the start of token_ids
-                    - past_kvs: Past key/value states concatenated from cached nodes, or None if no cached states were found
-                    - kv_node: The cache node where KV states start
-                    - kv_next_token_index: Number of tokens matched from the start of token_ids for the KV states
+            Uncached keys are forwarded one batch per adapter, then memoized.
             """
-            # Walk while tokens can be found
-            node = self.cache
-            kv_next_token_index = 0
-            kv_node = node
-            collecting = True
-            next_token_index = 0
-            past_kvs = []
-
-            while next_token_index < len(token_ids):
-                if node.past_key_values is not None and collecting:
-                    past_kvs.append(node.past_key_values)
-                    kv_node = node
-                    kv_next_token_index = next_token_index
-                elif next_token_index > 0:
-                    collecting = False
-                if node.has_token(token_ids[next_token_index]):
-                    node = node.get_token(token_ids[next_token_index])
-                    next_token_index += 1
+            out, todo = {}, defaultdict(list)
+            for key in keys:
+                if self.cache is not None and key in self.cache:
+                    out[key] = self.cache[key]
                 else:
-                    break
+                    todo[key[1]].append(key)
+            for lora_name, batch in todo.items():
+                logprobs = self._forward([list(k[0]) for k in batch], lora_name)
+                for row, key in enumerate(batch):
+                    out[key] = logprobs[row]
+                    if self.cache is not None:
+                        self.cache[key] = logprobs[row]
+            return out
 
-            past_kvs = None if len(past_kvs) == 0 else mx.concatenate(past_kvs, axis=3)
+        def _batch_evaluate(self, queries):
+            """Resolve a batch in one forward, deduplicating equal prompts.
 
-            return node, next_token_index, past_kvs, kv_node, kv_next_token_index
-
-        def cache_kv(self, token_ids):
-            """Pre-compute and cache KV states for a given token sequence."""
-            query = Query(token_ids, None, None, self.cache, 0)
-            self._batch_logits_custom([query])
-
-        def reset_async_queries(self):
-            """Clear any pending language model queries from the queue. Use this method when an exception prevented an inference algorithm from executing
-            to completion."""
-            self.queries = []
-
-        def add_to_cache(self, queries, prompt_cache=None, logprobs=None):
-            """Add computed log probabilities and KV states to the cache tree."""
-            left_paddings = prompt_cache[0].left_padding.tolist()
-            for i, query in enumerate(queries):
-                token_ids, node, next_token_index = (
-                    query.prompt,
-                    query.node,
-                    query.next_token_index,
-                )
-                if node is None or next_token_index is None:
-                    node = self.cache
-                    next_token_index = 0
-                lp = left_paddings[i]
-                if prompt_cache is not None and self.kv_cachable:
-                    keys = [
-                        c.keys[i, :, lp + next_token_index : lp + len(token_ids), :]
-                        for c in prompt_cache
-                    ]
-                    values = [
-                        c.values[i, :, lp + next_token_index : lp + len(token_ids), :]
-                        for c in prompt_cache
-                    ]
-                    keys = mx.stack(keys, axis=0)
-                    values = mx.stack(values, axis=0)
-                    keys_values = mx.stack([keys, values], axis=0)
-                    node.extend_cache(
-                        next_token_index, token_ids, logprobs[i], keys_values
-                    )
-                else:
-                    node.extend_cache(next_token_index, token_ids, logprobs[i])
-
-            self.cache.evict_lru_kv(self.cache_size)
-
-        def _process_kv(self, left_paddings, prompt_cache, pasts=None, step_size=256):
-            """Process and integrate past KV cache states into prompt cache.
-
-            This method takes past key-value cache states from the cache tree
-            and integrates them into the prompt cache for efficient prefix
-            reuse. It handles padding and alignment of cache states across
-            different query lengths.
-
-            Args:
-                left_paddings (list[int]): Left padding amounts for each query
-                    in the batch.
-                prompt_cache (list): List of cache objects to update with
-                    past states.
-                pasts (list[mx.array], optional): List of past KV cache states,
-                    one per query.
-                step_size (int, optional): Step size for cache size alignment.
-
-            Returns:
-                tuple: A 2-tuple containing:
-                    - list: Updated prompt_cache objects
-                    - cached_len: Number of tokens that were cached
+            Every future gets its row or a failure; a failed forward would
+            otherwise leave the co-callers awaiting.
             """
-            if pasts is None or all(past is None for past in pasts):
-                return prompt_cache, 0
-            max_match_lengths = [0 if past is None else past.shape[3] for past in pasts]
-            min_pos_cached = min(
-                ml + lp for ml, lp in zip(max_match_lengths, left_paddings)
-            )
-            cache_grabs = [max(min_pos_cached - lp, 0) for lp in left_paddings]
-            non_zero_index = next(
-                (i for i, grab in enumerate(cache_grabs) if grab), None
-            )
-            if non_zero_index is None:
-                return prompt_cache, 0
-            _, num_layers, N, _, D = pasts[non_zero_index].shape
-            cache_size = (step_size + min_pos_cached - 1) // step_size * step_size
-            right_paddings = [
-                max(cache_size - lp - max_len, 0)
-                for lp, max_len in zip(left_paddings, max_match_lengths)
-            ]
-            padded_pasts = []
-            for past, lp, rp in zip(pasts, left_paddings, right_paddings):
-                if past is None:
-                    padded_pasts.append(mx.zeros((2, num_layers, N, cache_size, D)))
-                else:
-                    padded_pasts.append(
-                        mx.pad(
-                            past[:, :, :, : cache_size - lp, :],
-                            ((0, 0), (0, 0), (0, 0), (lp, rp), (0, 0)),
-                        )
-                    )
-
-            padded_pasts = mx.stack(padded_pasts, axis=2)
-            for i, cache in enumerate(prompt_cache):
-                cache.keys = padded_pasts[0, i]
-                cache.values = padded_pasts[1, i]
-                cache.offset += min_pos_cached
-                cache._idx += min_pos_cached
-            return prompt_cache, min_pos_cached
-
-        def _process_prompts(self, queries):
-            """Process a batch of prompts and compute next-token log probabilities."""
-            inputs = [q.prompt for q in queries]
-            pasts = [q.past for q in queries]
-            lengths = [len(p) for p in inputs]
-            max_length = max(lengths)
-            left_padding = [max_length - length for length in lengths]
-            prompt_cache = _make_cache(self.mlx_lm_model, left_padding)
-            inputs_padded = _left_pad_prompts(inputs, max_length=max_length)
-
-            if self.kv_cachable:
-                prompt_cache, cached_len = self._process_kv(
-                    left_padding, prompt_cache, pasts
-                )
-            else:
-                cached_len = 0
-            inputs_padded = inputs_padded[:, cached_len:]
-
-            while inputs_padded.shape[1] > 1:
-                n_to_process = min(self.prefill_step_size, inputs_padded.shape[1] - 1)
-                self.mlx_lm_model(inputs_padded[:, :n_to_process], cache=prompt_cache)
-                mx.eval([c.state for c in prompt_cache])
-                inputs_padded = inputs_padded[:, n_to_process:]
-
-            logits = self.mlx_lm_model(inputs_padded, cache=prompt_cache)
-            logits = logits[:, -1, :]
-            logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
-            mx.async_eval(logprobs)
-
-            return logprobs, prompt_cache
-
-        def _batch_logits_custom(
-            self,
-            queries,
-        ):
-            """Compute next-token log probabilities for each query in a batch and add to cache.
-            Args:
-                queries (list[Query]): List of query objects to process.
-            Returns:
-                logprobs (list[torch.Tensor]): List of normalized log probability tensors."""
-            with wired_limit(self.mlx_lm_model, [self.generation_stream]):
-                logprobs, prompt_cache = self._process_prompts(queries)
-                logprobs = AsyncMlxLM._to_torch(logprobs)
-            mx.clear_cache()
-            self.add_to_cache(queries, prompt_cache, logprobs)
-            return logprobs
-
-        def batch_evaluate_queries(self):
-            """Process a batch of queued language model queries."""
-
-            queries, self.queries = self.queries, []
-            if len(queries) == 0:
+            if not queries:
                 return
+            futures = defaultdict(list)
+            for key, future in queries:
+                futures[key].append(future)
+            try:
+                logprobs = self._resolve(list(futures))
+            except Exception as exc:
+                self._fail_all(futures, exc)
+                raise
+            except BaseException as exc:
+                self._fail_all(futures, batch_abandoned(exc))
+                raise
+            for key, waiting in futures.items():
+                for future in waiting:
+                    future.set_result(logprobs[key])
 
-            query_groups = defaultdict(list)
-            for query in queries:
-                key = tuple(query.prompt)
-                query_groups[key].append(query)
+        @staticmethod
+        def _fail_all(futures, exc):
+            for waiting in futures.values():
+                for future in waiting:
+                    if not future.done():
+                        future.set_exception(exc)
 
-            # Use one representative query from each group
-            unique_queries = [group[0] for group in query_groups.values()]
-
-            results = self._batch_logits_custom(unique_queries)
-
-            assert len(results) == len(unique_queries)
-
-            for i, q in enumerate(unique_queries):
-                for dup_query in query_groups[tuple(q.prompt)]:
-                    dup_query.future.set_result(results[i])
-
-        def add_query(self, query):
-            """Add a query to be evaluated in the next batch and reset the timeout."""
-            self.queries.append(query)
-
-            if self.timer:
-                self.timer.cancel()
-                self.timer = None
-            if len(self.queries) >= self.batch_size:
-                self.batch_evaluate_queries()
-            else:
-                self.timer = asyncio.get_running_loop().call_later(
-                    self.timeout, lambda: self.batch_evaluate_queries()
-                )
-
-        async def next_token_logprobs(self, token_ids):
-            """Request log probabilities of next token. This version is asynchronous because it automatically batches concurrent requests; use with `await`.
+        async def next_token_logprobs(self, token_ids, lora_name=None):
+            """Next-token log-probs for `token_ids`, batched with concurrent requests.
 
             Args:
-                token_ids (list[int]): a list of token ids, representing a prompt to the language model.
+                token_ids (list[int]): A prompt's token ids.
+                lora_name (str, optional): Adapter to forward under (``None`` = base).
 
             Returns:
-                logprobs (torch.Tensor): a tensor of with the language model's log (normalized) probabilities for the next token following the prompt.
+                (torch.Tensor): Normalized log-probabilities over the next token.
             """
             if not token_ids:
                 raise ValueError("Token ids must not be empty")
-
-            node, next_token_index, past, kv_node, kv_next_token_index = (
-                self.walk_cache(token_ids)
-            )
-            if next_token_index == len(token_ids) and node.logprobs is not None:
-                return node.logprobs
-
+            key = (tuple(token_ids), lora_name)
+            if self.cache is not None and key in self.cache:
+                return self.cache[key]
             future = asyncio.get_running_loop().create_future()
-            query = Query(token_ids, future, past, kv_node, kv_next_token_index)
-            self.add_query(query)
-            logprobs = await future
+            cohort = await self._join_batch([(key, future)], linger=self.timeout)
+            if cohort is not None:
+                self._batch_evaluate(cohort)
+            return await future
 
-            return logprobs
-
-        def next_token_logprobs_sync(self, token_ids):
-            """Request log probabilities of next token synchronously.
+        def next_token_logprobs_sync(self, token_ids, lora_name=None):
+            """Next-token log-probs for `token_ids`, evaluated immediately.
 
             Args:
-                token_ids (list[int]): A list of token IDs, representing a prompt to the language model.
+                token_ids (list[int]): A prompt's token ids.
+                lora_name (str, optional): Adapter to forward under (``None`` = base).
 
             Returns:
-                (torch.Tensor): Normalized log probability tensor.
+                (torch.Tensor): Normalized log-probabilities over the next token.
             """
             if not token_ids:
                 raise ValueError("Token ids must not be empty")
+            key = (tuple(token_ids), lora_name)
+            return self._resolve([key])[key]
 
-            node, next_token_index, past, kv_node, kv_next_token_index = (
-                self.walk_cache(token_ids)
-            )
-            if next_token_index == len(token_ids) and node.logprobs is not None:
-                return node.logprobs
+        def batch_next_token_logprobs_sync(self, token_ids_list, lora_name=None):
+            """Next-token log-probs for each sequence, in one batched forward.
 
-            query = Query(token_ids, None, past, kv_node, kv_next_token_index)
-            logprobs = self._batch_logits_custom([query])[0]
+            Args:
+                token_ids_list (list[list[int]]): Prompts' token ids.
+                lora_name (str, optional): Adapter to forward under (``None`` = base).
 
-            return logprobs
+            Returns:
+                (torch.Tensor): ``[len(token_ids_list), vocab]`` log-probabilities.
+            """
+            if any(not ids for ids in token_ids_list):
+                raise ValueError("Token ids must not be empty")
+            keys = [(tuple(ids), lora_name) for ids in token_ids_list]
+            logprobs = self._resolve(list(dict.fromkeys(keys)))
+            return torch.stack([logprobs[k] for k in keys])
 
         async def sample(
             self,
@@ -456,41 +459,33 @@ else:
             eos_token_ids,
             temperature=1.0,
             seed=None,
+            lora_name=None,
         ):
-            """Sample from the language model.
+            """Sample a continuation from the model.
 
             Args:
-                prompt_token_ids (list[int]): The token IDs of the prompt to
-                    start generation from.
-                max_tokens (int): The maximum number of tokens to generate.
-                eos_token_ids (list[int]): The token IDs that signal
-                    end-of-sequence. Generation stops when one of these is
-                    sampled.
-                temperature (float, optional): The temperature to use for
-                    sampling. Higher values make the distribution more uniform,
-                    lower values make it more peaked. Defaults to 1.0.
-                seed (int, optional): The seed for the random number generator.
-                    If provided, sets the random seed before sampling.
-                    Defaults to None.
+                prompt_token_ids (list[int]): Token ids to continue from.
+                max_tokens (int): Maximum number of tokens to generate.
+                eos_token_ids (list[int]): Token ids that stop generation.
+                temperature (float, optional): Logit rescaling; higher is more uniform.
+                seed (int, optional): Seed for the random number generator.
+                lora_name (str, optional): Adapter to sample under (``None`` = base).
 
             Returns:
-                (list[int]): The sampled token IDs.
+                (list[int]): The sampled token ids, excluding any EOS.
             """
-
+            self.adapters.select(lora_name)
             if seed is not None:
                 mx.random.seed(seed)
 
-            sampler = make_sampler(temp=temperature)
-            prompt_token_ids_array = mx.array(prompt_token_ids)
-            token_generator = generate_step(
-                prompt_token_ids_array,
+            generated = []
+            for token, _ in generate_step(
+                mx.array(prompt_token_ids),
                 self.mlx_lm_model,
                 max_tokens=max_tokens,
-                sampler=sampler,
-            )
-            generated_token_ids = []
-            for sampled, _ in token_generator:
-                if sampled in eos_token_ids:
+                sampler=make_sampler(temp=temperature),
+            ):
+                if token in eos_token_ids:
                     break
-                generated_token_ids.append(sampled)
-            return generated_token_ids
+                generated.append(token)
+            return generated

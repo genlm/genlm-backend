@@ -6,6 +6,7 @@ from genlm.backend.tokenization.bytes import (
     ByteDecoderError,
     ByteVocabError,
     check_byte_decoder,
+    get_byte_vocab,
 )
 from conftest import assert_roundtrip_bytes
 from hypothesis import given, strategies as st, settings
@@ -109,27 +110,28 @@ def test_byte_decoder_error_handling():
         check_byte_decoder(tokenizer, incomplete_byte_decoder)
 
 
-def test_decode_vocab_failure_both_tokenizers():
-    """Test that decode_vocab raises ValueError when both slow and fast tokenizers fail."""
-    # Create a mock tokenizer
+def test_decode_vocab_failure():
+    """An undecodable vocabulary surfaces as ValueError naming the tokenizer."""
     mock_tokenizer = MagicMock()
-    mock_tokenizer.is_fast = False
     mock_tokenizer.name_or_path = "test-model"
 
-    # Mock AutoTokenizer.from_pretrained to return our mock
     with patch(
-        "genlm.backend.tokenization.vocab.AutoTokenizer.from_pretrained"
-    ) as mock_from_pretrained:
-        mock_from_pretrained.return_value = mock_tokenizer
+        "genlm.backend.tokenization.vocab.get_byte_vocab"
+    ) as mock_get_byte_vocab:
+        mock_get_byte_vocab.side_effect = ByteVocabError("Cannot decode vocabulary")
 
-        # Mock get_byte_vocab to always raise ByteVocabError
-        with patch(
-            "genlm.backend.tokenization.vocab.get_byte_vocab"
-        ) as mock_get_byte_vocab:
-            mock_get_byte_vocab.side_effect = ByteVocabError("Cannot decode vocabulary")
+        with pytest.raises(ValueError, match="Could not decode byte representation"):
+            decode_vocab(mock_tokenizer)
 
-            # This should raise ValueError after both slow and fast tokenizers fail
-            with pytest.raises(
-                ValueError, match="Could not decode byte representation"
-            ):
-                decode_vocab(mock_tokenizer)
+
+def test_unknown_byte_encoding_is_rejected():
+    """A decoder that is neither ByteLevel nor SentencePiece is refused rather than
+    decoded under an assumed scheme."""
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.name_or_path = "test-model"
+    mock_tokenizer.backend_tokenizer.to_str.return_value = (
+        '{"decoder": {"type": "WordPiece"}}'
+    )
+
+    with pytest.raises(ByteVocabError, match="neither ByteLevel nor SentencePiece"):
+        get_byte_vocab(mock_tokenizer)

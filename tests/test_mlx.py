@@ -1,9 +1,12 @@
 import pytest
-import asyncio
-import torch
-from arsenal.maths import compare
-from genlm.backend.llm import load_model_by_name, AsyncMlxLM
-from genlm.backend.llm.mlx import Query
+
+pytest.importorskip("mlx")
+
+import asyncio  # noqa: E402
+import torch  # noqa: E402
+from arsenal.maths import compare  # noqa: E402
+from genlm.backend.llm import load_model_by_name, AsyncMlxLM  # noqa: E402
+from genlm.backend.llm.base import BatchAbandoned  # noqa: E402
 
 
 TOLERANCES = {
@@ -23,7 +26,6 @@ def model_name(request):
 @pytest.fixture(scope="module")
 def async_llm(model_name):
     llm_opts = {
-        "batch_size": 3 if model_name == "openai-community/gpt2" else 1,
         "cache_size": 4,
     }
     return load_model_by_name(model_name, backend="mlx", llm_opts=llm_opts)
@@ -81,9 +83,10 @@ def test_async_batching(async_llm, token_ids_list, model_name):
 
 def test_batch_next_token_logprobs_sync(async_llm, token_ids_list):
     async_llm.clear_cache()
-    haves = async_llm.batch_next_token_logprobs_sync(token_ids_list)
+    haves = async_llm.batch_next_token_logprobs_sync(token_ids_list).cpu()
     wants = [
-        async_llm.next_token_logprobs_sync(token_ids) for token_ids in token_ids_list
+        async_llm.next_token_logprobs_sync(token_ids).cpu()
+        for token_ids in token_ids_list
     ]
 
     for i, (have, want) in enumerate(zip(haves, wants)):
@@ -112,45 +115,50 @@ def test_next_token_logprobs_sync(async_llm):
 
 @pytest.mark.asyncio
 async def test_batch_timeout(async_llm):
-    # Test that queries are processed after timeout
+    # A batch that never fills is still run, on the timer.
     async_llm.clear_cache()
 
     test_prompt = async_llm.tokenizer.encode("Test timeout")
-    future = asyncio.get_running_loop().create_future()
-    async_llm.add_query(Query(test_prompt, future))
+    logprobs = await asyncio.wait_for(
+        async_llm.next_token_logprobs(test_prompt), timeout=60
+    )
 
-    # Wait slightly longer than timeout
-    await asyncio.sleep(async_llm.timeout * 1.5)
-
-    # Future should be completed
-    assert future.done()
+    assert logprobs.ndim == 1
 
 
 @pytest.mark.asyncio
-async def test_full_batch_size(async_llm):
+async def test_window_batches_concurrent_asks(async_llm):
+    # A concurrent gather lands in one window and resolves as one batch.
     async_llm.clear_cache()
-
-    try:
-        old_batch_size = async_llm.batch_size
-        old_timeout = async_llm.timeout
-        async_llm.batch_size = 2
-        async_llm.timeout = 10
-
-        await asyncio.gather(
-            async_llm.next_token_logprobs([0]), async_llm.next_token_logprobs([1])
-        )
-    finally:
-        async_llm.batch_size = old_batch_size
-        async_llm.timeout = old_timeout
+    a, b = await asyncio.gather(
+        async_llm.next_token_logprobs([0]), async_llm.next_token_logprobs([1])
+    )
+    assert a.ndim == 1 and b.ndim == 1
 
 
 @pytest.mark.asyncio
-async def test_reset_async_queries(async_llm):
-    test_prompt = async_llm.tokenizer.encode("Test prompt")
-    future = asyncio.get_running_loop().create_future()
-    async_llm.add_query(Query(test_prompt, future))
-    async_llm.reset_async_queries()
-    assert len(async_llm.queries) == 0
+async def test_abandoned_batch_fails_co_callers(async_llm):
+    """A cancelled batch holder must fail its co-callers, not orphan them, and never
+    with its own CancelledError: that leaves their tasks cancelled and skips their
+    `except Exception`."""
+    old_timeout = async_llm.timeout
+    async_llm.timeout = 60  # linger, so the holder is still in the batch to cancel
+    try:
+        prompts = [async_llm.tokenizer.encode(s) for s in ("one", "two", "three")]
+        tasks = [
+            asyncio.ensure_future(async_llm.next_token_logprobs(p)) for p in prompts
+        ]
+        await asyncio.sleep(0)  # everyone is queued; tasks[0] holds the batch
+        tasks[0].cancel()
+
+        results = await asyncio.gather(*tasks[1:], return_exceptions=True)
+        for result in results:
+            assert isinstance(result, BatchAbandoned)
+            assert not isinstance(result, asyncio.CancelledError)
+        assert all(not t.cancelled() for t in tasks[1:])
+        assert tasks[0].cancelled()
+    finally:
+        async_llm.timeout = old_timeout
 
 
 def test_from_name_with_options(model_name):
@@ -158,19 +166,16 @@ def test_from_name_with_options(model_name):
 
     model = AsyncMlxLM.from_name(
         model_name,
-        batch_size=10,
         timeout=0.01,
     )
 
-    assert model.batch_size == 10
     assert model.timeout == 0.01
 
 
 def test_batch_evaluate_empty_queries(async_llm):
-    # Test batch evaluation with empty query list
-    async_llm.queries = []
-    async_llm.batch_evaluate_queries()
-    assert len(async_llm.queries) == 0
+    # An empty cohort flushes harmlessly (a reset can empty the window's queue).
+    async_llm._batch_evaluate([])
+    assert len(async_llm._batch_queue) == 0
 
 
 def test_sample_seeded(async_llm):
@@ -246,26 +251,35 @@ def test_caching(async_llm):
     assert torch.allclose(have, want)
 
 
-def test_mlx_prefix_caching(async_llm, model_name, token_ids_list):
-    if model_name == "yujiepan/mamba2-tiny-random":
-        pytest.skip("This model does not support prefix caching")
+def test_kv_reuse_matches_cold_prefill(async_llm, model_name, token_ids_list):
+    # Walking the live KV rows forward must agree with prefilling the same contexts.
     tolerance = TOLERANCES.get(model_name, 1e-3)
-    want_1 = async_llm.batch_next_token_logprobs_sync(token_ids_list).cpu().numpy()
-    token_ids_list_modified = [token_ids + [100] for token_ids in token_ids_list]
-    want_2 = (
-        async_llm.batch_next_token_logprobs_sync(token_ids_list_modified).cpu().numpy()
-    )
+    contexts = [list(c) for c in dict.fromkeys(map(tuple, token_ids_list))]
+    extended = [c + [100] for c in contexts]
+
     async_llm.clear_cache()
-    async_llm.cache_kv(token_ids_list[0][:4])
-    _, _, _, _, kv_next_token_index = async_llm.walk_cache(token_ids_list[0])
-    assert kv_next_token_index == 4
-    have_1 = (
-        asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list)).cpu().numpy()
-    )
-    assert compare(have_1, want_1).max_rel_err < tolerance
-    have_2 = (
-        asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list_modified))
-        .cpu()
-        .numpy()
-    )
-    assert compare(have_2, want_2).max_rel_err < tolerance
+    want = async_llm.batch_next_token_logprobs_sync(extended).cpu().numpy()
+
+    async_llm.clear_cache()
+    async_llm.batch_next_token_logprobs_sync(contexts)  # seed the rows
+    have = async_llm.batch_next_token_logprobs_sync(extended).cpu().numpy()
+
+    for i, context in enumerate(contexts):
+        assert compare(want[i], have[i]).max_rel_err < tolerance, context
+
+
+def test_kv_fork_matches_cold_prefill(async_llm, model_name, token_ids_list):
+    # Two rows continuing one row -- what a resample asks for -- must agree too.
+    tolerance = TOLERANCES.get(model_name, 1e-3)
+    parent, other = token_ids_list[0], token_ids_list[1]
+    forked = [parent + [100], parent + [101], other + [102]]
+
+    async_llm.clear_cache()
+    want = async_llm.batch_next_token_logprobs_sync(forked).cpu().numpy()
+
+    async_llm.clear_cache()
+    async_llm.batch_next_token_logprobs_sync([parent, other])
+    have = async_llm.batch_next_token_logprobs_sync(forked).cpu().numpy()
+
+    for i in range(len(forked)):
+        assert compare(want[i], have[i]).max_rel_err < tolerance, i

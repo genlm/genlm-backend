@@ -6,6 +6,33 @@ from abc import ABC, abstractmethod
 from genlm.backend.tokenization import decode_vocab
 
 
+# One spelling across every backend, so callers can match on it.
+UNKNOWN_ADAPTER = "unknown LoRA adapter: {!r}; register it with add_new_lora()"
+
+
+class BatchAbandoned(RuntimeError):
+    """The caller holding a batch died before it could be dispatched."""
+
+
+def batch_abandoned(exc):
+    """The failure handed to callers whose batch holder died.
+
+    Never the cause itself: a ``CancelledError`` given to a caller who never asked
+    for one leaves their task cancelled and skips their ``except Exception``.
+    """
+    abandoned = BatchAbandoned(f"batch holder did not survive it: {exc!r}")
+    abandoned.__cause__ = exc
+    return abandoned
+
+
+def fail_futures(entries, exc):
+    """Resolve each entry's future -- its last element -- with ``exc``."""
+    for entry in entries:
+        future = entry[-1]
+        if not future.done():
+            future.set_exception(exc)
+
+
 class AsyncLM(ABC):
     """Abstract base class for asynchronous language models.
 
@@ -19,13 +46,70 @@ class AsyncLM(ABC):
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
         self.byte_vocab, self.str_vocab = decode_vocab(self.tokenizer)
+        # Batch state; concurrent asks collect in ``_batch_queue``.
+        self._batch_queue = []
+        self._batch_armed = False
+
+    async def _join_batch(self, entries, *, linger=0.0):
+        """Join the batch of concurrent asks on this event loop.
+
+        ``entries`` are appended before any yield, so a whole batch enters as
+        one set of asks. The first caller to arm the batch holds it open until
+        a full event-loop pass adds no new ask (preceded by one cooperative
+        ``linger`` sleep for late callers, when nonzero) and receives the
+        drained batch; every other caller receives ``None``. The holding
+        caller must evaluate the batch in its own coroutine and never in a
+        background task: batch state must not outlive the loop its callers
+        are on.
+
+        An entry is a tuple ending in its future. A holder that dies before
+        handing the batch off fails every other queued future rather than
+        orphaning it, so an entry is always resolved exactly once.
+
+        Args:
+            entries (list): Asks to add to the current batch, each ending in
+                its future.
+            linger (float, optional): Seconds to sleep once for late callers.
+                Defaults to 0.0, which skips the sleep.
+
+        Returns:
+            (list | None): The drained batch for the caller holding it,
+                ``None`` for every other caller.
+        """
+        self._batch_queue.extend(entries)
+        if self._batch_armed:
+            return None
+        self._batch_armed = True
+        try:
+            lingered = not linger
+            while True:
+                n = len(self._batch_queue)
+                await asyncio.sleep(0)
+                if len(self._batch_queue) > n:
+                    continue
+                if lingered:
+                    break
+                lingered = True
+                await asyncio.sleep(linger)
+            cohort, self._batch_queue = self._batch_queue, []
+            return cohort
+        except BaseException as exc:
+            cohort, self._batch_queue = self._batch_queue, []
+            # Not this caller's own entries: it is unwinding past its ``await``,
+            # so an exception set there is only ever logged as never retrieved.
+            mine = {id(e) for e in entries}
+            fail_futures([e for e in cohort if id(e) not in mine], batch_abandoned(exc))
+            raise
+        finally:
+            self._batch_armed = False
 
     @abstractmethod
-    async def next_token_logprobs(self, token_ids):
+    async def next_token_logprobs(self, token_ids, lora_name=None):
         """Request log probabilities of next token asynchronously.
 
         Args:
             token_ids (list[int]): A list of token IDs representing the prompt.
+            lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
 
         Returns:
             (torch.Tensor): Normalized log probability tensor.
@@ -33,47 +117,59 @@ class AsyncLM(ABC):
         pass
 
     @abstractmethod
-    def next_token_logprobs_sync(self, token_ids):
+    def next_token_logprobs_sync(self, token_ids, lora_name=None):
         """Request log probabilities of next token synchronously.
 
         Args:
             token_ids (list[int]): A list of token IDs representing the prompt.
+            lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
 
         Returns:
             (torch.Tensor): Normalized log probability tensor.
         """
         pass
 
-    async def batch_next_token_logprobs(self, token_ids_list):
+    async def batch_next_token_logprobs(self, token_ids_list, lora_name=None):
         """Batch request log probabilities for multiple token sequences asynchronously.
 
         Args:
             token_ids_list (list[list[int]]): A list of token ID lists.
+            lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
 
         Returns:
             (torch.Tensor): A tensor of log probability tensors.
         """
         logprobs = await asyncio.gather(
-            *[self.next_token_logprobs(token_ids) for token_ids in token_ids_list]
+            *[
+                self.next_token_logprobs(token_ids, lora_name=lora_name)
+                for token_ids in token_ids_list
+            ]
         )
 
         return torch.stack(logprobs)
 
-    def batch_next_token_logprobs_sync(self, token_ids_list):
+    def batch_next_token_logprobs_sync(self, token_ids_list, lora_name=None):
         """Batch request log probabilities for multiple token sequences synchronously.
 
         Args:
             token_ids_list (list[list[int]]): A list of token ID lists.
+            lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
 
         Returns:
             (torch.Tensor): A tensor of log probability tensors.
         """
         return torch.stack(
-            [self.next_token_logprobs_sync(token_ids) for token_ids in token_ids_list]
+            [
+                self.next_token_logprobs_sync(token_ids, lora_name=lora_name)
+                for token_ids in token_ids_list
+            ]
         )
 
     def add_new_lora(self, lora_path, lora_name):
-        """Load a LoRA adapter into the base model.
+        """Register a LoRA adapter under ``lora_name``.
+
+        Re-registering an existing name rebinds it to the weights at
+        ``lora_path``. Forwards select the adapter per call via ``lora_name=``.
 
         Args:
             lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
@@ -84,31 +180,42 @@ class AsyncLM(ABC):
             "add_new_lora must be implemented by subclasses"
         )  # pragma: no cover
 
-    def set_lora(self, lora_path, lora_name):
-        """Activate a previously loaded LoRA adapter.
+    def remove_lora(self, lora_name):
+        """Unregister ``lora_name`` and evict its weights.
 
         Args:
-            lora_name (str): Name of the LoRA adapter to activate.
+            lora_name (str): Name of the adapter to remove.
 
         """
         raise NotImplementedError(
-            "set_lora must be implemented by subclasses"
+            "remove_lora must be implemented by subclasses"
         )  # pragma: no cover
+
+    def set_lora(self, lora_path, lora_name):
+        """Unsupported: adapter selection is per-request, via ``lora_name=``."""
+        raise RuntimeError(
+            "set_lora() was removed: there is no active-adapter global anymore. "
+            "Pass lora_name= per call (next_token_logprobs/sample/...)."
+        )
 
     def clear_lora(self):
-        """
-        Deactivate all LoRA adapters.
-        """
-        raise NotImplementedError(
-            "clear_lora must be implemented by subclasses"
-        )  # pragma: no cover
+        """Unsupported: ``lora_name=None`` (the default) is the base model."""
+        raise RuntimeError(
+            "clear_lora() was removed: omit lora_name (None = base model)."
+        )
 
     def clear_cache(self):
         """Clear any caches used by the language model. No-op in base class."""
         pass  # pragma: no cover
 
     async def sample(
-        self, prompt_token_ids, max_tokens, eos_token_ids, temperature=1.0, seed=None
+        self,
+        prompt_token_ids,
+        max_tokens,
+        eos_token_ids,
+        temperature=1.0,
+        seed=None,
+        lora_name=None,
     ):
         """Sample from the language model.
 
@@ -118,6 +225,7 @@ class AsyncLM(ABC):
             temperature (float, optional): The temperature to use to rescale the logits. Defaults to 1.0.
             max_tokens (int): The maximum number of tokens to generate.
             seed (int, optional): The seed for the random number generator. Defaults to None.
+            lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
 
         Returns:
             (list[int]): The sampled token IDs.
@@ -131,7 +239,7 @@ class AsyncLM(ABC):
         generated_token_ids = []
         for _ in range(max_tokens):
             logprobs = await self.next_token_logprobs(
-                prompt_token_ids + generated_token_ids
+                prompt_token_ids + generated_token_ids, lora_name=lora_name
             )
             probs = torch.softmax(logprobs / temperature, dim=-1)
             next_token_id = torch.multinomial(
@@ -152,6 +260,7 @@ class AsyncLM(ABC):
         eos_token_ids,
         temperature=1.0,
         seed=None,
+        lora_name=None,
     ):
         """Batch sample from the language model.
 
@@ -161,6 +270,7 @@ class AsyncLM(ABC):
             eos_token_ids (list[int]): The token IDs of the end-of-sequence token.
             temperature (float): The temperature to use for the logits.
             seed (int, optional): The seed for the random number generator. Defaults to None.
+            lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
 
         Returns:
             (list[list[int]]): The sampled token IDs.
@@ -173,6 +283,7 @@ class AsyncLM(ABC):
                     eos_token_ids=eos_token_ids,
                     temperature=temperature,
                     seed=seed,
+                    lora_name=lora_name,
                 )
                 for prompt_token_ids in prompt_token_ids_list
             ]
@@ -206,26 +317,32 @@ class MockAsyncLM(AsyncLM):
 
         return cls(AutoTokenizer.from_pretrained(model_name), **kwargs)
 
-    async def next_token_logprobs(self, token_ids):
+    async def next_token_logprobs(self, token_ids, lora_name=None):
         """Get next token log probabilities asynchronously.
 
         Args:
             token_ids (list[int]): Input token IDs.
+            lora_name (str, optional): Must be ``None``; the mock has no adapters.
 
         Returns:
             (torch.Tensor): Normalized log probability tensor.
         """
+        if lora_name is not None:
+            raise ValueError(UNKNOWN_ADAPTER.format(lora_name))
         return self._get_logprobs(token_ids)
 
-    def next_token_logprobs_sync(self, token_ids):
+    def next_token_logprobs_sync(self, token_ids, lora_name=None):
         """Get next token log probabilities synchronously.
 
         Args:
             token_ids (list[int]): Input token IDs.
+            lora_name (str, optional): Must be ``None``; the mock has no adapters.
 
         Returns:
             (torch.Tensor): Normalized log probability tensor.
         """
+        if lora_name is not None:
+            raise ValueError(UNKNOWN_ADAPTER.format(lora_name))
         return self._get_logprobs(token_ids)
 
     def _get_logprobs(self, token_ids):

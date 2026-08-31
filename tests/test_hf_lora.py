@@ -1,5 +1,6 @@
 import pytest
 import asyncio
+import numpy as np
 import torch
 from conftest import cuda_only
 from arsenal.maths import compare
@@ -45,7 +46,6 @@ def transformer_llm_nolora(model_name):
 @pytest.fixture(scope="module", autouse=True)
 def load_lora(transformer_llm, lora_path):
     transformer_llm.add_new_lora(lora_path, "lora_1")
-    transformer_llm.set_lora(None, "lora_1")
 
 
 @pytest.fixture(scope="module")
@@ -59,9 +59,36 @@ def token_ids_list(transformer_llm):
     return [transformer_llm.tokenizer.encode(p) for p in test_prompts]
 
 
-def test_load_model_by_name_error(transformer_llm):
+def test_unknown_lora_error(transformer_llm):
     with pytest.raises(ValueError):
-        transformer_llm.set_lora(None, "lora_2")
+        transformer_llm.next_token_logprobs_uncached([0], lora_name="lora_2")
+    # The auto-batched path must fail the future, not leave the caller hung.
+    with pytest.raises(ValueError):
+        asyncio.run(transformer_llm.next_token_logprobs([0], lora_name="lora_2"))
+
+
+def test_reregistration(transformer_llm, token_ids_list, lora_pair):
+    """Re-registering a name rebinds it to the new weights and purges its cache
+    trie — the cached sync path must not serve the old adapter's logprobs."""
+    identity_path, shifted_path = lora_pair
+    ids = token_ids_list[0]
+
+    base = transformer_llm.next_token_logprobs_sync(ids).cpu().numpy()
+    transformer_llm.add_new_lora(identity_path, "reg")
+    lp_identity = (
+        transformer_llm.next_token_logprobs_sync(ids, lora_name="reg").cpu().numpy()
+    )
+    assert np.abs(lp_identity - base).max() < 1e-3
+
+    transformer_llm.add_new_lora(shifted_path, "reg")
+    lp_shifted = (
+        transformer_llm.next_token_logprobs_sync(ids, lora_name="reg").cpu().numpy()
+    )
+    assert np.abs(lp_shifted - lp_identity).max() > 1e-2
+
+    transformer_llm.remove_lora("reg")
+    with pytest.raises(ValueError):
+        transformer_llm.next_token_logprobs_sync(ids, lora_name="reg")
 
 
 @cuda_only
@@ -80,7 +107,9 @@ def test_next_token_logprobs_lora_uncached(
 ):
     for token_ids in token_ids_list:
         unmerged_logprobs = (
-            transformer_llm.next_token_logprobs_uncached(token_ids).cpu().numpy()
+            transformer_llm.next_token_logprobs_uncached(token_ids, lora_name="lora_1")
+            .cpu()
+            .numpy()
         )
         merged_logprobs = (
             transformer_merged_llm.next_token_logprobs_uncached(token_ids).cpu().numpy()
@@ -94,7 +123,11 @@ def test_next_token_logprobs_lora(
 ):
     for token_ids in token_ids_list:
         unmerged_logprobs = (
-            asyncio.run(transformer_llm.next_token_logprobs(token_ids)).cpu().numpy()
+            asyncio.run(
+                transformer_llm.next_token_logprobs(token_ids, lora_name="lora_1")
+            )
+            .cpu()
+            .numpy()
         )
         merged_logprobs = (
             asyncio.run(transformer_merged_llm.next_token_logprobs(token_ids))
@@ -109,7 +142,9 @@ def test_token_logprobs_lora_sync(
     transformer_llm, transformer_merged_llm, token_ids_list
 ):
     unmerged_logprobs = [
-        transformer_llm.next_token_logprobs_sync(token_ids).cpu().numpy()
+        transformer_llm.next_token_logprobs_sync(token_ids, lora_name="lora_1")
+        .cpu()
+        .numpy()
         for token_ids in token_ids_list
     ]
     merged_logprobs = [
@@ -130,7 +165,11 @@ def test_batch_token_logprobs_lora(
     transformer_llm, transformer_merged_llm, token_ids_list
 ):
     unmerged_logprobs = (
-        asyncio.run(transformer_llm.batch_next_token_logprobs(token_ids_list))
+        asyncio.run(
+            transformer_llm.batch_next_token_logprobs(
+                token_ids_list, lora_name="lora_1"
+            )
+        )
         .cpu()
         .numpy()
     )
@@ -152,10 +191,16 @@ def test_batch_token_logprobs_lora_sync(
     transformer_llm, transformer_merged_llm, token_ids_list
 ):
     unmerged_logprobs = (
-        transformer_llm.batch_next_token_logprobs_sync(token_ids_list).cpu().numpy()
+        transformer_llm.batch_next_token_logprobs_sync(
+            token_ids_list, lora_name="lora_1"
+        )
+        .cpu()
+        .numpy()
     )
     merged_logprobs = (
-        transformer_llm.batch_next_token_logprobs_sync(token_ids_list).cpu().numpy()
+        transformer_merged_llm.batch_next_token_logprobs_sync(token_ids_list)
+        .cpu()
+        .numpy()
     )
     for i, (unmerged_logprob, merged_logprob) in enumerate(
         zip(unmerged_logprobs, merged_logprobs)
@@ -166,14 +211,20 @@ def test_batch_token_logprobs_lora_sync(
 
 
 @cuda_only
-def test_set_disable_swap(transformer_llm, token_ids_list, transformer_llm_nolora):
+def test_adapter_swap(transformer_llm, token_ids_list, transformer_llm_nolora):
+    """Interleaving base and adapter requests on one model matches a dedicated
+    base model and a contiguous adapter run."""
     lora_logprobs_noswapped = []
-    nolora_logprobs_noswapped = []
+    nolora_reference = []
     for token_ids in token_ids_list:
         lora_logprobs_noswapped.append(
-            asyncio.run(transformer_llm.next_token_logprobs(token_ids)).cpu().numpy()
+            asyncio.run(
+                transformer_llm.next_token_logprobs(token_ids, lora_name="lora_1")
+            )
+            .cpu()
+            .numpy()
         )
-        nolora_logprobs_noswapped.append(
+        nolora_reference.append(
             asyncio.run(transformer_llm_nolora.next_token_logprobs(token_ids))
             .cpu()
             .numpy()
@@ -183,35 +234,37 @@ def test_set_disable_swap(transformer_llm, token_ids_list, transformer_llm_nolor
     nolora_logprobs_swapped = []
     for token_ids in token_ids_list:
         lora_logprobs_swapped.append(
-            asyncio.run(transformer_llm.next_token_logprobs(token_ids)).cpu().numpy()
+            asyncio.run(
+                transformer_llm.next_token_logprobs(token_ids, lora_name="lora_1")
+            )
+            .cpu()
+            .numpy()
         )
-        transformer_llm.clear_lora()
         nolora_logprobs_swapped.append(
             asyncio.run(transformer_llm.next_token_logprobs(token_ids)).cpu().numpy()
         )
-        transformer_llm.set_lora(None, "lora_1")
 
     for i, (noswapped, swapped) in enumerate(
         zip(lora_logprobs_noswapped, lora_logprobs_swapped)
     ):
         assert compare(noswapped, swapped).max_rel_err < 1e-3, token_ids_list[i]
-    for i, (noswapped, swapped) in enumerate(
-        zip(nolora_logprobs_noswapped, nolora_logprobs_swapped)
+    for i, (reference, swapped) in enumerate(
+        zip(nolora_reference, nolora_logprobs_swapped)
     ):
-        assert compare(noswapped, swapped).max_rel_err < 1e-3, token_ids_list[i]
+        assert compare(reference, swapped).max_rel_err < 1e-3, token_ids_list[i]
 
 
 @cuda_only
-def test_set_disable_swap_unchached(
-    transformer_llm, token_ids_list, transformer_llm_nolora
-):
+def test_adapter_swap_uncached(transformer_llm, token_ids_list, transformer_llm_nolora):
     lora_logprobs_noswapped = []
-    nolora_logprobs_noswapped = []
+    nolora_reference = []
     for token_ids in token_ids_list:
         lora_logprobs_noswapped.append(
-            transformer_llm.next_token_logprobs_uncached(token_ids).cpu().numpy()
+            transformer_llm.next_token_logprobs_uncached(token_ids, lora_name="lora_1")
+            .cpu()
+            .numpy()
         )
-        nolora_logprobs_noswapped.append(
+        nolora_reference.append(
             transformer_llm_nolora.next_token_logprobs_uncached(token_ids).cpu().numpy()
         )
 
@@ -219,31 +272,33 @@ def test_set_disable_swap_unchached(
     nolora_logprobs_swapped = []
     for token_ids in token_ids_list:
         lora_logprobs_swapped.append(
-            transformer_llm.next_token_logprobs_uncached(token_ids).cpu().numpy()
+            transformer_llm.next_token_logprobs_uncached(token_ids, lora_name="lora_1")
+            .cpu()
+            .numpy()
         )
-        transformer_llm.clear_lora()
         nolora_logprobs_swapped.append(
             transformer_llm.next_token_logprobs_uncached(token_ids).cpu().numpy()
         )
-        transformer_llm.set_lora(None, "lora_1")
 
     for i, (noswapped, swapped) in enumerate(
         zip(lora_logprobs_noswapped, lora_logprobs_swapped)
     ):
         assert compare(noswapped, swapped).max_rel_err < 1e-3, token_ids_list[i]
-    for i, (noswapped, swapped) in enumerate(
-        zip(nolora_logprobs_noswapped, nolora_logprobs_swapped)
+    for i, (reference, swapped) in enumerate(
+        zip(nolora_reference, nolora_logprobs_swapped)
     ):
-        assert compare(noswapped, swapped).max_rel_err < 1e-3, token_ids_list[i]
+        assert compare(reference, swapped).max_rel_err < 1e-3, token_ids_list[i]
 
 
 @cuda_only
-def test_set_disable_swap_sync(transformer_llm, token_ids_list, transformer_llm_nolora):
+def test_adapter_swap_sync(transformer_llm, token_ids_list, transformer_llm_nolora):
     lora_logprobs_noswapped = [
-        transformer_llm.next_token_logprobs_sync(token_ids).cpu().numpy()
+        transformer_llm.next_token_logprobs_sync(token_ids, lora_name="lora_1")
+        .cpu()
+        .numpy()
         for token_ids in token_ids_list
     ]
-    nolora_logprobs_noswapped = [
+    nolora_reference = [
         transformer_llm_nolora.next_token_logprobs_sync(token_ids).cpu().numpy()
         for token_ids in token_ids_list
     ]
@@ -252,99 +307,67 @@ def test_set_disable_swap_sync(transformer_llm, token_ids_list, transformer_llm_
     nolora_logprobs_swapped = []
     for token_ids in token_ids_list:
         lora_logprobs_swapped.append(
-            transformer_llm.next_token_logprobs_sync(token_ids).cpu().numpy()
+            transformer_llm.next_token_logprobs_sync(token_ids, lora_name="lora_1")
+            .cpu()
+            .numpy()
         )
-        transformer_llm.clear_lora()
         nolora_logprobs_swapped.append(
             transformer_llm.next_token_logprobs_sync(token_ids).cpu().numpy()
         )
-        transformer_llm.set_lora(None, "lora_1")
 
     for i, (noswapped, swapped) in enumerate(
         zip(lora_logprobs_noswapped, lora_logprobs_swapped)
     ):
         assert compare(noswapped, swapped).max_rel_err < 1e-3, token_ids_list[i]
-    for i, (noswapped, swapped) in enumerate(
-        zip(nolora_logprobs_noswapped, nolora_logprobs_swapped)
+    for i, (reference, swapped) in enumerate(
+        zip(nolora_reference, nolora_logprobs_swapped)
     ):
-        assert compare(noswapped, swapped).max_rel_err < 1e-3, token_ids_list[i]
+        assert compare(reference, swapped).max_rel_err < 1e-3, token_ids_list[i]
 
 
 @cuda_only
-def test_set_disable_swap_batch(
+def test_adapter_swap_mixed_batch(
     transformer_llm, token_ids_list, transformer_llm_nolora
 ):
-    lora_logprobs_noswapped = (
-        asyncio.run(transformer_llm.batch_next_token_logprobs(token_ids_list))
+    """One auto-batched dispatch containing BOTH base and adapter queries routes
+    each query through its own adapter."""
+    transformer_llm.clear_cache()
+
+    async def mixed(token_ids_list):
+        lora = asyncio.gather(
+            *[
+                transformer_llm.next_token_logprobs(t, lora_name="lora_1")
+                for t in token_ids_list
+            ]
+        )
+        base = asyncio.gather(
+            *[transformer_llm.next_token_logprobs(t) for t in token_ids_list]
+        )
+        return await lora, await base
+
+    lora_logprobs, base_logprobs = asyncio.run(mixed(token_ids_list))
+
+    lora_reference = (
+        asyncio.run(
+            transformer_llm.batch_next_token_logprobs(
+                token_ids_list, lora_name="lora_1"
+            )
+        )
         .cpu()
         .numpy()
     )
-    nolora_logprobs_noswapped = (
+    base_reference = (
         asyncio.run(transformer_llm_nolora.batch_next_token_logprobs(token_ids_list))
         .cpu()
         .numpy()
     )
 
-    batches = [token_ids_list[i : i + 2] for i in range(0, len(token_ids_list), 2)]
-
-    lora_logprobs_swapped = []
-    nolora_logprobs_swapped = []
-    for token_ids in batches:
-        lora_logprobs_swapped.extend(
-            asyncio.run(transformer_llm.batch_next_token_logprobs(token_ids))
-            .cpu()
-            .numpy()
-        )
-        transformer_llm.clear_lora()
-        nolora_logprobs_swapped.extend(
-            asyncio.run(transformer_llm.batch_next_token_logprobs(token_ids))
-            .cpu()
-            .numpy()
-        )
-        transformer_llm.set_lora(None, "lora_1")
-
-    for i, (noswapped, swapped) in enumerate(
-        zip(lora_logprobs_noswapped, lora_logprobs_swapped)
-    ):
-        assert compare(noswapped, swapped).max_rel_err < 1e-3, token_ids_list[i]
-    for i, (noswapped, swapped) in enumerate(
-        zip(nolora_logprobs_noswapped, nolora_logprobs_swapped)
-    ):
-        assert compare(noswapped, swapped).max_rel_err < 1e-3, token_ids_list[i]
-
-
-@cuda_only
-def test_set_disable_swap_batch_sync(
-    transformer_llm, token_ids_list, transformer_llm_nolora
-):
-    lora_logprobs_noswapped = (
-        transformer_llm.batch_next_token_logprobs_sync(token_ids_list).cpu().numpy()
-    )
-    nolora_logprobs_noswapped = (
-        transformer_llm_nolora.batch_next_token_logprobs_sync(token_ids_list)
-        .cpu()
-        .numpy()
-    )
-
-    batches = [token_ids_list[i : i + 2] for i in range(0, len(token_ids_list), 2)]
-
-    lora_logprobs_swapped = []
-    nolora_logprobs_swapped = []
-    for token_ids in batches:
-        lora_logprobs_swapped.extend(
-            transformer_llm.batch_next_token_logprobs_sync(token_ids).cpu().numpy()
-        )
-        transformer_llm.clear_lora()
-        nolora_logprobs_swapped.extend(
-            transformer_llm.batch_next_token_logprobs_sync(token_ids).cpu().numpy()
-        )
-        transformer_llm.set_lora(None, "lora_1")
-
-    for i, (noswapped, swapped) in enumerate(
-        zip(lora_logprobs_noswapped, lora_logprobs_swapped)
-    ):
-        assert compare(noswapped, swapped).max_rel_err < 1e-3, token_ids_list[i]
-    for i, (noswapped, swapped) in enumerate(
-        zip(nolora_logprobs_noswapped, nolora_logprobs_swapped)
-    ):
-        assert compare(noswapped, swapped).max_rel_err < 1e-3, token_ids_list[i]
+    for i, token_ids in enumerate(token_ids_list):
+        assert (
+            compare(lora_logprobs[i].cpu().numpy(), lora_reference[i]).max_rel_err
+            < 1e-3
+        ), token_ids
+        assert (
+            compare(base_logprobs[i].cpu().numpy(), base_reference[i]).max_rel_err
+            < 1e-3
+        ), token_ids
