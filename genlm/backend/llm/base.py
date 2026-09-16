@@ -10,27 +10,11 @@ from genlm.backend.tokenization import decode_vocab
 UNKNOWN_ADAPTER = "unknown LoRA adapter: {!r}; register it with add_new_lora()"
 
 
-class BatchAbandoned(RuntimeError):
-    """The caller holding a batch died before it could be dispatched."""
-
-
-def batch_abandoned(exc):
-    """The failure handed to callers whose batch holder died.
-
-    Never the cause itself: a ``CancelledError`` given to a caller who never asked
-    for one leaves their task cancelled and skips their ``except Exception``.
-    """
-    abandoned = BatchAbandoned(f"batch holder did not survive it: {exc!r}")
-    abandoned.__cause__ = exc
-    return abandoned
-
-
-def fail_futures(entries, exc):
-    """Resolve each entry's future -- its last element -- with ``exc``."""
-    for entry in entries:
-        future = entry[-1]
-        if not future.done():
-            future.set_exception(exc)
+def temper(row, temperature):
+    """Rescale a normalized log-probability row to ``temperature``; identity at 1."""
+    if temperature == 1:
+        return row
+    return torch.log_softmax(row / temperature, dim=-1)
 
 
 class AsyncLM(ABC):
@@ -39,69 +23,35 @@ class AsyncLM(ABC):
     This class provides an interface for language models that can generate token probabilities
     asynchronously. It handles tokenization and vocabulary management.
 
+    A next-token row is a float32 ``torch.Tensor`` of normalized log probabilities
+    over exactly ``len(str_vocab)`` columns, living on ``device``.
+
     Args:
         tokenizer: A Hugging Face tokenizer instance compatible with the language model
+
+    Attributes:
+        device (torch.device): Where the rows this model returns live.
     """
 
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
         self.byte_vocab, self.str_vocab = decode_vocab(self.tokenizer)
-        # Batch state; concurrent asks collect in ``_batch_queue``.
-        self._batch_queue = []
-        self._batch_armed = False
 
-    async def _join_batch(self, entries, *, linger=0.0):
-        """Join the batch of concurrent asks on this event loop.
+    def _normalize(self, logits):
+        """Log-softmax of ``logits`` over exactly the vocabulary's columns, in float32.
 
-        ``entries`` are appended before any yield, so a whole batch enters as
-        one set of asks. The first caller to arm the batch holds it open until
-        a full event-loop pass adds no new ask (preceded by one cooperative
-        ``linger`` sleep for late callers, when nonzero) and receives the
-        drained batch; every other caller receives ``None``. The holding
-        caller must evaluate the batch in its own coroutine and never in a
-        background task: batch state must not outlive the loop its callers
-        are on.
-
-        An entry is a tuple ending in its future. A holder that dies before
-        handing the batch off fails every other queued future rather than
-        orphaning it, so an entry is always resolved exactly once.
-
-        Args:
-            entries (list): Asks to add to the current batch, each ending in
-                its future.
-            linger (float, optional): Seconds to sleep once for late callers.
-                Defaults to 0.0, which skips the sleep.
-
-        Returns:
-            (list | None): The drained batch for the caller holding it,
-                ``None`` for every other caller.
+        A model's logit width may exceed its tokenizer's vocabulary (padding) or fall
+        short of it (tokens added past the embedding matrix): extra columns are
+        dropped and missing ones are ``-inf``.
         """
-        self._batch_queue.extend(entries)
-        if self._batch_armed:
-            return None
-        self._batch_armed = True
-        try:
-            lingered = not linger
-            while True:
-                n = len(self._batch_queue)
-                await asyncio.sleep(0)
-                if len(self._batch_queue) > n:
-                    continue
-                if lingered:
-                    break
-                lingered = True
-                await asyncio.sleep(linger)
-            cohort, self._batch_queue = self._batch_queue, []
-            return cohort
-        except BaseException as exc:
-            cohort, self._batch_queue = self._batch_queue, []
-            # Not this caller's own entries: it is unwinding past its ``await``,
-            # so an exception set there is only ever logged as never retrieved.
-            mine = {id(e) for e in entries}
-            fail_futures([e for e in cohort if id(e) not in mine], batch_abandoned(exc))
-            raise
-        finally:
-            self._batch_armed = False
+        vocab, width = len(self.str_vocab), logits.shape[-1]
+        if width > vocab:
+            logits = logits[..., :vocab]
+        elif width < vocab:
+            logits = torch.nn.functional.pad(
+                logits, (0, vocab - width), value=float("-inf")
+            )
+        return torch.log_softmax(logits.float(), dim=-1)
 
     @abstractmethod
     async def next_token_logprobs(self, token_ids, lora_name=None):
@@ -300,6 +250,7 @@ class MockAsyncLM(AsyncLM):
             tokenizer: Hugging Face tokenizer instance
         """
         super().__init__(tokenizer)
+        self.device = torch.device("cpu")
         self._rng = np.random.RandomState(42)
 
     @classmethod
@@ -361,4 +312,4 @@ class MockAsyncLM(AsyncLM):
         logits = torch.from_numpy(
             self._rng.rand(len(self.byte_vocab)).astype(np.float32)
         )
-        return torch.log_softmax(logits, dim=-1)
+        return self._normalize(logits)

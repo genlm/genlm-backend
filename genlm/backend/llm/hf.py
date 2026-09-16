@@ -167,7 +167,7 @@ class AsyncTransformer(AsyncLM):
         self._activate(lora_name)
         result = self.model(torch.tensor([prompt_tokens]).to(self.device))
         node = self.caches[lora_name].extend_cache(
-            0, prompt_tokens, result.logits[0], 0
+            0, prompt_tokens, self._normalize(result.logits[0]), 0
         )
         node.past_key_values = result.past_key_values
 
@@ -323,7 +323,7 @@ class AsyncTransformer(AsyncLM):
         assert len(results.logits) == len(unique_queries)
 
         for i, q in enumerate(unique_queries):
-            result = results.logits[i]
+            result = self._normalize(results.logits[i])
             for dup_query in query_groups[tuple(q.prompt)]:
                 dup_query.future.set_result(result)
 
@@ -436,13 +436,15 @@ class AsyncTransformer(AsyncLM):
             return node.logprobs
 
         self._activate(lora_name)
-        logits = self.model(
-            torch.tensor([token_ids[base:]]).to(self.device),
-            past_key_values=node.past_key_values,
-            use_cache=node.past_key_values is not None,
-        ).logits[0]
+        logprobs = self._normalize(
+            self.model(
+                torch.tensor([token_ids[base:]]).to(self.device),
+                past_key_values=node.past_key_values,
+                use_cache=node.past_key_values is not None,
+            ).logits[0]
+        )
 
-        node = node.extend_cache(next_token_index, token_ids, logits, base)
+        node = node.extend_cache(next_token_index, token_ids, logprobs, base)
 
         return node.logprobs
 
@@ -466,4 +468,4 @@ class AsyncTransformer(AsyncLM):
                 past_key_values=None,
                 use_cache=False,
             ).logits[0]
-            return torch.log_softmax(logits[-1], dim=0, dtype=torch.float32)
+            return self._normalize(logits[-1])

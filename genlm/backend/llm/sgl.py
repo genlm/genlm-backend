@@ -91,6 +91,7 @@ else:
             """
             self.model = sgl_model
             self.tokenizer = sgl_model.tokenizer
+            self.device = torch.device("cpu")
 
             cache_opts = {} if cache_opts is None else cache_opts
             self.cache = (
@@ -379,8 +380,8 @@ else:
                     with torch.inference_mode():
                         batch_result = sched.run_batch(batch)
                         sched.process_batch_result(batch, batch_result)
-                        logprobs = torch.log_softmax(
-                            batch_result.logits_output.next_token_logits, dim=-1
+                        logprobs = self._normalize(
+                            batch_result.logits_output.next_token_logits
                         ).to("cpu")
 
                         for i, req in enumerate(batch.reqs):

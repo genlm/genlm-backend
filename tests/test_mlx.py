@@ -6,7 +6,7 @@ import asyncio  # noqa: E402
 import torch  # noqa: E402
 from arsenal.maths import compare  # noqa: E402
 from genlm.backend.llm import load_model_by_name, AsyncMlxLM  # noqa: E402
-from genlm.backend.llm.base import BatchAbandoned  # noqa: E402
+from genlm.backend.batching import BatchAbandoned  # noqa: E402
 
 
 TOLERANCES = {
@@ -175,7 +175,7 @@ def test_from_name_with_options(model_name):
 def test_batch_evaluate_empty_queries(async_llm):
     # An empty cohort flushes harmlessly (a reset can empty the window's queue).
     async_llm._batch_evaluate([])
-    assert len(async_llm._batch_queue) == 0
+    assert not async_llm._batches
 
 
 def test_sample_seeded(async_llm):
@@ -283,3 +283,70 @@ def test_kv_fork_matches_cold_prefill(async_llm, model_name, token_ids_list):
 
     for i in range(len(forked)):
         assert compare(want[i], have[i]).max_rel_err < tolerance, i
+
+
+def _count_calls(llm, monkeypatch, name):
+    # The conftest purges genlm.backend.llm modules after every test, so patch the
+    # pool class this llm builds from, not the one a fresh import would name.
+    pool_cls = llm.slots.default_factory.func
+    count = [0]
+    original = getattr(pool_cls, name)
+
+    def counted(self, *args, **kwargs):
+        count[0] += 1
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(pool_cls, name, counted)
+    return count
+
+
+def test_rows_survive_a_batch_that_omits_them(async_llm, token_ids_list, monkeypatch):
+    # A batch over some rows must leave the others continuable, not evict them.
+    count = _count_calls(async_llm, monkeypatch, "_prefill")
+    contexts = [list(c) for c in dict.fromkeys(map(tuple, token_ids_list))]
+    async_llm.clear_cache()
+    async_llm.batch_next_token_logprobs_sync(contexts)  # one prefill
+    async_llm.batch_next_token_logprobs_sync([contexts[0] + [100]])
+    async_llm.batch_next_token_logprobs_sync([c + [101] for c in contexts[1:]])
+    async_llm.batch_next_token_logprobs_sync(
+        [contexts[0] + [100, 102]] + [c + [101, 102] for c in contexts[1:]]
+    )
+    assert count[0] == 1
+
+
+def test_stashed_row_matches_cold_prefill(async_llm, model_name, token_ids_list):
+    # A row that sat out a batch and rejoined forwards like a fresh prefill.
+    tolerance = TOLERANCES.get(model_name, 1e-3)
+    a, b = token_ids_list[0], token_ids_list[1]
+    async_llm.clear_cache()
+    want = async_llm.batch_next_token_logprobs_sync([b + [100, 101]]).cpu().numpy()
+    async_llm.clear_cache()
+    async_llm.batch_next_token_logprobs_sync([a, b])
+    async_llm.batch_next_token_logprobs_sync([a + [7]])  # b sits out
+    async_llm.batch_next_token_logprobs_sync([b + [100]])  # a sits out
+    have = async_llm.batch_next_token_logprobs_sync([b + [100, 101]]).cpu().numpy()
+    assert compare(want[0], have[0]).max_rel_err < tolerance
+
+
+def test_mixed_delta_lengths_forward_per_group(async_llm, token_ids_list, monkeypatch):
+    # +1 and +3 continuations in one batch: no prefill, one forward per length.
+    count = _count_calls(async_llm, monkeypatch, "_prefill")
+    forwards = _count_calls(async_llm, monkeypatch, "advance")
+    a, b = token_ids_list[0], token_ids_list[1]
+    async_llm.clear_cache()
+    async_llm.batch_next_token_logprobs_sync([a, b])
+    async_llm.batch_next_token_logprobs_sync([a + [1], b + [1, 2, 3]])
+    assert count[0] == 1 and forwards[0] == 2
+
+
+def test_lru_eviction_keeps_recent_rows(model_name, token_ids_list, monkeypatch):
+    llm = load_model_by_name(model_name, backend="mlx", llm_opts={"max_rows": 2})
+    count = _count_calls(llm, monkeypatch, "_prefill")
+    a, b, c = (list(t) for t in token_ids_list[:3])
+    llm.batch_next_token_logprobs_sync([a, b])  # 1 prefill
+    llm.batch_next_token_logprobs_sync([b + [5]])  # b moves on; a is the oldest row
+    llm.batch_next_token_logprobs_sync([c])  # 2 prefills; over the cap, a's chunk goes
+    llm.batch_next_token_logprobs_sync([c + [6], b + [5, 6]])  # both continue
+    assert count[0] == 2
+    llm.batch_next_token_logprobs_sync([a + [7]])  # a is gone: 3 prefills
+    assert count[0] == 3

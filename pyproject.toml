@@ -44,7 +44,8 @@ sgl = [
     "sglang>=0.5.17,<0.5.18",
 ]
 lora = [
-    "peft>=0.17",
+    # transformers 5.15+ imports a peft helper that only exists from 0.21.
+    "peft>=0.21",
 ]
 docs = [
     "mkdocs",

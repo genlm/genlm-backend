@@ -1,4 +1,3 @@
-import torch
 from collections import OrderedDict
 
 
@@ -86,14 +85,10 @@ class TokenTrie:
         self.children[token_id] = TokenTrie(logprobs)
         return self.children[token_id]
 
-    def extend_cache(self, next_token_index, token_ids, logits, base):
+    def extend_cache(self, next_token_index, token_ids, logprobs, base):
         node = self
 
         for j in range(next_token_index, len(token_ids)):
-            token_id = token_ids[j]
-            token_logits = logits[j - base]
-            token_logprobs = torch.log_softmax(token_logits, 0, dtype=torch.float32)
-
-            node = node.add_token(token_id, token_logprobs.cpu())
+            node = node.add_token(token_ids[j], logprobs[j - base].cpu())
 
         return node

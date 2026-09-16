@@ -1,4 +1,6 @@
 import asyncio
+import copy
+import weakref
 import json
 from collections import defaultdict
 from functools import partial
@@ -7,7 +9,8 @@ from pathlib import Path
 import torch
 
 from genlm.backend.cache import OutputCache
-from genlm.backend.llm.base import AsyncLM, UNKNOWN_ADAPTER, batch_abandoned
+from genlm.backend.batching import batch_abandoned, join_batch
+from genlm.backend.llm.base import AsyncLM, UNKNOWN_ADAPTER
 
 try:
     import mlx.core as mx
@@ -55,43 +58,60 @@ else:
         return wired_limit(model, [mx.default_stream(mx.default_device())])
 
     def _to_torch(a):
-        """MLX array as a torch tensor over the same buffer.
-
-        bfloat16 is narrowed to float16 first: callers hand these to numpy, which has
-        no bfloat16.
-        """
-        if a.dtype == mx.bfloat16:
-            a = a.astype(mx.float16)
+        """MLX array as a torch tensor over the same buffer."""
         return torch.from_dlpack(a)
 
-    class _SlotPool:
-        """The model's live KV rows: row ``i`` holds exactly the tokens in ``seqs[i]``.
+    class _Row:
+        """A live KV row: its tokens, and the chunk and position holding its cache."""
 
-        Rows are extended, gathered, or replaced wholesale, never rebuilt from stored
-        pieces. In a gather, a repeated source forks that row and an omitted one is
-        dropped.
+        __slots__ = ("tokens", "chunk", "i")
+
+        def __init__(self, tokens, chunk, i):
+            self.tokens = tokens
+            self.chunk = chunk
+            self.i = i
+
+    class _Chunk:
+        """One KV cache over a batch of rows; ``rows[i]`` is ``None`` once row ``i``
+        has moved to a newer chunk."""
+
+        __slots__ = ("cache", "rows", "used")
+
+        def __init__(self, cache, used):
+            self.cache = cache
+            self.rows = []
+            self.used = used
+
+        @property
+        def live(self):
+            return [r for r in self.rows if r is not None]
+
+    class _SlotPool:
+        """The model's live KV rows, held in chunks.
+
+        A batch assembles the rows it names into one chunk, forking a row it names
+        more than once, and forwards it; rows it does not name stay where they are.
+        Past ``max_rows`` live rows, the least recently written chunks are dropped.
 
         Attributes:
-            seqs (list[list[int]]): Tokens held by each live row.
-            cache (list|None): Per-layer MLX caches backing the rows.
+            chunks (list[_Chunk]): Row groups, oldest first.
         """
 
-        def __init__(self, model, prefill_step_size):
+        def __init__(self, model, prefill_step_size, max_rows):
             self.model = model
             self.prefill_step_size = prefill_step_size
-            self.seqs = []
-            self.cache = None
+            self.max_rows = max_rows
+            self.chunks = []
+            self.batch = 0
 
         def reset(self):
-            self.seqs, self.cache = [], None
+            self.chunks = []
 
         def logits(self, prompts):
             """Final-position logits for ``prompts``, one row each.
 
-            Leaves the pool holding exactly ``prompts``. A batch whose rows each extend
-            a live row by the same non-empty delta continues that row's KV; anything
-            else is prefilled. A caller that already knows its own ancestry calls
-            :meth:`advance` instead.
+            A prompt extending a live row continues it; prompts with no live prefix
+            are prefilled. Continuations forward one block per delta length.
 
             Args:
                 prompts (list[list[int]]): Token ids each row must hold.
@@ -99,89 +119,145 @@ else:
             Returns:
                 (mx.array): ``[len(prompts), vocab]`` final-position logits.
             """
-            sources, shared = zip(*map(self._source, prompts))
-            deltas = [p[n:] for p, n in zip(prompts, shared)]
-            if self._continues(sources, deltas):
-                return self.advance(list(sources), deltas)
-            return self._prefill(prompts)
+            self.batch += 1
+            live = [
+                row for chunk in self.chunks for row in chunk.rows if row is not None
+            ]
+            src = [self._source(prompt, live) for prompt in prompts]
+            by_delta = defaultdict(list)  # delta length (0: prefill) -> prompt indices
+            for k, (prompt, row) in enumerate(zip(prompts, src)):
+                by_delta[0 if row is None else len(prompt) - len(row.tokens)].append(k)
+            groups = list(by_delta.items())
+            blocks = []
+            for g, (n, ks) in enumerate(groups):
+                if n == 0:
+                    blocks.append(self._prefill([prompts[k] for k in ks]))
+                else:
+                    keep = {src[k] for _, later in groups[g + 1 :] for k in later}
+                    blocks.append(
+                        self.advance(
+                            [src[k] for k in ks], [prompts[k][-n:] for k in ks], keep
+                        )
+                    )
+            self._evict()
+            if len(blocks) == 1:
+                return blocks[0]
+            out = [None] * len(prompts)
+            for (_, ks), block in zip(groups, blocks):
+                for k, row in zip(ks, block):
+                    out[k] = row
+            return mx.stack(out)
 
-        def advance(self, sources, deltas):
-            """Re-lay the rows as ``sources``, then forward one token block per row.
-
-            A repeated index forks that row; an omitted one is dropped. Re-laying needs
-            row-sliceable caches, so rows backed by a recurrent state are rebuilt by
-            prefilling what they would have held.
+        def advance(self, sources, deltas, keep=frozenset()):
+            """Forward one equal-length token block per named row.
 
             Args:
-                sources (list[int]): Live row each new row continues.
+                sources (list[_Row]): The row each new row continues.
                 deltas (list[list[int]]): Equal-length token block to append per row.
+                keep (set[_Row]): Sources a later pass still needs; they are copied,
+                    never moved.
 
             Returns:
                 (mx.array): ``[len(sources), vocab]`` final-position logits.
             """
-            if not self._relayable(sources):
-                return self._prefill(
-                    [self.seqs[s] + d for s, d in zip(sources, deltas)]
-                )
-            self._gather(sources)
-            return self._extend(deltas)
-
-        def _relayable(self, sources):
-            """Whether the rows can be re-laid as ``sources`` in place."""
-            return list(sources) == list(range(len(self.seqs))) or all(
-                hasattr(c, "filter") for c in self.cache
-            )
-
-        def _source(self, prompt):
-            """``(row, n)`` for the live row whose tokens are the longest strict prefix
-            of ``prompt``, or ``(None, 0)``."""
-            best, best_n = None, 0
-            for i, seq in enumerate(self.seqs):
-                n = len(seq)
-                if best_n < n < len(prompt) and prompt[:n] == seq:
-                    best, best_n = i, n
-            return best, best_n
-
-        def _continues(self, sources, deltas):
-            """Whether the pool can carry this batch forward instead of reprefilling.
-
-            The deltas must share one non-zero length so they forward as one block;
-            whether the rows can be re-laid is decided in :meth:`advance`.
-            """
-            if self.cache is None or None in sources:
-                return False
-            return len({len(d) for d in deltas}) == 1 and bool(deltas[0])
-
-        def _gather(self, sources):
-            """Rebuild the rows from existing ones: new row ``i`` continues ``sources[i]``."""
-            if sources == list(range(len(self.seqs))):
-                return
-            idx = mx.array(sources, mx.int32)
-            for c in self.cache:
-                c.filter(idx)
-            self.seqs = [list(self.seqs[s]) for s in sources]
-
-        def _extend(self, deltas):
-            """Forward one equal-length token block per row."""
-            logits = self.model(mx.array(deltas, mx.int32), cache=self.cache)[:, -1, :]
-            for seq, delta in zip(self.seqs, deltas):
-                seq.extend(delta)
+            chunk = self._assemble(sources, keep)
+            if chunk is None:
+                return self._prefill([r.tokens + d for r, d in zip(sources, deltas)])
+            logits = self.model(mx.array(deltas, mx.int32), cache=chunk.cache)[:, -1, :]
+            for row, delta in zip(chunk.rows, deltas):
+                row.tokens.extend(delta)
+            chunk.used = self.batch
             return logits
 
+        def _source(self, prompt, live):
+            """The row in ``live`` whose tokens are the longest strict prefix of
+            ``prompt``, or ``None``."""
+            best = None
+            for row in live:
+                n = len(row.tokens)
+                if (
+                    (best is None or len(best.tokens) < n)
+                    and n < len(prompt)
+                    and row.tokens[-1] == prompt[n - 1]
+                    and prompt[:n] == row.tokens
+                ):
+                    best = row
+            return best
+
+        def _assemble(self, sources, keep):
+            """The chunk laid out as ``sources``, ready to forward.
+
+            A batch naming one chunk's rows in place forwards that chunk as is.
+            Otherwise the named rows' caches are gathered into a new chunk: a source
+            named once moves there, one named again or in ``keep`` is forked.
+            ``None`` when the caches cannot be gathered.
+            """
+            chunk = sources[0].chunk
+            if sources == chunk.rows and not keep.intersection(sources):
+                return chunk
+            involved = list(dict.fromkeys(r.chunk for r in sources))
+            if not all(
+                hasattr(c, "filter") and hasattr(c, "extend")
+                for ch in involved
+                for c in ch.cache
+            ):
+                return None
+            laid, caches = [], None
+            for ch in involved:
+                picks = [k for k, r in enumerate(sources) if r.chunk is ch]
+                idx = mx.array([sources[k].i for k in picks], mx.int32)
+                part = [copy.copy(c) for c in ch.cache]
+                for c in part:
+                    c.filter(idx)
+                if caches is None:
+                    caches = part
+                else:
+                    for c, other in zip(caches, part):
+                        c.extend(other)
+                laid.extend(picks)
+            if laid != list(range(len(sources))):
+                order = mx.array([laid.index(k) for k in range(len(sources))], mx.int32)
+                for c in caches:
+                    c.filter(order)
+            new = _Chunk(caches, self.batch)
+            moved = set()
+            for i, row in enumerate(sources):
+                if row in keep or row in moved:
+                    new.rows.append(_Row(list(row.tokens), new, i))
+                else:
+                    row.chunk.rows[row.i] = None
+                    row.chunk, row.i = new, i
+                    new.rows.append(row)
+                    moved.add(row)
+            self.chunks = [c for c in self.chunks if c.live] + [new]
+            return new
+
         def _prefill(self, prompts):
-            """Left-padded batched prefill, replacing the pool."""
+            """Left-padded batched prefill of ``prompts`` into a new chunk."""
             width = max(map(len, prompts))
-            self.cache = _make_cache(
+            cache = _make_cache(
                 self.model, [width - len(p) for p in prompts], max_kv_size=None
             )
             x = _left_pad_prompts(prompts, max_length=width)
             while x.shape[1] > 1:
                 n = min(self.prefill_step_size, x.shape[1] - 1)
-                self.model(x[:, :n], cache=self.cache)
-                mx.eval([c.state for c in self.cache])
+                self.model(x[:, :n], cache=cache)
+                mx.eval([c.state for c in cache])
                 x = x[:, n:]
-            self.seqs = [list(p) for p in prompts]
-            return self.model(x, cache=self.cache)[:, -1, :]
+            logits = self.model(x, cache=cache)[:, -1, :]
+            chunk = _Chunk(cache, self.batch)
+            chunk.rows = [_Row(list(p), chunk, i) for i, p in enumerate(prompts)]
+            self.chunks.append(chunk)
+            return logits
+
+        def _evict(self):
+            """Drop the least recently written chunks while live rows exceed
+            ``max_rows``."""
+            total = sum(len(c.live) for c in self.chunks)
+            while total > self.max_rows and len(self.chunks) > 1:
+                oldest = min(self.chunks, key=lambda c: c.used)
+                self.chunks.remove(oldest)
+                total -= len(oldest.live)
 
     class _Adapters:
         """LoRA weight sets over one model.
@@ -264,6 +340,7 @@ else:
             tokenizer,
             timeout=0.0,
             prefill_step_size=2048,
+            max_rows=128,
             cache_size=0,
             cache_opts=None,
         ):
@@ -275,6 +352,8 @@ else:
                 timeout (float, optional): Cooperative linger in seconds spent once
                     per batch window, letting late concurrent callers join. Defaults to 0.
                 prefill_step_size (int, optional): Tokens per prefill chunk.
+                max_rows (int, optional): Live KV rows kept per adapter; the least
+                    recently used are evicted past it. Defaults to 128.
                 cache_size (int, optional): Maximum size of the output cache. If 0,
                     caching is disabled. Defaults to 0.
                 cache_opts (dict, optional): Additional options to pass to the
@@ -282,12 +361,16 @@ else:
                     Defaults to None (no extra options).
             """
             self.mlx_lm_model = mlx_lm_model
+            probe = mx.zeros((1,))
+            mx.eval(probe)
+            self.device = _to_torch(probe).device
+            self._batches = weakref.WeakKeyDictionary()  # the batch window's store
             self.timeout = timeout
             self.prefill_step_size = prefill_step_size
             self.adapters = _Adapters(mlx_lm_model)
             # KV rows never cross adapters, so each adapter keeps its own pool.
             self.slots = defaultdict(
-                partial(_SlotPool, mlx_lm_model, prefill_step_size)
+                partial(_SlotPool, mlx_lm_model, prefill_step_size, max_rows)
             )
             self.cache = (
                 OutputCache(maxsize=cache_size, **(cache_opts or {}))
@@ -346,10 +429,9 @@ else:
             """Next-token log-probs under one adapter, ``[len(prompts), vocab]``."""
             with _wired(self.mlx_lm_model):
                 self.adapters.select(lora_name)
-                logits = self.slots[lora_name].logits(prompts).astype(mx.float32)
-                logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
-                mx.eval(logprobs)
-            return _to_torch(logprobs)
+                logits = self.slots[lora_name].logits(prompts)
+                mx.eval(logits)
+            return self._normalize(_to_torch(logits))
 
         def _resolve(self, keys):
             """``{key: logprobs}`` for distinct ``(context, lora_name)`` keys.
@@ -416,7 +498,9 @@ else:
             if self.cache is not None and key in self.cache:
                 return self.cache[key]
             future = asyncio.get_running_loop().create_future()
-            cohort = await self._join_batch([(key, future)], linger=self.timeout)
+            cohort = await join_batch(
+                self._batches, [(key, future)], linger=self.timeout
+            )
             if cohort is not None:
                 self._batch_evaluate(cohort)
             return await future

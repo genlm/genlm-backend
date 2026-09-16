@@ -1,6 +1,6 @@
 from genlm.backend.llm.vllm import AsyncVirtualLM
 from genlm.backend.llm.hf import AsyncTransformer
-from genlm.backend.llm.base import AsyncLM, MockAsyncLM
+from genlm.backend.llm.base import AsyncLM, MockAsyncLM, temper
 from genlm.backend.llm.mlx import AsyncMlxLM
 from genlm.backend.llm.sgl import AsyncSGLTransformer
 
@@ -51,4 +51,5 @@ __all__ = [
     "AsyncMlxLM",
     "AsyncSGLTransformer",
     "MockAsyncLM",
+    "temper",
 ]

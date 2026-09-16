@@ -19,12 +19,14 @@ import os
 import sys
 import queue
 import asyncio
+import weakref
 import warnings
 import threading
 import torch
 import logging
 from collections import Counter
 
+from genlm.backend.batching import join_batch
 from genlm.backend.llm.base import AsyncLM, UNKNOWN_ADAPTER
 
 
@@ -98,7 +100,9 @@ else:
 
         def __init__(self, base, deliver):
             self._base = base
-            self._deliver = deliver  # ({req_id: row}) -> None, one call per frame
+            self._deliver = (
+                deliver  # (logits block, req_ids) -> None, one call per frame
+            )
 
         def __getattr__(self, name):
             return getattr(self._base, name)
@@ -118,12 +122,10 @@ else:
                         # produce no logits and are skipped).
                         rows_at.append((req_ids[i], hi - 1))
             if rows_at:
-                # One gather + one normalize for the whole frame. The copy also
-                # un-aliases vLLM's live logits buffer, which the next forward
-                # overwrites; delivered rows are views of this block.
+                # One gather for the whole frame. The copy also un-aliases vLLM's
+                # live logits buffer, which the next forward overwrites.
                 idx = torch.tensor([pos for _, pos in rows_at], device=logits.device)
-                block = torch.log_softmax(logits.index_select(0, idx).float(), dim=-1)
-                self._deliver({rid: block[j] for j, (rid, _) in enumerate(rows_at)})
+                self._deliver(logits.index_select(0, idx), [rid for rid, _ in rows_at])
             if len(ours) == n:
                 return SamplerOutput(
                     sampled_token_ids=logits.new_zeros((n, 1), dtype=torch.int64),
@@ -269,6 +271,8 @@ else:
             """
             self.llm_engine = llm_engine
             self.tokenizer = llm_engine.get_tokenizer()
+            self.device = torch.device("cuda")
+            self._batches = weakref.WeakKeyDictionary()  # the batch window's store
             self._params = SamplingParams(
                 n=1, max_tokens=1 << 20, ignore_eos=True, detokenize=False
             )
@@ -463,11 +467,12 @@ else:
 
             loop = asyncio.get_running_loop()
             futures = [loop.create_future() for _ in token_ids_list]
-            cohort = await self._join_batch(
+            cohort = await join_batch(
+                self._batches,
                 [
                     ((tuple(token_ids), lora_name), loop, future)
                     for token_ids, future in zip(token_ids_list, futures)
-                ]
+                ],
             )
             if cohort is not None:
                 asks = self._bind_adapters(cohort)
@@ -642,12 +647,13 @@ else:
 
         # -- delivery -----------------------------------------------------------
 
-        def _deliver(self, rows):
+        def _deliver(self, block, req_ids):
             """Capture-shim callback (crank thread, inside the engine step):
-            resolve the frame's owed futures with one callback per event loop,
-            so a whole population becomes runnable in the same loop pass."""
+            normalize the frame's block once and resolve its owed futures with one
+            callback per event loop, so a whole population becomes runnable in the
+            same loop pass. Delivered rows are views of the block."""
             by_loop = {}
-            for req_id, row in rows.items():
+            for req_id, row in zip(req_ids, self._normalize(block)):
                 waiters = self._pending.pop(req_id, None)
                 if not waiters:
                     continue
