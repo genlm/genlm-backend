@@ -4,14 +4,16 @@ Exercises the mechanism end to end, no genlm-control involved:
 population decode via resident appends, ragged cadences (idle residents skip
 frames), one-shot scores interleaved mid-run, placeholder discipline under
 async scheduling, a window wider than the residency cap, re-asks of
-already-served contexts, release, and row consistency between the resident
-decode path and a fresh prefill at the same context.
+already-served contexts, release, row consistency between the resident decode
+path and a fresh prefill at the same context, and collection of the model
+itself once its last reference goes.
 
     python tests/probe_vllm_server.py [model_name]
 """
 
 import asyncio
 import sys
+import weakref
 
 import torch
 
@@ -176,13 +178,22 @@ async def main():
     live = [r for r in sched.requests if r.startswith("resident-")]
     check("release.engine", not live, f"live={live}")
 
-    print("ALL PROBES PASSED", flush=True)
-    lm.cleanup()
+    # Handles for the release check, which needs this frame -- and the only
+    # strong reference to the model -- gone first.
+    return weakref.ref(lm), lm._crank
 
 
 async def _guarded():
-    await asyncio.wait_for(main(), timeout=600)
+    return await asyncio.wait_for(main(), timeout=600)
 
 
 if __name__ == "__main__":
-    asyncio.run(_guarded())
+    ref, crank = asyncio.run(_guarded())
+    # -- 9. the model releases when its last reference goes --------------------
+    # Deliberately no cleanup() call: dropping the reference has to be enough.
+    # The crank is a live thread and therefore a GC root, so if it held its
+    # instance the engine would stay resident for the life of the process.
+    check("release.collected", ref() is None)
+    crank.join(timeout=30)
+    check("release.crank_stopped", not crank.is_alive())
+    print("ALL PROBES PASSED", flush=True)

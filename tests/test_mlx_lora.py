@@ -18,12 +18,13 @@ NUM_LAYERS = 2
 LORA_PARAMETERS = {"rank": 4, "scale": 20.0, "dropout": 0.0}
 
 
-def _write_adapter(directory, seed):
+def _write_adapter(directory, seed, lora_parameters=None):
     """An adapter with the layout `MODEL_NAME` wraps to, and a non-zero `lora_b` so it
     actually moves the logits."""
+    lora_parameters = lora_parameters or LORA_PARAMETERS
     mx.random.seed(seed)
     model, _ = mlx_lm.load(MODEL_NAME)
-    linear_to_lora_layers(model, NUM_LAYERS, LORA_PARAMETERS)
+    linear_to_lora_layers(model, NUM_LAYERS, lora_parameters)
     weights = {
         k: (mx.random.normal(v.shape) * 0.02).astype(v.dtype)
         for k, v in tree_flatten(model.trainable_parameters())
@@ -35,7 +36,7 @@ def _write_adapter(directory, seed):
             {
                 "fine_tune_type": "lora",
                 "num_layers": NUM_LAYERS,
-                "lora_parameters": LORA_PARAMETERS,
+                "lora_parameters": lora_parameters,
             }
         )
     )
@@ -144,3 +145,15 @@ def test_incompatible_layout_is_rejected(llm, tmp_path, adapters):
     llm.add_new_lora(adapters["a"], "a")
     with pytest.raises(ValueError, match="layout"):
         llm.add_new_lora(str(other), "wide")
+
+
+def test_dropout_adapter_is_deterministic(llm, token_ids, tmp_path):
+    """Wrapping builds fresh modules, so the model must be put back in eval mode:
+    otherwise an adapter trained with dropout randomizes every forward."""
+    directory = tmp_path / "wet"
+    directory.mkdir()
+    path = _write_adapter(directory, 3, {**LORA_PARAMETERS, "dropout": 0.5})
+    llm.add_new_lora(path, "wet")
+    first = llm.next_token_logprobs_sync(token_ids, lora_name="wet").cpu().clone()
+    second = llm.next_token_logprobs_sync(token_ids, lora_name="wet").cpu()
+    assert torch.equal(first, second)

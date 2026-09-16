@@ -20,23 +20,15 @@ class Query:
         self.past = past
         self.lora_name = lora_name
 
-        if self.past is not None:
-            self.past_len = past[
-                0
-            ][
-                0
-            ].shape[
-                2
-            ]  # layers, key or value, batch size, num heads, num tokens, head repr length
-        else:
-            self.past_len = 0
+        self.past_len = 0 if past is None else past.get_seq_length()
 
     @torch.no_grad()
-    def past_padded(self, layer, j, to_length, dtype, device, past_shape):
+    def past_padded(self, layer, side, to_length, dtype, device, past_shape):
+        """``side`` is ``"keys"`` or ``"values"``: a cache layer's two tensors."""
         if self.past is not None:
             return torch.cat(
                 (
-                    self.past[layer][j],
+                    getattr(self.past.layers[layer], side),
                     torch.zeros(
                         1,
                         past_shape[1],
@@ -257,7 +249,9 @@ class AsyncTransformer(AsyncLM):
         # Use one representative query from each group
         unique_queries = [group[0] for group in query_groups.values()]
 
-        past_example = next((q.past for q in unique_queries if q.past), False)
+        past_example = next(
+            (q.past for q in unique_queries if q.past is not None), None
+        )
         max_past_length = max(q.past_len for q in unique_queries)
         max_query_length = max(len(q.prompt) for q in unique_queries)
 
@@ -282,7 +276,8 @@ class AsyncTransformer(AsyncLM):
         posn_ids = torch.tensor(
             [q.position_ids(max_past_length, max_query_length) for q in unique_queries]
         ).to(self.device)
-        if past_example:
+        if past_example is not None:
+            example = past_example.layers[0].keys
             pasts = [
                 [
                     torch.cat(
@@ -290,18 +285,18 @@ class AsyncTransformer(AsyncLM):
                             *(
                                 q.past_padded(
                                     layer,
-                                    j,
+                                    side,
                                     max_past_length,
-                                    past_example[0][0].dtype,
+                                    example.dtype,
                                     self.device,
-                                    past_example[0][0].shape,
+                                    example.shape,
                                 )
                                 for q in unique_queries
                             ),
                         ),
                         dim=0,
                     )
-                    for j in range(2)
+                    for side in ("keys", "values")
                 ]
                 for layer in range(len(past_example))
             ]
@@ -317,7 +312,7 @@ class AsyncTransformer(AsyncLM):
             attention_mask=attn_masks,
             position_ids=posn_ids,
             past_key_values=pasts,
-            use_cache=pasts is not None,
+            use_cache=True,
         )
 
         assert len(results.logits) == len(unique_queries)
@@ -336,7 +331,7 @@ class AsyncTransformer(AsyncLM):
         Args:
             query (list[int]): Token IDs representing the query prompt
             future (asyncio.Future): Future to store the result in
-            past (list[tuple[torch.Tensor]]|None): Past key/value states from previous evaluation,
+            past (DynamicCache|None): Past key/value states from previous evaluation,
                 or None if this is a new query
             lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
         """
@@ -363,7 +358,7 @@ class AsyncTransformer(AsyncLM):
             tuple:
                 - CacheNode: The deepest node in the cache tree that matches the token sequence
                 - int: Number of tokens matched from the start of token_ids
-                - list[tuple[torch.Tensor]]|None: Past key/value states from the deepest cached node,
+                - DynamicCache|None: Past key/value states from the deepest cached node,
                     or None if no cached states were found
                 - int: Base index indicating where the past states start in token_ids
         """

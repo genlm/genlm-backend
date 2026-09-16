@@ -71,6 +71,11 @@ def test_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list):
 # @settings(deadline=None)
 # @given(text_list=st.lists(st.text(min_size=1, max_size=1000), min_size=1, max_size=5))
 def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list):
+    """Looser than the single-row bound because batching, not this path, moves the
+    rows: a fp16 forward over several prompts reduces in a different order than one
+    over a single prompt, and each implementation drifts from its own single-row
+    answer by ~6e-3 (measured on a100l/SmolLM-135M). Correctness against the
+    reference is pinned at 1e-3 by the single-row tests, which measure 1.8e-6."""
     haves = (
         asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list)).cpu().numpy()
     )

@@ -124,6 +124,22 @@ This submodule includes two key classes:
 
 See the [LLM Code Reference](reference/genlm/backend/llm/__init__/) for detailed API documentation.
 
+### Releasing a vLLM model
+
+`AsyncVirtualLM` runs its engine on a background thread, which does not own the model:
+dropping the last reference stops the thread and frees the GPU. To release at a point
+you choose instead, call `cleanup()` or use the model as a context manager.
+
+```python
+from genlm.backend import AsyncVirtualLM
+
+with AsyncVirtualLM.from_name("meta-llama/Llama-3.2-1B") as llm:
+    logps = await llm.next_token_logprobs(token_ids)
+```
+
+`async with` works the same way. The other backends hold no engine thread and need no
+release step.
+
 ### Vocabulary Decoding
 
 The [`genlm.backend.tokenization`](reference/genlm/backend/tokenization/__init__/) module converts Hugging Face tokenizer vocabularies into `Token` objects and string representations. Each `Token` carries both a `token_id` and a `byte_string`, and subclasses `bytes` for backwards compatibility.

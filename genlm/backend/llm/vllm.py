@@ -20,6 +20,7 @@ import sys
 import queue
 import asyncio
 import warnings
+import weakref
 import threading
 import torch
 import logging
@@ -84,7 +85,41 @@ else:
     _STOP = object()  # crank-shutdown sentinel
 
     def _drop_rows(rows):  # pragma: no cover
-        """Row sink for a cleaned-up model: the instance that owned them is gone."""
+        """Row sink for a cleaned-up model: it owes nothing, so it delivers nothing."""
+
+    def _weak_deliver(inst):  # pragma: no cover
+        """Route captured rows to ``inst`` without keeping it alive.
+
+        The capture shim lives inside the engine the instance owns, so a strong
+        callback would close that path into a cycle and only ``gc`` could ever
+        reclaim the engine.
+        """
+        ref = weakref.ref(inst)
+
+        def deliver(rows):
+            target = ref()
+            if target is not None:
+                target._deliver(rows)
+
+        return deliver
+
+    def _turn_crank(work, ref):  # pragma: no cover
+        """Run the crank without owning its instance.
+
+        A live thread is a GC root, so a strong reference here would pin the
+        engine for the life of the process and ``__del__`` -- the only thing
+        that stops this thread -- could never run. The instance is resolved per
+        work item and released before the next wait.
+        """
+        while True:
+            item = work.get()
+            inst = ref()
+            if inst is None:
+                return
+            stop = inst._crank_once(item)
+            del inst
+            if stop:
+                return
 
     class _CaptureSampler:  # pragma: no cover
         """Shim occupying the model runner's sampler slot.
@@ -345,8 +380,9 @@ else:
                 )
 
             inst = cls(llm, **kwargs)
-            box["deliver"] = inst._deliver
-            # The shim reaches `inst` through this box; cleanup cuts it there.
+            box["deliver"] = _weak_deliver(inst)
+            # Cleanup swaps the box's callback for the sink, so rows captured
+            # after a teardown are dropped rather than delivered.
             inst._capture_box = box
 
             # The crank turns the engine core directly: our requests emit no
@@ -365,7 +401,10 @@ else:
                 8, llm.llm_engine.vllm_config.scheduler_config.max_num_seqs - 8
             )
             inst._crank = threading.Thread(
-                target=inst._crank_loop, name="crank", daemon=True
+                target=_turn_crank,
+                args=(inst._work, weakref.ref(inst)),
+                name="crank",
+                daemon=True,
             )
             inst._crank.start()
             return inst
@@ -505,52 +544,50 @@ else:
 
         # -- the crank ----------------------------------------------------------
 
-        def _crank_loop(self):
-            """Single-flight by construction: the only thread that touches the
-            engine. Handle a work item, step until no row is owed (handling
-            items that arrive mid-crank between steps), sleep on the queue.
-            On any failure every owed future receives the exception and the
-            thread survives for the next item."""
-            while True:
-                item = self._work.get()
-                stopping = item is _STOP
-                try:
-                    if not stopping:
-                        self._handle(item)
-                    stalled = 0
-                    steps = 0
-                    while not stopping and self._pending:
-                        served = self._served
-                        self._core.get_output()
-                        steps += 1
-                        while True:
-                            try:
-                                nxt = self._work.get_nowait()
-                            except queue.Empty:
-                                break
-                            if nxt is _STOP:
-                                stopping = True
-                                break
-                            self._handle(nxt)
-                            stalled = 0
-                        if stopping:
+        def _crank_once(self, item):
+            """(crank) Single-flight by construction: this is the only thread
+            that touches the engine. Handle one work item, then step until no
+            row is owed, taking items that arrive between steps. On any failure
+            every owed future receives the exception and the crank survives for
+            the next item. Answers whether the crank should stop."""
+            stopping = item is _STOP
+            try:
+                if not stopping:
+                    self._handle(item)
+                stalled = 0
+                steps = 0
+                while not stopping and self._pending:
+                    served = self._served
+                    self._core.get_output()
+                    steps += 1
+                    while True:
+                        try:
+                            nxt = self._work.get_nowait()
+                        except queue.Empty:
                             break
-                        if self._served == served:
-                            stalled += 1
-                            if stalled > 4096:
-                                raise RuntimeError(
-                                    "engine made no progress on owed rows: "
-                                    f"{list(self._pending)}"
-                                )
-                        else:
-                            stalled = 0
-                    if steps:
-                        self.stats[("steps", steps)] += 1
-                except BaseException as exc:
-                    self._fail_owed(exc)
-                if stopping:
-                    self._fail_owed(RuntimeError("backend was shut down"))
-                    return
+                        if nxt is _STOP:
+                            stopping = True
+                            break
+                        self._handle(nxt)
+                        stalled = 0
+                    if stopping:
+                        break
+                    if self._served == served:
+                        stalled += 1
+                        if stalled > 4096:
+                            raise RuntimeError(
+                                "engine made no progress on owed rows: "
+                                f"{list(self._pending)}"
+                            )
+                    else:
+                        stalled = 0
+                if steps:
+                    self.stats[("steps", steps)] += 1
+            except BaseException as exc:
+                self._fail_owed(exc)
+            if stopping:
+                self._fail_owed(RuntimeError("backend was shut down"))
+            return stopping
 
         def _handle(self, item):
             """(crank) Execute one work item. A barrier item resolves its own
@@ -809,7 +846,11 @@ else:
             )
 
         def cleanup(self):
-            """Explicitly clean up GPU resources. Call this when done with the model."""
+            """Release the engine and its GPU memory now.
+
+            Dropping the last reference to the model does the same thing; this
+            only fixes when it happens. Also runs on ``with``/``async with`` exit.
+            """
             self._cleanup_engine()
 
         def __enter__(self):
@@ -835,9 +876,8 @@ else:
             state.
 
             ``_crank`` goes to ``None`` so a post-cleanup ask raises rather than
-            queueing work nothing will turn. The capture shim holds this instance
-            through the box's ``deliver``; clearing it is what leaves the engine
-            graph collectable.
+            queueing work nothing will turn, and the capture box's callback becomes
+            the sink so a late frame delivers nowhere.
 
             Runs from both :meth:`cleanup` and :meth:`__del__`, so it must be
             idempotent and survive interpreter shutdown: ``ImportError`` and
@@ -864,6 +904,8 @@ else:
                 if released:
                     self._sched = self._core = self._block_hasher = None
                     self.llm_engine = None
+                # vLLM's own internals are cyclic; a collection here is what
+                # makes the freed memory actually come back.
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()

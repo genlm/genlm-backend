@@ -216,6 +216,9 @@ else:
             layout = (config["num_layers"], config["lora_parameters"])
             if self.layout is None:
                 linear_to_lora_layers(self.model, *layout)
+                # Wrapping builds fresh modules, which default to training mode and
+                # would apply the adapter's dropout to every forward.
+                self.model.eval()
                 self.layout = layout
                 self.sets[None] = self._installed()
             elif layout != self.layout:
