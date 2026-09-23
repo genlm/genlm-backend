@@ -1,4 +1,6 @@
 import pytest
+from arsenal.maths import compare
+import asyncio
 import torch
 import sys
 
@@ -18,6 +20,29 @@ except ImportError:
 import numpy as np
 from genlm.backend.tokenization import decode_vocab
 from contextlib import contextmanager
+
+
+def logprobs(llm, token_ids, entry="async", **kw):
+    """A `next_token_logprobs` row through one of the three public entry points."""
+    if entry == "uncached":
+        return llm.next_token_logprobs_uncached(token_ids, **kw)
+    if entry == "sync":
+        return llm.next_token_logprobs_sync(token_ids, **kw)
+    return asyncio.run(llm.next_token_logprobs(token_ids, **kw))
+
+
+def batch_logprobs(llm, token_ids_list, entry="async", **kw):
+    """A `batch_next_token_logprobs` block through the requested entry point."""
+    if entry == "sync":
+        return llm.batch_next_token_logprobs_sync(token_ids_list, **kw)
+    return asyncio.run(llm.batch_next_token_logprobs(token_ids_list, **kw))
+
+
+def assert_rows_close(haves, wants, labels, rel):
+    """Each row agrees with its reference to within `rel` relative error."""
+    for have, want, label in zip(haves, wants, labels):
+        assert compare(have, want).max_rel_err < rel, label
+
 
 cuda_only = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="test requires CUDA"

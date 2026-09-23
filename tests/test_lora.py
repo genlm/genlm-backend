@@ -1,10 +1,18 @@
 import torch
 import pytest
 import asyncio
-from conftest import v1_capable, ReferenceVirtualLM
+from conftest import (
+    v1_capable,
+    ReferenceVirtualLM,
+    logprobs,
+    batch_logprobs,
+    assert_rows_close,
+)
 from arsenal.maths import compare
 from genlm.backend.llm import load_model_by_name
 import numpy as np
+
+LORA_NAME = "lora_1"
 
 
 @pytest.fixture(scope="module")
@@ -51,7 +59,7 @@ def transformer_llm(model_name, lora_path):
     transformer_llm_base = load_model_by_name(
         model_name, backend="hf", llm_opts={"hf_opts": {"torch_dtype": torch.float16}}
     )
-    transformer_llm_base.add_new_lora(lora_path, "lora_1")
+    transformer_llm_base.add_new_lora(lora_path, LORA_NAME)
     return transformer_llm_base
 
 
@@ -68,134 +76,39 @@ def token_ids_list(async_llm):
     return token_ids_list
 
 
-@v1_capable
-def test_async_llm_only(async_llm):
-    assert async_llm is not None
-
-
-@v1_capable
-def test_reference_llm_only(reference_llm):
-    assert reference_llm is not None
-
-
 def test_unknown_lora_error(transformer_llm):
     with pytest.raises(ValueError):
         transformer_llm.next_token_logprobs_uncached([0], lora_name="lora_2")
 
 
 @v1_capable
-def test_next_token_logprobs(async_llm, reference_llm, token_ids_list, lora_path):
-    async_llm.add_new_lora(lora_path)
-    reference_llm.set_lora(lora_path)
-    for token_ids in token_ids_list:
-        logits_async = (
-            asyncio.run(async_llm.next_token_logprobs(token_ids, lora_name="lora_1"))
-            .float()
-            .cpu()
-            .numpy()
-        )
-
-        logits_ref = asyncio.run(reference_llm.next_token_logprobs(token_ids))
-
-        async_vocab = logits_async.shape[0]
-        ref_vocab = logits_ref.shape[0]
-
-        assert async_vocab == ref_vocab, [
-            "Unexpected vocab mismatch.",
-            async_vocab,
-            ref_vocab,
-        ]
-        trimmed_async = logits_async[:ref_vocab]
-        assert trimmed_async.shape == logits_ref.shape
-
-        assert compare(trimmed_async, logits_ref).max_rel_err < 1e-2, token_ids
-    reference_llm.clear_lora()
-
-
-@v1_capable
-def test_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list, lora_path):
-    async_llm.add_new_lora(lora_path)
-    reference_llm.set_lora(lora_path)
-    for token_ids in token_ids_list:
-        logits_async = (
-            async_llm.next_token_logprobs_sync(token_ids, lora_name="lora_1")
-            .float()
-            .cpu()
-            .numpy()
-        )
-        logits_ref = asyncio.run(reference_llm.next_token_logprobs(token_ids))
-        async_vocab = logits_async.shape[0]
-        ref_vocab = logits_ref.shape[0]
-
-        assert async_vocab == ref_vocab, [
-            "Unexpected vocab mismatch.",
-            async_vocab,
-            ref_vocab,
-        ]
-        trimmed_async = logits_async[:ref_vocab]
-        assert trimmed_async.shape == logits_ref.shape
-
-        assert compare(trimmed_async, logits_ref).max_rel_err < 1e-2, token_ids
-    reference_llm.clear_lora()
-
-
-@v1_capable
-def test_batch_next_token_logprobs_sync(
-    async_llm, reference_llm, token_ids_list, lora_path
+@pytest.mark.parametrize("entry", ["async", "sync"])
+def test_next_token_logprobs(
+    async_llm, reference_llm, token_ids_list, lora_path, entry
 ):
     async_llm.add_new_lora(lora_path)
     reference_llm.set_lora(lora_path)
-    logits_async = (
-        async_llm.batch_next_token_logprobs_sync(token_ids_list, lora_name="lora_1")
-        .float()
-        .cpu()
-        .numpy()
-    )
-
-    logits_ref = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
-
-    async_vocab = logits_async.shape[1]
-    ref_vocab = logits_ref.shape[1]
-
-    assert async_vocab == ref_vocab, [
-        "Unexpected vocab mismatch.",
-        async_vocab,
-        ref_vocab,
-    ]
-    trimmed_async = logits_async[:, :ref_vocab]
-    assert trimmed_async.shape == logits_ref.shape
-    for i, (logit_async, logit_ref) in enumerate(zip(trimmed_async, logits_ref)):
-        assert compare(logit_async, logit_ref).max_rel_err < 1e-2, token_ids_list[i]
+    for token_ids in token_ids_list:
+        have = logprobs(async_llm, token_ids, entry, lora_name=LORA_NAME)
+        have = have.float().cpu().numpy()
+        want = asyncio.run(reference_llm.next_token_logprobs(token_ids))
+        assert have.shape == want.shape, ["Unexpected vocab mismatch.", have, want]
+        assert compare(have, want).max_rel_err < 1e-2, token_ids
     reference_llm.clear_lora()
 
 
 @v1_capable
-def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list, lora_path):
+@pytest.mark.parametrize("entry", ["async", "sync"])
+def test_batch_next_token_logprobs(
+    async_llm, reference_llm, token_ids_list, lora_path, entry
+):
     async_llm.add_new_lora(lora_path)
     reference_llm.set_lora(lora_path)
-    logits_async = (
-        asyncio.run(
-            async_llm.batch_next_token_logprobs(token_ids_list, lora_name="lora_1")
-        )
-        .float()
-        .cpu()
-        .numpy()
-    )
-
-    logits_ref = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
-
-    async_vocab = logits_async.shape[1]
-    ref_vocab = logits_ref.shape[1]
-
-    assert async_vocab == ref_vocab, [
-        "Unexpected vocab mismatch.",
-        async_vocab,
-        ref_vocab,
-    ]
-    trimmed_async = logits_async[:, :ref_vocab]
-    assert trimmed_async.shape == logits_ref.shape
-    for i, (logit_async, logit_ref) in enumerate(zip(trimmed_async, logits_ref)):
-        assert compare(logit_async, logit_ref).max_rel_err < 1e-2, token_ids_list[i]
+    have = batch_logprobs(async_llm, token_ids_list, entry, lora_name=LORA_NAME)
+    have = have.float().cpu().numpy()
+    want = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
+    assert have.shape == want.shape, ["Unexpected vocab mismatch.", have, want]
+    assert_rows_close(have, want, token_ids_list, rel=1e-2)
     reference_llm.clear_lora()
 
 
@@ -205,22 +118,17 @@ def test_swapping_lora_requests(token_ids_list, async_llm, lora_path):
     each adapter in its own contiguous block."""
     async_llm.add_new_lora(lora_path)
 
-    def logprobs(token_ids, lora_name):
-        return (
-            asyncio.run(async_llm.next_token_logprobs(token_ids, lora_name=lora_name))
-            .float()
-            .cpu()
-            .numpy()
-        )
+    def row(token_ids, lora_name):
+        return logprobs(async_llm, token_ids, lora_name=lora_name).float().cpu().numpy()
 
-    logits_noswapped_nolora = [logprobs(ids, None) for ids in token_ids_list]
-    logits_noswapped_lora = [logprobs(ids, "lora_1") for ids in token_ids_list]
+    logits_noswapped_nolora = [row(ids, None) for ids in token_ids_list]
+    logits_noswapped_lora = [row(ids, LORA_NAME) for ids in token_ids_list]
 
     logits_swapped_nolora = []
     logits_swapped_lora = []
     for token_ids in token_ids_list:
-        logits_swapped_nolora.append(logprobs(token_ids, None))
-        logits_swapped_lora.append(logprobs(token_ids, "lora_1"))
+        logits_swapped_nolora.append(row(token_ids, None))
+        logits_swapped_lora.append(row(token_ids, LORA_NAME))
 
     for i, token_ids in enumerate(token_ids_list):
         assert (
@@ -273,12 +181,12 @@ def test_next_token_logprobs_agreement(
     async_llm.add_new_lora(lora_path)
     for token_ids in token_ids_list:
         have = (
-            transformer_llm.next_token_logprobs_uncached(token_ids, lora_name="lora_1")
+            transformer_llm.next_token_logprobs_uncached(token_ids, lora_name=LORA_NAME)
             .cpu()
             .numpy()
         )
         want = (
-            asyncio.run(async_llm.next_token_logprobs(token_ids, lora_name="lora_1"))
+            asyncio.run(async_llm.next_token_logprobs(token_ids, lora_name=LORA_NAME))
             .cpu()
             .numpy()
         )
@@ -303,7 +211,7 @@ def test_batch_next_token_logprobs_agreement(
     haves = (
         asyncio.run(
             transformer_llm.batch_next_token_logprobs(
-                token_ids_list, lora_name="lora_1"
+                token_ids_list, lora_name=LORA_NAME
             )
         )
         .cpu()
@@ -311,7 +219,7 @@ def test_batch_next_token_logprobs_agreement(
     )
     wants = (
         asyncio.run(
-            async_llm.batch_next_token_logprobs(token_ids_list, lora_name="lora_1")
+            async_llm.batch_next_token_logprobs(token_ids_list, lora_name=LORA_NAME)
         )
         .cpu()
         .numpy()

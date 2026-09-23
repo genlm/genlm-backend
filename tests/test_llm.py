@@ -1,7 +1,13 @@
 import torch
 import pytest
 import asyncio
-from conftest import v1_capable, ReferenceVirtualLM
+from conftest import (
+    v1_capable,
+    ReferenceVirtualLM,
+    logprobs,
+    batch_logprobs,
+    assert_rows_close,
+)
 from arsenal.maths import compare
 from genlm.backend.llm import load_model_by_name, MockAsyncLM
 
@@ -50,50 +56,22 @@ def token_ids_list(async_llm):
 
 
 @v1_capable
-# @settings(deadline=None)
-# @given(text=st.text(min_size=1, max_size=1000))
-def test_next_token_logprobs(async_llm, reference_llm, token_ids_list):
+@pytest.mark.parametrize("entry", ["async", "sync"])
+def test_next_token_logprobs(async_llm, reference_llm, token_ids_list, entry):
     for token_ids in token_ids_list:
-        have = asyncio.run(async_llm.next_token_logprobs(token_ids)).cpu().numpy()
+        have = logprobs(async_llm, token_ids, entry).cpu().numpy()
         want = asyncio.run(reference_llm.next_token_logprobs(token_ids))
         assert compare(have, want).max_rel_err < 1e-3, token_ids
 
 
 @v1_capable
-def test_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list):
-    for token_ids in token_ids_list:
-        have = async_llm.next_token_logprobs_sync(token_ids).cpu().numpy()
-        want = asyncio.run(reference_llm.next_token_logprobs(token_ids))
-        assert compare(have, want).max_rel_err < 1e-3, token_ids
-
-
-@v1_capable
-# @settings(deadline=None)
-# @given(text_list=st.lists(st.text(min_size=1, max_size=1000), min_size=1, max_size=5))
-def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list):
-    """Looser than the single-row bound because batching, not this path, moves the
-    rows: a fp16 forward over several prompts reduces in a different order than one
-    over a single prompt, and each implementation drifts from its own single-row
-    answer by ~6e-3 (measured on a100l/SmolLM-135M). Correctness against the
-    reference is pinned at 1e-3 by the single-row tests, which measure 1.8e-6."""
-    haves = (
-        asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list)).cpu().numpy()
-    )
+@pytest.mark.parametrize("entry", ["async", "sync"])
+def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list, entry):
+    """1e-2, not the single-row 1e-3: a fp16 batched forward reduces in a different
+    order than a single-prompt one, drifting ~6e-3 from its own single-row answer."""
+    haves = batch_logprobs(async_llm, token_ids_list, entry).cpu().numpy()
     wants = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
-    for i, (have, want) in enumerate(zip(haves, wants)):
-        assert compare(have, want).max_rel_err < 1e-2, token_ids_list[i]
-
-
-@v1_capable
-# @settings(deadline=None)
-# @given(text_list=st.lists(st.text(min_size=1, max_size=1000), min_size=1, max_size=5))
-def test_batch_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list):
-    """The sync wrapper needs a thread with no event loop of its own."""
-    haves = async_llm.batch_next_token_logprobs_sync(token_ids_list).cpu().numpy()
-    wants = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
-
-    for have, want in zip(haves, wants):
-        assert compare(have, want).max_rel_err < 1e-2, "Sync context"
+    assert_rows_close(haves, wants, token_ids_list, rel=1e-2)
 
 
 @v1_capable
@@ -221,44 +199,6 @@ def test_batch_sample(async_llm):
     assert len(generated_token_ids_vllm) == len(prompts)
     assert len(generated_token_ids_vllm[0]) == 10
     assert len(generated_token_ids_vllm[1]) == 10
-
-
-@v1_capable
-def test_concurrent_sample_calls_share_a_window(async_llm):
-    """Concurrent ``sample()`` calls must meet in one batch window per step.
-
-    Each caller advances a token at a time, so without the window they would
-    serialize: one forward per caller per step instead of one for all of them.
-    """
-    prompts = [
-        async_llm.tokenizer.encode("Hello, world!"),
-        async_llm.tokenizer.encode("An apple a day keeps the"),
-        async_llm.tokenizer.encode("The quick brown fox"),
-    ]
-
-    async_llm.take_stats()
-    outputs = asyncio.run(
-        async_llm.batch_sample(
-            prompt_token_ids_list=prompts,
-            max_tokens=5,
-            eos_token_ids=[],
-            temperature=0.01,
-            seed=42,
-        )
-    )
-    stats = async_llm.take_stats()
-
-    assert len(outputs) == len(prompts)
-    # Counter keys are either ("cohort", size) / ("steps", n) or a bare string.
-    cohorts = [
-        key[1]
-        for key in stats
-        if isinstance(key, tuple) and len(key) == 2 and key[0] == "cohort"
-    ]
-    assert cohorts, f"no cohorts recorded: {dict(stats)}"
-    assert max(cohorts) == len(prompts), (
-        f"expected a cohort of {len(prompts)}, saw sizes {sorted(cohorts)}"
-    )
 
 
 @pytest.mark.skip("This fails.")

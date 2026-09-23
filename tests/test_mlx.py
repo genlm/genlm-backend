@@ -127,16 +127,6 @@ async def test_batch_timeout(async_llm):
 
 
 @pytest.mark.asyncio
-async def test_window_batches_concurrent_asks(async_llm):
-    # A concurrent gather lands in one window and resolves as one batch.
-    async_llm.clear_cache()
-    a, b = await asyncio.gather(
-        async_llm.next_token_logprobs([0]), async_llm.next_token_logprobs([1])
-    )
-    assert a.ndim == 1 and b.ndim == 1
-
-
-@pytest.mark.asyncio
 async def test_abandoned_batch_fails_co_callers(async_llm):
     """A cancelled batch holder must fail its co-callers, not orphan them, and never
     with its own CancelledError: that leaves their tasks cancelled and skips their

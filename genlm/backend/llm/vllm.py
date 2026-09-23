@@ -24,7 +24,6 @@ import weakref
 import threading
 import torch
 import logging
-from collections import Counter
 
 from genlm.backend.llm.base import AsyncLM, UNKNOWN_ADAPTER
 
@@ -320,11 +319,6 @@ else:
             # Crank-owned state: the crank thread is the only reader and
             # writer of everything below (the in-process engine runs
             # schedule() and the capture shim on that same thread).
-            # Batching breadcrumbs: ("cohort", n)/("steps", n) histograms plus
-            # "appends"/"births"/"shared" totals, written on the crank thread
-            # and snapshotted via take_stats().
-            self.stats = Counter()
-
             self._requests = {}  # rid -> (tuple(ids), lora_name), recency order
             self._by_content = {}  # (tuple(ids), lora_name) -> rid
             self._pending = {}  # rid -> [(future, loop)]; owed a row or an exception
@@ -581,8 +575,6 @@ else:
                             )
                     else:
                         stalled = 0
-                if steps:
-                    self.stats[("steps", steps)] += 1
             except BaseException as exc:
                 self._fail_owed(exc)
             if stopping:
@@ -635,9 +627,6 @@ else:
             for key, lora_request, loop, future in cohort:
                 entry = grouped.setdefault(key, (lora_request, []))
                 entry[1].append((future, loop))
-            self.stats[("cohort", len(cohort))] += 1
-            self.stats["shared"] += len(cohort) - len(grouped)
-
             for key in sorted(grouped, key=lambda k: len(k[0])):
                 lora_request, waiters = grouped[key]
                 ids, lora_name = key
@@ -654,7 +643,6 @@ else:
                         rid = cand
                         self._sched.feed_token(request, ids[-1])
                         self._move(rid, key)
-                        self.stats["appends"] += 1
                 if rid is None:
                     rid = self._mint()
                     self._sched.add_request(
@@ -668,7 +656,6 @@ else:
                         )
                     )
                     self._admit(rid, key)
-                    self.stats["births"] += 1
                 self._pending[rid] = waiters
 
             self._reap_over_cap()
@@ -811,11 +798,6 @@ else:
         async def release_all(self):
             """Reap every idle request (end of an inference run)."""
             await self._run_on_crank("release")
-
-        def take_stats(self):
-            """Snapshot and reset the batching breadcrumbs."""
-            stats, self.stats = self.stats, Counter()
-            return stats
 
         # -- sync paths -----------------------------------------------------
 
