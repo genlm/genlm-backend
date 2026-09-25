@@ -67,8 +67,8 @@ with AsyncVirtualLM.from_name("meta-llama/Llama-3.2-1B") as llm:
     logps = await llm.next_token_logprobs(token_ids)
 ```
 
-`async with` works the same way. The other backends hold no engine thread, so their
-`cleanup()` is a no-op — a caller can always release without asking which backend it holds.
+`async with` works the same way. The other backends hold no engine thread and need no
+release step.
 
 ## 🧪 Example: Autobatched Sequential Importance Sampling with LLMs
 
@@ -138,8 +138,6 @@ probs = torch.exp(log_weights - log_weights.logsumexp(dim=-1))
 
 for s, p in sorted(zip(strings, probs), key=lambda x: -x[1]):
     print(f"{repr(s)} (probability: {p:.4f})")
-
-llm.cleanup()  # or hold the model in a `with` block
 
 ```
 
