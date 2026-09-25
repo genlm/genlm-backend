@@ -204,6 +204,28 @@ class AsyncLM(ABC):
             "clear_lora() was removed: omit lora_name (None = base model)."
         )
 
+    def cleanup(self):
+        """Release whatever the backend holds open.
+
+        Only a backend that owns an engine has anything to release; the rest
+        inherit this no-op, so a caller may always release without asking which
+        backend it holds.
+        """
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.cleanup()
+        return False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        self.cleanup()
+        return False
+
     def clear_cache(self):
         """Clear any caches used by the language model. No-op in base class."""
         pass  # pragma: no cover
