@@ -31,7 +31,7 @@ def load_tokenizer(name, use_fast):
 @settings(deadline=None, max_examples=MAX_EXAMPLES)
 @given(text=st.text(min_size=1, max_size=MAX_SIZE), is_fast=st.booleans())
 def test_gpt2(text, is_fast):
-    tokenizer = load_tokenizer("gpt2", is_fast)
+    tokenizer = load_tokenizer("openai-community/gpt2", is_fast)
     byte_vocab, _ = decode_vocab(tokenizer)
     assert_roundtrip_bytes(text, tokenizer, byte_vocab)
 
@@ -85,7 +85,7 @@ def test_deepseek_r1_unsloth(text, is_fast):
 
 
 def test_byte2str_fallbacks():
-    tokenizer = load_tokenizer("gpt2", False)
+    tokenizer = load_tokenizer("openai-community/gpt2", False)
 
     for fallback in ("latin1", "tokenizer", "replace"):
         byte_vocab, str_vocab = decode_vocab(tokenizer, byte2str_fallback=fallback)
@@ -97,7 +97,7 @@ def test_byte2str_fallbacks():
 
 
 def test_byte_decoder_error_handling():
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
 
     # Test with invalid byte decoder
     invalid_byte_decoder = {"a": 999}  # Invalid byte value

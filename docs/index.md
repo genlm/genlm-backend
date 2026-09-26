@@ -78,7 +78,7 @@ async def autobatched_sis(n_particles, llm, masking_function, prompt_ids):
     return particles
 
 # --- Run the example --- #
-llm = load_model_by_name("gpt2") # or e.g., "meta-llama/Llama-3.2-1B" if you have access
+llm = load_model_by_name("openai-community/gpt2") # or e.g., "meta-llama/Llama-3.2-1B" if you have access
 mask_function = make_masking_function(llm, max_token_length=10, max_tokens=10)
 prompt_ids = llm.tokenizer.encode("Montreal is")
 particles = await autobatched_sis( # use asyncio.run(autobatched_sis(...)) if you are not in an async context
@@ -160,7 +160,7 @@ from transformers import AutoTokenizer
 from genlm.backend import decode_vocab
 
 # Load a tokenizer and decode its vocabulary
-tokenizer = AutoTokenizer.from_pretrained("gpt2")
+tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
 byte_vocab, str_vocab = decode_vocab(tokenizer)
 token = byte_vocab[10]
 token.token_id     # Unique token ID

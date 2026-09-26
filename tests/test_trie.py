@@ -20,7 +20,7 @@ def decode():
 
 @pytest.fixture(scope="module")
 def mock_llm():
-    return MockAsyncLM(AutoTokenizer.from_pretrained("gpt2"))
+    return MockAsyncLM(AutoTokenizer.from_pretrained("openai-community/gpt2"))
 
 
 def test_sequential_weight_sum(decode):

@@ -36,7 +36,9 @@ parser.add_argument(
     metavar=("V0_JSON", "V1_JSON"),
     help="Skip benchmarking and just print a comparison of two saved result files",
 )
-parser.add_argument("--model", type=str, default="gpt2", help="Model to benchmark")
+parser.add_argument(
+    "--model", type=str, default="openai-community/gpt2", help="Model to benchmark"
+)
 parser.add_argument("--gpu-mem", type=float, default=0.3, help="GPU memory utilization")
 parser.add_argument("--warmup", type=int, default=5, help="Warmup iterations")
 parser.add_argument("--iterations", type=int, default=30, help="Benchmark iterations")

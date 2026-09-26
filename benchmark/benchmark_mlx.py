@@ -20,7 +20,7 @@ text = get_wikitext()
 
 
 def load_model(model, batch_size=None):
-    model_name = "gpt2"
+    model_name = "openai-community/gpt2"
     if model == "mlx":
         return AsyncMlxLM.from_name(model_name, batch_size=batch_size)
     else:
