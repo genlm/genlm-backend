@@ -10,7 +10,9 @@ from conftest import cuda_only
 
 @pytest.fixture(scope="module")
 def model_name():
-    return "gpt2"
+    # Fully-qualified: sglang resolves weights through hf_file_system, which
+    # rejects single-segment repo ids.
+    return "openai-community/gpt2"
 
 
 @pytest.fixture(scope="module")

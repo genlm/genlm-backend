@@ -69,7 +69,7 @@ def test_caching(async_llm):
     max_rel_err = compare(have, want).max_rel_err
     assert max_rel_err == 0, max_rel_err  # Sanity check
 
-    curr = async_llm.cache
+    curr = async_llm._caches[None]
     for token_id in preprompt:
         assert curr.has_token(token_id), token_id
         curr = curr.get_token(token_id)
@@ -109,7 +109,7 @@ def test_cache_operations(async_llm):
     assert past is None
     assert base == 0
 
-    repr(async_llm.cache)
+    repr(async_llm._caches[None])
 
 
 @pytest.mark.asyncio
@@ -140,7 +140,6 @@ def test_cache_kv(async_llm):
     async_llm.clear_kv_cache()
 
 
-@pytest.mark.skip(reason="This test is flaky")
 def test_walk_cache_with_past(async_llm):
     async_llm.clear_cache()
 

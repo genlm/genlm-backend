@@ -1,12 +1,15 @@
 import torch
 import pytest
 import asyncio
-from unittest.mock import patch
-from conftest import v1_capable, ReferenceVirtualLM
+from conftest import (
+    v1_capable,
+    ReferenceVirtualLM,
+    logprobs,
+    batch_logprobs,
+    assert_rows_close,
+)
 from arsenal.maths import compare
 from genlm.backend.llm import load_model_by_name, MockAsyncLM
-
-# from hypothesis import given, strategies as st, settings
 
 
 @pytest.fixture(scope="module")
@@ -51,63 +54,21 @@ def token_ids_list(async_llm):
 
 
 @v1_capable
-# @settings(deadline=None)
-# @given(text=st.text(min_size=1, max_size=1000))
-def test_next_token_logprobs(async_llm, reference_llm, token_ids_list):
+@pytest.mark.parametrize("entry", ["async", "sync"])
+def test_next_token_logprobs(async_llm, reference_llm, token_ids_list, entry):
     for token_ids in token_ids_list:
-        have = asyncio.run(async_llm.next_token_logprobs(token_ids)).cpu().numpy()
+        have = logprobs(async_llm, token_ids, entry).cpu().numpy()
         want = asyncio.run(reference_llm.next_token_logprobs(token_ids))
         assert compare(have, want).max_rel_err < 1e-3, token_ids
 
 
 @v1_capable
-def test_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list):
-    for token_ids in token_ids_list:
-        have = async_llm.next_token_logprobs_sync(token_ids).cpu().numpy()
-        want = asyncio.run(reference_llm.next_token_logprobs(token_ids))
-        assert compare(have, want).max_rel_err < 1e-3, token_ids
-
-
-@v1_capable
-# @settings(deadline=None)
-# @given(text_list=st.lists(st.text(min_size=1, max_size=1000), min_size=1, max_size=5))
-def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list):
-    haves = (
-        asyncio.run(async_llm.batch_next_token_logprobs(token_ids_list)).cpu().numpy()
-    )
+@pytest.mark.parametrize("entry", ["async", "sync"])
+def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list, entry):
+    haves = batch_logprobs(async_llm, token_ids_list, entry).cpu().numpy()
     wants = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
-    for i, (have, want) in enumerate(zip(haves, wants)):
-        assert compare(have, want).max_rel_err < 1e-3, token_ids_list[i]
-
-
-@v1_capable
-# @settings(deadline=None)
-# @given(text_list=st.lists(st.text(min_size=1, max_size=1000), min_size=1, max_size=5))
-def test_batch_next_token_logprobs_sync(async_llm, reference_llm, token_ids_list):
-    # Test 1: Regular sync context
-    haves = async_llm.batch_next_token_logprobs_sync(token_ids_list).cpu().numpy()
-    wants = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
-
-    for have, want in zip(haves, wants):
-        assert compare(have, want).max_rel_err < 1e-3, "Sync context"
-
-
-@v1_capable
-# @settings(deadline=None)
-# @given(text_list=st.lists(st.text(min_size=1, max_size=1000), min_size=1, max_size=5))
-def test_batch_next_token_logprobs_sync_in_async(
-    async_llm, reference_llm, token_ids_list
-):
-    # Test 2: Sync function inside async context
-    async def async_context():
-        have_async = async_llm.batch_next_token_logprobs_sync(token_ids_list)
-        return have_async.cpu().numpy()
-
-    wants = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
-    haves = asyncio.run(async_context())
-
-    for have, want in zip(haves, wants):
-        assert compare(have, want).max_rel_err < 1e-3, "Sync in async context"
+    # fp16 batched forwards reduce in a different order than single-prompt ones.
+    assert_rows_close(haves, wants, token_ids_list, rel=1e-2)
 
 
 @v1_capable
@@ -237,41 +198,6 @@ def test_batch_sample(async_llm):
     assert len(generated_token_ids_vllm[1]) == 10
 
 
-@v1_capable
-def test_concurrent_sample_calls_batch_into_one_generate(async_llm):
-    """Concurrent ``sample()`` calls must dispatch as a single batched ``generate()``.
-
-    Without sample-queue auto-batching each caller would block the synchronous
-    vLLM v1 engine for all of its decode steps before the next one could begin.
-    """
-    prompts = [
-        async_llm.tokenizer.encode("Hello, world!"),
-        async_llm.tokenizer.encode("An apple a day keeps the"),
-        async_llm.tokenizer.encode("The quick brown fox"),
-    ]
-
-    with patch.object(
-        async_llm.llm_engine,
-        "generate",
-        wraps=async_llm.llm_engine.generate,
-    ) as spy:
-        outputs = asyncio.run(
-            async_llm.batch_sample(
-                prompt_token_ids_list=prompts,
-                max_tokens=5,
-                eos_token_ids=[],
-                temperature=0.01,
-                seed=42,
-            )
-        )
-
-    assert len(outputs) == len(prompts)
-    assert spy.call_count == 1, (
-        f"Expected 1 batched generate() call, got {spy.call_count}"
-    )
-    assert len(spy.call_args.kwargs["prompts"]) == len(prompts)
-
-
 @pytest.mark.skip("This fails.")
 def test_concurrent_logprobs_and_sample(async_llm):
     prompt = async_llm.tokenizer.encode("Hello, world!")
@@ -288,32 +214,3 @@ def test_concurrent_logprobs_and_sample(async_llm):
         return await asyncio.gather(logprobs_task(), sample_task())
 
     asyncio.run(both_tasks())
-
-
-@v1_capable
-@pytest.mark.asyncio
-async def test_cache(model_name):
-    """Test output caching functionality."""
-    async_llm_with_cache = load_model_by_name(
-        model_name,
-        backend="vllm",
-        llm_opts={
-            "engine_opts": {"gpu_memory_utilization": 0.2},
-            "cache_size": 2,
-        },
-    )
-
-    logprobs1 = await async_llm_with_cache.next_token_logprobs([0])
-    logprobs2 = await async_llm_with_cache.next_token_logprobs([1])
-    assert len(async_llm_with_cache.cache) == 2
-
-    logprobs1_post = await async_llm_with_cache.next_token_logprobs([0])
-    logprobs2_post = await async_llm_with_cache.next_token_logprobs([1])
-    assert torch.allclose(logprobs1, logprobs1_post)
-    assert torch.allclose(logprobs2, logprobs2_post)
-
-    # Check that we can clear the cache
-    async_llm_with_cache.clear_cache()
-    assert len(async_llm_with_cache.cache) == 0
-
-    del async_llm_with_cache

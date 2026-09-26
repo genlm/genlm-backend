@@ -1,7 +1,5 @@
 """Functions to get and check HuggingFace tokenizer vocabularies"""
 
-from transformers import AutoTokenizer
-
 from genlm.backend.tokenization.bytes import ByteVocabError, get_byte_vocab
 from genlm.backend.tokenization.token import Token
 
@@ -28,25 +26,12 @@ def decode_vocab(tokenizer, byte2str_fallback="tokenizer"):
     if byte2str_fallback not in ["latin1", "tokenizer", "replace"]:
         raise ValueError(f"Unknown byte2str_fallback strategy: {byte2str_fallback}")
 
-    if tokenizer.is_fast:
-        tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer.name_or_path, use_fast=False
-        )
-
-    # Try slow tokenizer.
     try:
         raw_byte_vocab = get_byte_vocab(tokenizer)
-    except ByteVocabError:
-        # warnings.warn("Could not decode vocabulary from slow tokenizer. Trying using fast tokenizer.")
-
-        # Try fast tokenizer.
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer.name_or_path, use_fast=True)
-        try:
-            raw_byte_vocab = get_byte_vocab(tokenizer)
-        except ByteVocabError as e:
-            raise ValueError(
-                f"Could not decode byte representation of token vocabuary from tokenizer {tokenizer.name_or_path}"
-            ) from e
+    except ByteVocabError as e:
+        raise ValueError(
+            f"Could not decode byte representation of token vocabuary from tokenizer {tokenizer.name_or_path}"
+        ) from e
 
     # Create Token objects for byte_vocab.
     # Assumption: token_id == position index in the vocabulary. This is relied upon

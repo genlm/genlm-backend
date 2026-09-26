@@ -1,4 +1,6 @@
 import pytest
+from arsenal.maths import compare
+import asyncio
 import torch
 import sys
 
@@ -19,6 +21,29 @@ import numpy as np
 from genlm.backend.tokenization import decode_vocab
 from contextlib import contextmanager
 
+
+def logprobs(llm, token_ids, entry="async", **kw):
+    """A `next_token_logprobs` row through one of the three public entry points."""
+    if entry == "uncached":
+        return llm.next_token_logprobs_uncached(token_ids, **kw)
+    if entry == "sync":
+        return llm.next_token_logprobs_sync(token_ids, **kw)
+    return asyncio.run(llm.next_token_logprobs(token_ids, **kw))
+
+
+def batch_logprobs(llm, token_ids_list, entry="async", **kw):
+    """A `batch_next_token_logprobs` block through the requested entry point."""
+    if entry == "sync":
+        return llm.batch_next_token_logprobs_sync(token_ids_list, **kw)
+    return asyncio.run(llm.batch_next_token_logprobs(token_ids_list, **kw))
+
+
+def assert_rows_close(haves, wants, labels, rel):
+    """Each row agrees with its reference to within `rel` relative error."""
+    for have, want, label in zip(haves, wants, labels):
+        assert compare(have, want).max_rel_err < rel, label
+
+
 cuda_only = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="test requires CUDA"
 )
@@ -27,6 +52,29 @@ v1_capable = pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 8,
     reason="vLLM v1 requires CUDA Compute Capability >= 8.0 (Ampere+)",
 )
+
+
+@pytest.fixture(scope="session")
+def lora_pair(tmp_path_factory):
+    """Paths to SmolLM LoRA adapters ``(identity, shifted)``: identity matches base, shifted does not."""
+    from peft import LoraConfig, get_peft_model
+    from transformers import AutoModelForCausalLM
+
+    base = AutoModelForCausalLM.from_pretrained(
+        "HuggingFaceTB/SmolLM-135M", torch_dtype=torch.float32
+    )
+    pm = get_peft_model(base, LoraConfig(r=8, target_modules=["q_proj", "v_proj"]))
+    root = tmp_path_factory.mktemp("lora_pair")
+    identity = root / "identity"
+    pm.save_pretrained(str(identity))
+    with torch.no_grad():
+        for name, p in pm.named_parameters():
+            if "lora_B" in name:
+                torch.nn.init.normal_(p, std=1.0)
+    shifted = root / "shifted"
+    pm.save_pretrained(str(shifted))
+    del pm, base
+    return str(identity), str(shifted)
 
 
 @pytest.fixture(autouse=True, scope="function")

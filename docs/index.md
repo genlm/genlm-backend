@@ -6,12 +6,13 @@
 [![codecov](https://codecov.io/github/genlm/genlm-backend/graph/badge.svg?token=PwmHwMJC2y)](https://codecov.io/github/genlm/genlm-backend)
 [![PyPI](https://img.shields.io/pypi/v/genlm-backend?label=pypi)](https://pypi.org/project/genlm-backend/)
 
-GenLM Backend is a high-performance backend for language model probabilistic programs, built for the GenLM ecosystem. It provides an **asynchronous** and **autobatched** interface to `vllm` and `transformers` language models, enabling scalable and efficient inference.
+GenLM Backend is a high-performance backend for language model probabilistic programs, built for the GenLM ecosystem. It provides an **asynchronous** and **autobatched** interface to language model inference via `vllm`, `sglang`, `transformers`, and `mlx-lm`.
 
 ## Key Features
-- Automatic batching of concurrent log-probability requests—enabling efficient large-scale inference without having to write batching logic yourself
-- Byte-level decoding support for transformers tokenizers—enabling advanced token-level control
-- Supports for arbitrary Hugging Face models (e.g., LLaMA, DeepSeek, etc.) with fast inference and automatic KV caching using vllm
+- Automatic batching of concurrent log-probability requests, enabling efficient large-scale inference without having to write batching logic yourself
+- Byte-level decoding of transformers tokenizers, enabling advanced token-level control
+- Support for arbitrary Hugging Face models (e.g., LLaMA, DeepSeek, etc.) with fast inference and automatic KV caching using vllm
+- Support for the MLX-LM library, for inference on Apple silicon
 
 
 ## Quick Start
@@ -109,7 +110,7 @@ See the [DEVELOPING.md](DEVELOPING.md) file for information on how to install th
 
 ### Asynchronous Language Model Backends
 
-The [`genlm.backend.llm`](reference/genlm/backend/llm/__init__/) module provides asynchronous interfaces for computing next-token probabilities with `vllm` and `transformer` language models.
+The [`genlm.backend.llm`](reference/genlm/backend/llm/__init__/) module provides asynchronous interfaces for computing next-token probabilities via `vllm`, `sglang`, `transformers`, and `mlx-lm`.
 
 ```python
 from genlm.backend import AsyncVirtualLM
@@ -117,12 +118,38 @@ from genlm.backend import AsyncVirtualLM
 llm = AsyncVirtualLM.from_name("meta-llama/Llama-3.2-1B")
 ```
 
-This submodule includes two key classes:
+This submodule includes four backends:
 
-- **AsyncVirtualLM** (GPU): vLLM-based backend optimized for next-token probability computations. Fastest and most memory-efficient; requires a GPU. Uses vLLM's prefix caching feature for KV caching.
-- **AsyncTransformer** (CPU): HuggingFace-based backend for next-token probability computations. Slower and less memory-efficient; for CPU usage.
+- **AsyncVirtualLM** (GPU): vLLM. Fastest and most memory-efficient; requires a GPU.
+- **AsyncSGLTransformer** (GPU): SGLang; requires a GPU.
+- **AsyncMlxLM** (Apple silicon): MLX-LM.
+- **AsyncTransformer** (CPU): Hugging Face transformers. Slower and less memory-efficient; runs anywhere.
 
 See the [LLM Code Reference](reference/genlm/backend/llm/__init__/) for detailed API documentation.
+
+### LoRA adapters
+
+Adapters are selected per request. Register one with `add_new_lora(path, name)`, then pass
+`lora_name=name` to any forward; omit it to run the base model. Re-registering a name
+rebinds it to the weights at the new path and evicts the old weights and their caches.
+`remove_lora(name)` drops an adapter.
+
+```python
+llm.add_new_lora("/path/to/adapter", "reviewer")
+logps = await llm.next_token_logprobs(token_ids, lora_name="reviewer")
+```
+
+### Releasing a vLLM model
+
+Dropping the last reference to an `AsyncVirtualLM` frees the GPU. To release at a point
+you choose, call `cleanup()` or use the model as a context manager (`with` or `async with`).
+
+```python
+from genlm.backend import AsyncVirtualLM
+
+with AsyncVirtualLM.from_name("meta-llama/Llama-3.2-1B") as llm:
+    logps = await llm.next_token_logprobs(token_ids)
+```
 
 ### Vocabulary Decoding
 

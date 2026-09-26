@@ -1,6 +1,5 @@
 import torch
 from collections import OrderedDict
-from time import time
 
 
 class OutputCache:
@@ -29,7 +28,7 @@ class OutputCache:
 
     def __setitem__(self, key, value):
         if len(self.cache) >= self.maxsize:
-            old_key, (_, old_tensor) = self.cache.popitem(last=False)
+            _, (_, old_tensor) = self.cache.popitem(last=False)
             del old_tensor
 
         self.cache[key] = (value.device, value.cpu() if self.move_to_cpu else value)
@@ -55,7 +54,7 @@ class TokenTrie:
 
     # Trie of tokens.
 
-    def __init__(self, parent=None, logprobs=None):
+    def __init__(self, logprobs=None):
         self.children = {}  # maps token ID to child
         self.logprobs = logprobs  # for next token
         self.past_key_values = None
@@ -74,7 +73,7 @@ class TokenTrie:
 
     def clear_kv_cache(self):
         self.past_key_values = None
-        for child, node in self.children.items():
+        for node in self.children.values():
             node.clear_kv_cache()
 
     def has_token(self, token_id):
@@ -84,7 +83,7 @@ class TokenTrie:
         return self.children[token_id]
 
     def add_token(self, token_id, logprobs=None):
-        self.children[token_id] = TokenTrie(self, logprobs)
+        self.children[token_id] = TokenTrie(logprobs)
         return self.children[token_id]
 
     def extend_cache(self, next_token_index, token_ids, logits, base):
@@ -93,99 +92,8 @@ class TokenTrie:
         for j in range(next_token_index, len(token_ids)):
             token_id = token_ids[j]
             token_logits = logits[j - base]
-            token_logprobs = torch.log_softmax(token_logits, 0)
+            token_logprobs = torch.log_softmax(token_logits, 0, dtype=torch.float32)
 
             node = node.add_token(token_id, token_logprobs.cpu())
 
         return node
-
-
-class DynamicTokenTrie(TokenTrie):
-    def __init__(self, parent=None, logprobs=None, past_key_values=None):
-        super().__init__(parent, logprobs)
-        self.past_key_values = past_key_values
-        self.last_access = time()
-        self.kv_size = 0
-        self.parent = parent
-        self.depth = 0 if parent is None else parent.depth + 1
-
-    def touch(self):
-        """Update access timestamp recursively upward."""
-        t = time()
-        node = self
-        while node:
-            node.last_access = t
-            node = node.parent
-
-    def add_token(self, token_id, logprobs=None, past_key_values=None):
-        if token_id in self.children:
-            child = self.children[token_id]
-            child.store_kv(past_key_values)
-            if child.logprobs is None:
-                child.logprobs = logprobs
-        else:
-            self.children[token_id] = DynamicTokenTrie(
-                parent=self, logprobs=logprobs, past_key_values=past_key_values
-            )
-        self.children[token_id].touch()
-        return self.children[token_id]
-
-    def store_kv(self, past_key_values):
-        """Store KV states on this node."""
-        if self.past_key_values is not None or past_key_values is None:
-            return
-        self.past_key_values = past_key_values
-
-    def extend_cache(self, next_token_index, token_ids, logprobs=None, kv=None):
-        node = self
-        token_ids_current = token_ids[next_token_index:]
-        if kv is None:
-            kv = [None] * len(token_ids_current)
-        else:
-            kv = [kv[:, :, :, i : i + 1, :] for i in range(len(token_ids_current))]
-
-        for i, token_id in enumerate(token_ids_current):
-            node = node.add_token(token_id, None, kv[i])
-
-        if node.logprobs is None:
-            node.logprobs = logprobs
-
-        return node
-
-    def count_kv_size(self):
-        """Recompute how many nodes currently store KVs."""
-        total = 1 if self.past_key_values is not None else 0
-        for c in self.children.values():
-            total += c.count_kv_size()
-        self.kv_size = total
-        return total
-
-    def collect_nodes_with_kv(self):
-        """Collect nodes that have stored KVs (for eviction decisions)."""
-        nodes = []
-        if self.past_key_values is not None:
-            nodes.append(self)
-        for c in self.children.values():
-            nodes.extend(c.collect_nodes_with_kv())
-        return nodes
-
-    def evict_lru_kv(self, max_kv):
-        """Evict least recently used KV entries (and descendants) until under limit."""
-        total = self.count_kv_size()
-        if total <= max_kv:
-            return
-        nodes = self.collect_nodes_with_kv()
-        nodes.sort(key=lambda n: (n.last_access, -n.depth))
-
-        for node in nodes:
-            if self.kv_size <= max_kv:
-                break
-            node._clear_kv_recursive()
-            self.count_kv_size()
-
-    def _clear_kv_recursive(self):
-        """Remove KV from this node and all descendants."""
-        if self.past_key_values is not None:
-            self.past_key_values = None
-        for c in self.children.values():
-            c._clear_kv_recursive()

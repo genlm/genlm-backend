@@ -9,33 +9,42 @@ authors = [
 ]
 dependencies = [
     "torch",
-    "transformers>=4.36.0,<5.0.0.rc0",
+    "transformers>=5,<6",
     "sentencepiece",
     "protobuf",
     "accelerate",
     "bitsandbytes; sys_platform == 'linux'",
     "numba",
+    # numba refuses to import above the NumPy it was built against; transformers 5
+    # otherwise resolves numpy ahead of that bound.
+    "numpy<2.5",
 ]
 
 [project.optional-dependencies]
 mlx = [
-    "mlx",
-    "mlx-lm"
+    # mlx carries no transformers dep of its own; pin it alongside the mlx-lm it
+    # has to serve rather than letting it drift ahead.
+    "mlx>=0.29.2",
+    "mlx-lm>=0.30",
 ]
 vllm = [
-    "vllm>=0.10.0,<0.11.0; sys_platform == 'linux'",
+    # The serving mechanism reaches into vLLM v1 internals that are
+    # version-specific (the MRv2 custom_sampler hook, direct Request
+    # construction, scheduler subclassing); pin one validated line rather
+    # than advertising the whole range. The V2 model runner is forced ON at
+    # import in llm/vllm.py -- the capture shim installs through its
+    # ModelState hook.
+    "vllm>=0.26.0,<0.27.0; sys_platform == 'linux'",
     "triton>=3.2.0; sys_platform == 'linux'",
 ]
 sgl = [
-    "sglang>=0.5.8,<0.5.9",
+    # sglang pins transformers EXACTLY (0.5.17 -> ==5.12.1), so installing this extra
+    # nails the whole environment to that release. It is kept out of the core bound so
+    # only an sglang install pays for it.
+    "sglang>=0.5.17,<0.5.18",
 ]
 lora = [
-    # peft >=0.19 imports ``EmbeddingParallel`` from
-    # ``transformers.integrations.tensor_parallel``, which only exists in a
-    # very recent transformers branch; on the transformers pin above (which
-    # resolves to 4.57.x) this raises ImportError at LoRA load time. Pin
-    # below 0.19 until peft's TP handling catches up.
-    "peft>=0.17,<0.19",
+    "peft>=0.17",
 ]
 docs = [
     "mkdocs",
