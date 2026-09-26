@@ -3,7 +3,6 @@ import asyncio
 import numpy as np
 import torch
 from conftest import cuda_only, logprobs, batch_logprobs, assert_rows_close
-from arsenal.maths import compare
 from genlm.backend.llm import load_model_by_name
 
 
@@ -68,8 +67,7 @@ def test_unknown_lora_error(transformer_llm):
 
 
 def test_reregistration(transformer_llm, token_ids_list, lora_pair):
-    """Re-registering a name rebinds it to the new weights and purges its cache
-    trie — the cached sync path must not serve the old adapter's logprobs."""
+    """Re-registering a name rebinds it to the new weights, cached path included."""
     identity_path, shifted_path = lora_pair
     ids = token_ids_list[0]
 
@@ -134,8 +132,7 @@ def test_batch_token_logprobs_lora(
 @cuda_only
 @pytest.mark.parametrize("entry", ["uncached", "async", "sync"])
 def test_adapter_swap(transformer_llm, token_ids_list, transformer_llm_nolora, entry):
-    """Interleaving base and adapter requests on one model matches a dedicated
-    base model and a contiguous adapter run."""
+    """Interleaved base and adapter requests match dedicated base and adapter runs."""
     lora_contiguous = _rows(transformer_llm, token_ids_list, entry, lora_name=LORA_NAME)
     base_contiguous = _rows(transformer_llm_nolora, token_ids_list, entry)
 
@@ -154,8 +151,7 @@ def test_adapter_swap(transformer_llm, token_ids_list, transformer_llm_nolora, e
 def test_adapter_swap_mixed_batch(
     transformer_llm, token_ids_list, transformer_llm_nolora
 ):
-    """One auto-batched dispatch containing BOTH base and adapter queries routes
-    each query through its own adapter."""
+    """A mixed base/adapter batch routes each query through its own adapter."""
     transformer_llm.clear_cache()
 
     async def mixed(token_ids_list):
@@ -187,12 +183,15 @@ def test_adapter_swap_mixed_batch(
         .numpy()
     )
 
-    for i, token_ids in enumerate(token_ids_list):
-        assert (
-            compare(lora_logprobs[i].cpu().numpy(), lora_reference[i]).max_rel_err
-            < 1e-3
-        ), token_ids
-        assert (
-            compare(base_logprobs[i].cpu().numpy(), base_reference[i]).max_rel_err
-            < 1e-3
-        ), token_ids
+    assert_rows_close(
+        [row.cpu().numpy() for row in lora_logprobs],
+        lora_reference,
+        token_ids_list,
+        rel=1e-3,
+    )
+    assert_rows_close(
+        [row.cpu().numpy() for row in base_logprobs],
+        base_reference,
+        token_ids_list,
+        rel=1e-3,
+    )

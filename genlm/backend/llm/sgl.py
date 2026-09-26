@@ -128,8 +128,8 @@ else:
                 "model_path": model_id,
                 "grammar_backend": "none",
                 "allow_auto_truncate": False,
-                # `_batch_evaluate` steps sglang's normal event loop directly; the
-                # overlap loop defers results through `result_queue` and yields none.
+                # `_batch_evaluate` drives the normal event loop; the overlap loop
+                # returns no results to it.
                 "disable_overlap_schedule": True,
                 "mem_fraction_static": 0.9,  # default value is 0.9
             }
@@ -137,11 +137,9 @@ else:
                 _engine_opts.update(engine_opts)
             server_args = ServerArgs(**_engine_opts)
             port_args = PortArgs.init_new(server_args)
-            # sglang reads its config through a process-wide runtime context, so a
-            # Scheduler cannot be constructed until this process publishes one.
+            # Scheduler reads its config from the process-wide runtime context; publish it first.
             publish(server_args, role="scheduler")
-            # Ranks by keyword: sglang's parallelism axes shift position across
-            # versions, and positional trailing args silently change meaning.
+            # By keyword: the rank parameters' positions vary across sglang versions.
             mod = Scheduler(
                 server_args,
                 port_args,
@@ -154,9 +152,8 @@ else:
                 dp_rank=0,
             )
             mod.result_queue = deque()
-            # `run_event_loop` establishes these two before dispatching into a loop that
-            # never returns, so an embedded driver sets them itself. A schedule stream
-            # aliasing the forward stream erases scheduler/forward overlap.
+            # Normally set by `run_event_loop`, which this driver bypasses. A schedule
+            # stream aliasing the forward stream erases scheduler/forward overlap.
             mod.schedule_stream = mod.device_module.Stream(priority=0)
             redraws = 0
             while (
@@ -362,9 +359,8 @@ else:
             sched = self.model
             sched.process_input_requests(requests)
 
-            # sglang's normal event loop, drained rather than served forever. The
-            # planner only sees `running_batch` if it is carried back across calls, and
-            # the loop runs on the schedule stream.
+            # One drain of sglang's normal event loop; `running_batch` and `last_batch`
+            # must carry across calls.
             with sched.device_module.StreamContext(sched.schedule_stream):
                 while True:
                     plan = sched.get_next_batch_to_run(
@@ -375,7 +371,7 @@ else:
                     batch = plan.batch_to_run
                     sched.cur_batch_for_debug = batch
                     if batch is None:
-                        break  # drained; the server loop would idle here instead
+                        break
                     with torch.inference_mode():
                         batch_result = sched.run_batch(batch)
                         sched.process_batch_result(batch, batch_result)

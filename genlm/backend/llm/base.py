@@ -6,7 +6,6 @@ from abc import ABC, abstractmethod
 from genlm.backend.tokenization import decode_vocab
 
 
-# One spelling across every backend, so callers can match on it.
 UNKNOWN_ADAPTER = "unknown LoRA adapter: {!r}; register it with add_new_lora()"
 
 
@@ -15,18 +14,18 @@ class BatchAbandoned(RuntimeError):
 
 
 def batch_abandoned(exc):
-    """The failure handed to callers whose batch holder died.
+    """The failure handed to callers whose batch leader died.
 
-    Never the cause itself: a ``CancelledError`` given to a caller who never asked
-    for one leaves their task cancelled and skips their ``except Exception``.
+    Never the cause itself: a `CancelledError` given to a caller who never asked
+    for one leaves their task cancelled and skips their `except Exception`.
     """
-    abandoned = BatchAbandoned(f"batch holder did not survive it: {exc!r}")
+    abandoned = BatchAbandoned(f"batch leader did not survive it: {exc!r}")
     abandoned.__cause__ = exc
     return abandoned
 
 
 def fail_futures(entries, exc):
-    """Resolve each entry's future -- its last element -- with ``exc``."""
+    """Fail each entry's future (its last element) with `exc`."""
     for entry in entries:
         future = entry[-1]
         if not future.done():
@@ -46,59 +45,49 @@ class AsyncLM(ABC):
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
         self.byte_vocab, self.str_vocab = decode_vocab(self.tokenizer)
-        # Batch state; concurrent asks collect in ``_batch_queue``.
         self._batch_queue = []
         self._batch_armed = False
 
-    async def _join_batch(self, entries, *, linger=0.0):
-        """Join the batch of concurrent asks on this event loop.
+    async def _join_batch(self, entries, *, timeout=0.0):
+        """Join the batch of concurrent queries on this event loop.
 
-        ``entries`` are appended before any yield, so a whole batch enters as
-        one set of asks. The first caller to arm the batch holds it open until
-        a full event-loop pass adds no new ask (preceded by one cooperative
-        ``linger`` sleep for late callers, when nonzero) and receives the
-        drained batch; every other caller receives ``None``. The holding
-        caller must evaluate the batch in its own coroutine and never in a
-        background task: batch state must not outlive the loop its callers
-        are on.
-
-        An entry is a tuple ending in its future. A holder that dies before
-        handing the batch off fails every other queued future rather than
-        orphaning it, so an entry is always resolved exactly once.
+        The first caller leads: it holds the batch open until an event-loop pass adds
+        no new query, then receives the drained batch; every other caller receives
+        `None`. The leader must evaluate the batch in its own coroutine, never a
+        background task. If the leader dies first, every other queued future fails
+        with `BatchAbandoned`.
 
         Args:
-            entries (list): Asks to add to the current batch, each ending in
-                its future.
-            linger (float, optional): Seconds to sleep once for late callers.
-                Defaults to 0.0, which skips the sleep.
+            entries (list): Queries to add to the batch, each a tuple ending in its future.
+            timeout (float, optional): Seconds to wait once for late callers.
+                Defaults to 0.0.
 
         Returns:
-            (list | None): The drained batch for the caller holding it,
-                ``None`` for every other caller.
+            (list | None): The drained batch for the leader, `None` for every other caller.
         """
         self._batch_queue.extend(entries)
         if self._batch_armed:
             return None
         self._batch_armed = True
         try:
-            lingered = not linger
+            waited = not timeout
             while True:
                 n = len(self._batch_queue)
                 await asyncio.sleep(0)
                 if len(self._batch_queue) > n:
                     continue
-                if lingered:
+                if waited:
                     break
-                lingered = True
-                await asyncio.sleep(linger)
-            cohort, self._batch_queue = self._batch_queue, []
-            return cohort
+                waited = True
+                await asyncio.sleep(timeout)
+            batch, self._batch_queue = self._batch_queue, []
+            return batch
         except BaseException as exc:
-            cohort, self._batch_queue = self._batch_queue, []
-            # Not this caller's own entries: it is unwinding past its ``await``,
-            # so an exception set there is only ever logged as never retrieved.
+            batch, self._batch_queue = self._batch_queue, []
+            # Skip this caller's own entries: it is unwinding, so an exception set
+            # on them would go unretrieved.
             mine = {id(e) for e in entries}
-            fail_futures([e for e in cohort if id(e) not in mine], batch_abandoned(exc))
+            fail_futures([e for e in batch if id(e) not in mine], batch_abandoned(exc))
             raise
         finally:
             self._batch_armed = False
@@ -109,7 +98,7 @@ class AsyncLM(ABC):
 
         Args:
             token_ids (list[int]): A list of token IDs representing the prompt.
-            lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
+            lora_name (str, optional): Name of the LoRA adapter to use. Defaults to None (the base model).
 
         Returns:
             (torch.Tensor): Normalized log probability tensor.
@@ -122,7 +111,7 @@ class AsyncLM(ABC):
 
         Args:
             token_ids (list[int]): A list of token IDs representing the prompt.
-            lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
+            lora_name (str, optional): Name of the LoRA adapter to use. Defaults to None (the base model).
 
         Returns:
             (torch.Tensor): Normalized log probability tensor.
@@ -134,7 +123,7 @@ class AsyncLM(ABC):
 
         Args:
             token_ids_list (list[list[int]]): A list of token ID lists.
-            lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
+            lora_name (str, optional): Name of the LoRA adapter to use. Defaults to None (the base model).
 
         Returns:
             (torch.Tensor): A tensor of log probability tensors.
@@ -153,7 +142,7 @@ class AsyncLM(ABC):
 
         Args:
             token_ids_list (list[list[int]]): A list of token ID lists.
-            lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
+            lora_name (str, optional): Name of the LoRA adapter to use. Defaults to None (the base model).
 
         Returns:
             (torch.Tensor): A tensor of log probability tensors.
@@ -166,10 +155,9 @@ class AsyncLM(ABC):
         )
 
     def add_new_lora(self, lora_path, lora_name):
-        """Register a LoRA adapter under ``lora_name``.
+        """Load a LoRA adapter into the base model.
 
-        Re-registering an existing name rebinds it to the weights at
-        ``lora_path``. Forwards select the adapter per call via ``lora_name=``.
+        Loading under an existing name replaces that adapter. Select it per call with `lora_name`.
 
         Args:
             lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
@@ -181,7 +169,7 @@ class AsyncLM(ABC):
         )  # pragma: no cover
 
     def remove_lora(self, lora_name):
-        """Unregister ``lora_name`` and evict its weights.
+        """Remove a previously loaded LoRA adapter.
 
         Args:
             lora_name (str): Name of the adapter to remove.
@@ -225,7 +213,7 @@ class AsyncLM(ABC):
             temperature (float, optional): The temperature to use to rescale the logits. Defaults to 1.0.
             max_tokens (int): The maximum number of tokens to generate.
             seed (int, optional): The seed for the random number generator. Defaults to None.
-            lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
+            lora_name (str, optional): Name of the LoRA adapter to use. Defaults to None (the base model).
 
         Returns:
             (list[int]): The sampled token IDs.
@@ -270,7 +258,7 @@ class AsyncLM(ABC):
             eos_token_ids (list[int]): The token IDs of the end-of-sequence token.
             temperature (float): The temperature to use for the logits.
             seed (int, optional): The seed for the random number generator. Defaults to None.
-            lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
+            lora_name (str, optional): Name of the LoRA adapter to use. Defaults to None (the base model).
 
         Returns:
             (list[list[int]]): The sampled token IDs.
@@ -322,7 +310,7 @@ class MockAsyncLM(AsyncLM):
 
         Args:
             token_ids (list[int]): Input token IDs.
-            lora_name (str, optional): Must be ``None``; the mock has no adapters.
+            lora_name (str, optional): Must be None; the mock has no adapters.
 
         Returns:
             (torch.Tensor): Normalized log probability tensor.
@@ -336,7 +324,7 @@ class MockAsyncLM(AsyncLM):
 
         Args:
             token_ids (list[int]): Input token IDs.
-            lora_name (str, optional): Must be ``None``; the mock has no adapters.
+            lora_name (str, optional): Must be None; the mock has no adapters.
 
         Returns:
             (torch.Tensor): Normalized log probability tensor.

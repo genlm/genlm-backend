@@ -114,8 +114,7 @@ def test_batch_next_token_logprobs(
 
 @v1_capable
 def test_swapping_lora_requests(token_ids_list, async_llm, lora_path):
-    """Interleaving base and adapter requests gives the same logits as running
-    each adapter in its own contiguous block."""
+    """Interleaved base and adapter requests match contiguous runs of each."""
     async_llm.add_new_lora(lora_path)
 
     def row(token_ids, lora_name):
@@ -130,21 +129,17 @@ def test_swapping_lora_requests(token_ids_list, async_llm, lora_path):
         logits_swapped_nolora.append(row(token_ids, None))
         logits_swapped_lora.append(row(token_ids, LORA_NAME))
 
-    for i, token_ids in enumerate(token_ids_list):
-        assert (
-            compare(logits_noswapped_lora[i], logits_swapped_lora[i]).max_rel_err < 1e-3
-        ), token_ids
-    for i, token_ids in enumerate(token_ids_list):
-        assert (
-            compare(logits_noswapped_nolora[i], logits_swapped_nolora[i]).max_rel_err
-            < 1e-3
-        ), token_ids
+    assert_rows_close(
+        logits_noswapped_lora, logits_swapped_lora, token_ids_list, rel=1e-3
+    )
+    assert_rows_close(
+        logits_noswapped_nolora, logits_swapped_nolora, token_ids_list, rel=1e-3
+    )
 
 
 @v1_capable
 def test_reregistration(async_llm, token_ids_list, lora_pair):
-    """Re-registering a name rebinds it to the new weights: fresh engine id and
-    purged logprob cache, so the cached first read can't shadow the swap."""
+    """Re-registering a name rebinds it to the new weights."""
     identity_path, shifted_path = lora_pair
     ids = token_ids_list[0]
 

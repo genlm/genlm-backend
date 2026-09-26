@@ -56,9 +56,7 @@ v1_capable = pytest.mark.skipif(
 
 @pytest.fixture(scope="session")
 def lora_pair(tmp_path_factory):
-    """Two locally-built SmolLM adapters for re-registration tests: ``identity``
-    (lora_B zeros, default init -> output == base) and ``shifted`` (lora_B randn
-    -> output != base)."""
+    """Paths to SmolLM LoRA adapters ``(identity, shifted)``: identity matches base, shifted does not."""
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM
 

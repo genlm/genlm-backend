@@ -24,7 +24,6 @@ class Query:
 
     @torch.no_grad()
     def past_padded(self, layer, side, to_length, dtype, device, past_shape):
-        """``side`` is ``"keys"`` or ``"values"``: a cache layer's two tensors."""
         if self.past is not None:
             return torch.cat(
                 (
@@ -119,9 +118,8 @@ class AsyncTransformer(AsyncLM):
         self.model = hf_model
         self.tokenizer = hf_tokenizer
         self.device = hf_model.device
-        # One logprob/KV trie per LoRA adapter (None = base): cached activations
-        # are adapter-dependent, so the tries must never mix.
-        self.caches = defaultdict(TokenTrie)
+        # One cache trie per LoRA adapter (None = base); tries must never mix.
+        self._caches = defaultdict(TokenTrie)
 
         # Queries to be batched. Each query is a sequence of tokens,
         # and a Future to be called when the query is resolved.
@@ -136,11 +134,11 @@ class AsyncTransformer(AsyncLM):
 
     def clear_cache(self):
         """Clear the cache of log probabilities and key/value pairs."""
-        self.caches = defaultdict(TokenTrie)
+        self._caches = defaultdict(TokenTrie)
 
     def clear_kv_cache(self):
         """Clear any key and value vectors from the cache."""
-        for trie in self.caches.values():
+        for trie in self._caches.values():
             trie.clear_kv_cache()
 
     def reset_async_queries(self):
@@ -154,11 +152,11 @@ class AsyncTransformer(AsyncLM):
 
         Args:
             prompt_tokens (list[int]): token ids for the prompt to cache.
-            lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
+            lora_name (str, optional): Name of the LoRA adapter to use. Defaults to None (the base model).
         """
         self._activate(lora_name)
         result = self.model(torch.tensor([prompt_tokens]).to(self.device))
-        node = self.caches[lora_name].extend_cache(
+        node = self._caches[lora_name].extend_cache(
             0, prompt_tokens, result.logits[0], 0
         )
         node.past_key_values = result.past_key_values
@@ -170,10 +168,9 @@ class AsyncTransformer(AsyncLM):
         )
 
     def add_new_lora(self, lora_path, lora_name="lora_1"):
-        """Register a LoRA adapter under ``lora_name``.
+        """Load a LoRA adapter into the base model.
 
-        Re-registering a name evicts its weights and rebinds it to ``lora_path``.
-        Forwards select the adapter per call via ``lora_name=``.
+        Loading under an existing name replaces that adapter. Select it per call with `lora_name`.
 
         Args:
             lora_path (str): Path to the adapter weights directory or identifier in HuggingFace's model hub.
@@ -184,29 +181,23 @@ class AsyncTransformer(AsyncLM):
         self.model.load_adapter(lora_path, lora_name)
 
     def remove_lora(self, lora_name):
-        """Unregister ``lora_name``: drop its weights and its cache trie."""
+        """Remove a previously loaded LoRA adapter and its cache."""
         self.model.delete_adapter(lora_name)
-        self.caches.pop(lora_name, None)
+        self._caches.pop(lora_name, None)
 
     def _activate(self, lora_name):
-        """Set the model's peft state for a forward under ``lora_name`` (``None`` = base).
+        """Activate `lora_name` on the model, or disable adapters if it is None.
 
-        Only adapters registered via ``add_new_lora`` are managed. A model whose
-        adapters live outside the transformers peft mixin (e.g. a peft training wrapper
-        sharing the weights) is left untouched under ``None``.
-
-        Args:
-            lora_name (str|None): Adapter to activate, or None for the base model.
+        Adapters outside the transformers peft mixin are left untouched under None.
 
         Raises:
-            ValueError: If ``lora_name`` has not been registered.
+            ValueError: If `lora_name` has not been loaded.
         """
-        loaded = getattr(self.model, "_hf_peft_config_loaded", False)
         if lora_name is None:
-            if loaded:
+            if getattr(self.model, "_hf_peft_config_loaded", False):
                 self.model.disable_adapters()
         else:
-            if not loaded or lora_name not in self.model.peft_config:
+            if not self._has_adapter(lora_name):
                 raise ValueError(UNKNOWN_ADAPTER.format(lora_name))
             self.model.set_adapter(lora_name)
             self.model.enable_adapters()
@@ -214,8 +205,7 @@ class AsyncTransformer(AsyncLM):
     @torch.no_grad()
     def batch_evaluate_queries(self):
         """
-        Process a batch of queued language model queries, one forward per
-        distinct LoRA adapter.
+        Process a batch of queued language model queries, one forward per LoRA adapter.
 
         This method is called internally when the `batch_size` has been met or the `timeout` has expired.
         """
@@ -228,8 +218,7 @@ class AsyncTransformer(AsyncLM):
         for query in queries:
             by_lora[query.lora_name].append(query)
         for lora_name, group in by_lora.items():
-            # An exception escaping this timer callback would hang every awaiting
-            # caller, so a failed group fails its own futures.
+            # An exception escaping here would leave every awaiting caller hanging.
             try:
                 self._activate(lora_name)
                 self._evaluate_queries(group)
@@ -240,7 +229,7 @@ class AsyncTransformer(AsyncLM):
 
     @torch.no_grad()
     def _evaluate_queries(self, queries):
-        """One padded forward over ``queries`` (all under the currently active adapter)."""
+        """Run one padded forward over `queries` under the currently active adapter."""
         query_groups = defaultdict(list)
         for query in queries:
             key = tuple(query.prompt)  # XXX: cache based on past_len too?
@@ -303,8 +292,6 @@ class AsyncTransformer(AsyncLM):
         else:
             pasts = None
 
-        # ``DynamicCache`` takes the per-layer (key, value) pairs positionally; ``None``
-        # gives the empty cache a cold batch needs.
         pasts = DynamicCache(None if pasts is None else [tuple(kv) for kv in pasts])
 
         results = self.model(
@@ -333,7 +320,7 @@ class AsyncTransformer(AsyncLM):
             future (asyncio.Future): Future to store the result in
             past (DynamicCache|None): Past key/value states from previous evaluation,
                 or None if this is a new query
-            lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
+            lora_name (str, optional): Name of the LoRA adapter to use. Defaults to None (the base model).
         """
         self.queries.append(Query(query, future, past, lora_name))
 
@@ -352,7 +339,7 @@ class AsyncTransformer(AsyncLM):
 
         Args:
             token_ids (list[int]): Sequence of token IDs to follow in the cache tree
-            lora_name (str, optional): Which adapter's cache tree to walk (``None`` = base).
+            lora_name (str, optional): Which adapter's cache tree to walk. Defaults to None (the base model).
 
         Returns:
             tuple:
@@ -363,7 +350,7 @@ class AsyncTransformer(AsyncLM):
                 - int: Base index indicating where the past states start in token_ids
         """
         # Walk while tokens can be found
-        node = self.caches[lora_name]
+        node = self._caches[lora_name]
         next_token_index = 0
 
         past = None
@@ -386,7 +373,7 @@ class AsyncTransformer(AsyncLM):
 
         Args:
             token_ids (list[int]): a list of token ids, representing a prompt to the language model.
-            lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
+            lora_name (str, optional): Name of the LoRA adapter to use. Defaults to None (the base model).
 
         Returns:
             logprobs (torch.Tensor): a tensor of with the language model's log (normalized) probabilities for the next token following the prompt.
@@ -416,7 +403,7 @@ class AsyncTransformer(AsyncLM):
 
         Args:
             token_ids (list[int]): a list of token ids, representing a prompt to the language model.
-            lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
+            lora_name (str, optional): Name of the LoRA adapter to use. Defaults to None (the base model).
 
         Returns:
             logprobs (torch.Tensor): a tensor with the language model's log (normalized) probabilities for the next token following the prompt.
@@ -446,7 +433,7 @@ class AsyncTransformer(AsyncLM):
 
         Args:
             token_ids (list[int]): a list of token ids, representing a prompt to the language model.
-            lora_name (str, optional): LoRA adapter to forward under (``None`` = base).
+            lora_name (str, optional): Name of the LoRA adapter to use. Defaults to None (the base model).
 
         Returns:
             logprobs (torch.Tensor): a tensor with the language model's log (normalized) probabilities for the next token following the prompt.

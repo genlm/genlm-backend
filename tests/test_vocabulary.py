@@ -111,7 +111,7 @@ def test_byte_decoder_error_handling():
 
 
 def test_decode_vocab_failure():
-    """An undecodable vocabulary surfaces as ValueError naming the tokenizer."""
+    """An undecodable vocabulary surfaces as ValueError."""
     mock_tokenizer = MagicMock()
     mock_tokenizer.name_or_path = "test-model"
 
@@ -125,8 +125,7 @@ def test_decode_vocab_failure():
 
 
 def test_unknown_byte_encoding_is_rejected():
-    """A decoder that is neither ByteLevel nor SentencePiece is refused rather than
-    decoded under an assumed scheme."""
+    """A decoder that is neither ByteLevel nor SentencePiece raises ByteVocabError."""
     mock_tokenizer = MagicMock()
     mock_tokenizer.name_or_path = "test-model"
     mock_tokenizer.backend_tokenizer.to_str.return_value = (

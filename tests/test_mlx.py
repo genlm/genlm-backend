@@ -115,7 +115,7 @@ def test_next_token_logprobs_sync(async_llm):
 
 @pytest.mark.asyncio
 async def test_batch_timeout(async_llm):
-    # A batch that never fills is still run, on the timer.
+    # Test that queries are processed after timeout
     async_llm.clear_cache()
 
     test_prompt = async_llm.tokenizer.encode("Test timeout")
@@ -128,11 +128,9 @@ async def test_batch_timeout(async_llm):
 
 @pytest.mark.asyncio
 async def test_abandoned_batch_fails_co_callers(async_llm):
-    """A cancelled batch holder must fail its co-callers, not orphan them, and never
-    with its own CancelledError: that leaves their tasks cancelled and skips their
-    `except Exception`."""
+    """A cancelled batch leader fails its co-callers with BatchAbandoned, not CancelledError."""
     old_timeout = async_llm.timeout
-    async_llm.timeout = 60  # linger, so the holder is still in the batch to cancel
+    async_llm.timeout = 60  # so the leader is still in the batch to cancel
     try:
         prompts = [async_llm.tokenizer.encode(s) for s in ("one", "two", "three")]
         tasks = [
@@ -163,7 +161,7 @@ def test_from_name_with_options(model_name):
 
 
 def test_batch_evaluate_empty_queries(async_llm):
-    # An empty cohort flushes harmlessly (a reset can empty the window's queue).
+    # Test batch evaluation with empty query list
     async_llm._batch_evaluate([])
     assert len(async_llm._batch_queue) == 0
 
@@ -259,7 +257,7 @@ def test_kv_reuse_matches_cold_prefill(async_llm, model_name, token_ids_list):
 
 
 def test_kv_fork_matches_cold_prefill(async_llm, model_name, token_ids_list):
-    # Two rows continuing one row -- what a resample asks for -- must agree too.
+    # Two rows forked from one cached row must agree with a cold prefill too.
     tolerance = TOLERANCES.get(model_name, 1e-3)
     parent, other = token_ids_list[0], token_ids_list[1]
     forked = [parent + [100], parent + [101], other + [102]]

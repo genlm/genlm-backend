@@ -19,8 +19,7 @@ LORA_PARAMETERS = {"rank": 4, "scale": 20.0, "dropout": 0.0}
 
 
 def _write_adapter(directory, seed, lora_parameters=None):
-    """An adapter with the layout `MODEL_NAME` wraps to, and a non-zero `lora_b` so it
-    actually moves the logits."""
+    """Write a random-weight adapter for `MODEL_NAME` into `directory`; return its path."""
     lora_parameters = lora_parameters or LORA_PARAMETERS
     mx.random.seed(seed)
     model, _ = mlx_lm.load(MODEL_NAME)
@@ -93,7 +92,6 @@ def test_adapters_are_independent(llm, token_ids, adapters):
 
 
 def test_kv_rows_do_not_cross_adapters(llm, token_ids, adapters):
-    # A lane that walked its rows forward must not serve another lane's forward.
     llm.add_new_lora(adapters["a"], "a")
     extended = token_ids + [100]
 
@@ -148,8 +146,7 @@ def test_incompatible_layout_is_rejected(llm, tmp_path, adapters):
 
 
 def test_dropout_adapter_is_deterministic(llm, token_ids, tmp_path):
-    """Wrapping builds fresh modules, so the model must be put back in eval mode:
-    otherwise an adapter trained with dropout randomizes every forward."""
+    """An adapter trained with dropout is applied in eval mode."""
     directory = tmp_path / "wet"
     directory.mkdir()
     path = _write_adapter(directory, 3, {**LORA_PARAMETERS, "dropout": 0.5})

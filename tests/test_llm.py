@@ -11,8 +11,6 @@ from conftest import (
 from arsenal.maths import compare
 from genlm.backend.llm import load_model_by_name, MockAsyncLM
 
-# from hypothesis import given, strategies as st, settings
-
 
 @pytest.fixture(scope="module")
 def model_name():
@@ -67,10 +65,9 @@ def test_next_token_logprobs(async_llm, reference_llm, token_ids_list, entry):
 @v1_capable
 @pytest.mark.parametrize("entry", ["async", "sync"])
 def test_batch_next_token_logprobs(async_llm, reference_llm, token_ids_list, entry):
-    """1e-2, not the single-row 1e-3: a fp16 batched forward reduces in a different
-    order than a single-prompt one, drifting ~6e-3 from its own single-row answer."""
     haves = batch_logprobs(async_llm, token_ids_list, entry).cpu().numpy()
     wants = asyncio.run(reference_llm.batch_next_token_logprobs(token_ids_list))
+    # fp16 batched forwards reduce in a different order than single-prompt ones.
     assert_rows_close(haves, wants, token_ids_list, rel=1e-2)
 
 

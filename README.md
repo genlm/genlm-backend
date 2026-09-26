@@ -14,14 +14,14 @@ GenLM Backend is a high-performance backend for language model probabilistic pro
 
 See our [documentation](https://genlm.github.io/genlm-backend/).
 
-## 🚀 Key Features
+## Key Features
 - Automatic batching of concurrent log-probability requests, enabling efficient large-scale inference without having to write batching logic yourself
 - Byte-level decoding of transformers tokenizers, enabling advanced token-level control
 - Support for arbitrary Hugging Face models (e.g., LLaMA, DeepSeek, etc.) with fast inference and automatic KV caching using vllm
-- NEW: support for MLX-LM library, allowing faster inference on Apple silicon devices.
+- Support for the MLX-LM library, for inference on Apple silicon
 
 
-## ⚡ Quick Start
+## Quick Start
 
 This library supports installation via pip. This uses `transformers` as the default inference backend.
 
@@ -45,9 +45,8 @@ pip install genlm-backend[lora]
 
 Adapters are selected per request. Register one with `add_new_lora(path, name)`, then pass
 `lora_name=name` to any forward; omit it to run the base model. Re-registering a name
-rebinds it to the weights at the new path and evicts the old weights and their caches, so a
-training loop can push each update through the same call. `remove_lora(name)` drops an
-adapter.
+rebinds it to the weights at the new path and evicts the old weights and their caches.
+`remove_lora(name)` drops an adapter.
 
 ```python
 llm.add_new_lora("/path/to/adapter", "reviewer")
@@ -56,9 +55,8 @@ logps = await llm.next_token_logprobs(token_ids, lora_name="reviewer")
 
 ### Releasing a vLLM model
 
-`AsyncVirtualLM` runs its engine on a background thread, which does not own the model:
-dropping the last reference stops the thread and frees the GPU. To release at a point
-you choose instead, call `cleanup()` or use the model as a context manager.
+Dropping the last reference to an `AsyncVirtualLM` frees the GPU. To release at a point
+you choose, call `cleanup()` or use the model as a context manager (`with` or `async with`).
 
 ```python
 from genlm.backend import AsyncVirtualLM
@@ -67,10 +65,7 @@ with AsyncVirtualLM.from_name("meta-llama/Llama-3.2-1B") as llm:
     logps = await llm.next_token_logprobs(token_ids)
 ```
 
-`async with` works the same way. The other backends hold no engine thread and need no
-release step.
-
-## 🧪 Example: Autobatched Sequential Importance Sampling with LLMs
+## Example: Autobatched Sequential Importance Sampling with LLMs
 
 This example demonstrates how `genlm-backend` enables concise, scalable probabilistic inference with language models. It implements a Sequential Importance Sampling (SIS) algorithm that makes asynchronous log-probabality requests which get automatically batched by the language model.
 

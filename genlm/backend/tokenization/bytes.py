@@ -13,26 +13,25 @@ class ByteVocabError(Exception):
 
 
 def get_byte_vocab(tokenizer):
-    """Byte representation of every token, indexed by token id.
+    """Extract byte vocabulary from a tokenizer.
 
-    The tokenizer's own decoder names the scheme: ``ByteLevel`` is the GPT-2 byte
-    alphabet, ``ByteFallback``/``Metaspace`` is SentencePiece's ``<0xXX>`` escapes and
-    ``▁`` space marker. A tokenizer declaring neither is rejected.
+    The byte encoding is chosen by the tokenizer's decoder: ``ByteLevel`` uses the GPT-2
+    byte alphabet, ``ByteFallback`` or ``Metaspace`` uses SentencePiece pieces. Any other
+    declared decoder is rejected.
 
     Args:
         tokenizer: A Hugging Face tokenizer instance.
 
     Returns:
-        (list[bytes]): Byte representation of each token.
+        (list[bytes]): List of byte representations of tokens.
 
     Raises:
-        ByteVocabError: If the tokenizer's byte encoding cannot be determined, or the
-            scheme it declares fails to round-trip.
+        ByteVocabError: If vocabulary cannot be decoded.
     """
     kinds = _decoder_kinds(tokenizer)
 
     if kinds & {"ByteFallback", "Metaspace"}:
-        return get_byte_tokens_from_pieces(tokenizer)
+        return get_byte_tokens_from_sp(tokenizer)
 
     if "ByteLevel" in kinds:
         byte_decoder = _get_default_byte_decoder()
@@ -51,10 +50,9 @@ def get_byte_vocab(tokenizer):
             f"decoder is {sorted(kinds)}, which is neither ByteLevel nor SentencePiece."
         )
 
-    # A tokenizer with no backend declares no scheme; `sp_model` marks SentencePiece,
-    # whose pieces are already `<0xXX>`-escaped.
+    # No backend decoder to inspect; try SentencePiece model.
     if hasattr(tokenizer, "sp_model"):
-        return get_byte_tokens_from_pieces(tokenizer)
+        return get_byte_tokens_from_sp(tokenizer)
 
     byte_decoder = (
         getattr(tokenizer, "byte_decoder", None) or _get_default_byte_decoder()
@@ -64,20 +62,19 @@ def get_byte_vocab(tokenizer):
     except ByteDecoderError as e:
         raise ByteVocabError(
             f"Tokenizer {tokenizer.name_or_path!r} exposes no decoder to inspect and "
-            f"does not round-trip under the GPT-2 byte alphabet."
+            "does not round-trip under the GPT-2 byte alphabet."
         ) from e
     return get_byte_tokens_from_byte_decoder(tokenizer, byte_decoder)
 
 
 def _decoder_kinds(tokenizer):
-    """Decoder component names the tokenizer's backend declares.
+    """Get the type names of all components in the tokenizer's backend decoder.
 
     Args:
         tokenizer: A Hugging Face tokenizer instance
 
     Returns:
-        (set): Component type names, e.g. ``{"Sequence", "Replace", "ByteFallback",
-            "Fuse"}``. Empty when the tokenizer has no backend.
+        (set): Decoder component type names, empty when the tokenizer has no backend
     """
     backend = getattr(tokenizer, "backend_tokenizer", None)
     if backend is None:
@@ -121,7 +118,7 @@ def get_byte_tokens_from_byte_decoder(tokenizer, byte_decoder):
     return byte_tokens
 
 
-def get_byte_tokens_from_pieces(tokenizer):
+def get_byte_tokens_from_sp(tokenizer):
     """Convert SentencePiece token strings to bytes.
 
     ``<0xXX>`` escapes become the byte they name and ``▁`` becomes a space; special
@@ -131,7 +128,7 @@ def get_byte_tokens_from_pieces(tokenizer):
         tokenizer: A Hugging Face tokenizer instance
 
     Returns:
-        byte_tokens (list[bytes]): Byte representation of each token
+        byte_tokens (list[bytes]): List of byte representations for each token in the vocabulary
     """
     special_tokens_map = {
         token_id: token for token, token_id in tokenizer.get_added_vocab().items()
@@ -228,7 +225,11 @@ def _check_complex_roundtrip(tokenizer, byte_decoder):
 
 
 def _bytes_to_unicode():
-    """The canonical GPT-2 byte->unicode map (transformers' ``bytes_to_unicode``)."""
+    """Create a mapping from bytes to Unicode characters.
+
+    Returns:
+        (dict): Mapping from byte values to Unicode characters
+    """
     bs = (
         list(range(ord("!"), ord("~") + 1))
         + list(range(ord("¡"), ord("¬") + 1))
@@ -247,9 +248,6 @@ def _bytes_to_unicode():
 
 def _get_default_byte_decoder():
     """Get the default GPT-2 byte decoder with additional special character mappings.
-
-    Built from ``_bytes_to_unicode``; transformers 5.x exposes no tokenizer attribute
-    to read the same map off.
 
     Returns:
         (dict): Mapping from characters to bytes including special characters
