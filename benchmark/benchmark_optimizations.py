@@ -20,7 +20,7 @@ text = get_wikitext()
 
 
 def load_model(model):
-    model_name = "gpt2"
+    model_name = "openai-community/gpt2"
     if model == "optimized":
         return AsyncVirtualLM.from_name(model_name)
     else:

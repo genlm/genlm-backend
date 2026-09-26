@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 @pytest.fixture(scope="module")
 def model_name():
-    return "gpt2"
+    return "openai-community/gpt2"
 
 
 @pytest.fixture(scope="module")
@@ -253,7 +253,7 @@ def test_batch_evaluate_empty_queries(async_llm):
 
 def test_load_model_by_name_no_backend():
     with patch("torch.cuda.is_available", return_value=False):
-        load_model_by_name("gpt2")
+        load_model_by_name("openai-community/gpt2")
 
 
 def test_sample_seeded(async_llm):

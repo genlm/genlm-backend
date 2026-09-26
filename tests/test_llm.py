@@ -113,7 +113,7 @@ def test_batch_next_token_logprobs_agreement(
 
 @pytest.mark.asyncio
 async def test_mock_async_llm():
-    mock_async_llm = MockAsyncLM.from_name("gpt2")
+    mock_async_llm = MockAsyncLM.from_name("openai-community/gpt2")
     logprobs1 = await mock_async_llm.next_token_logprobs([0])
     logprobs2 = mock_async_llm.next_token_logprobs_sync([0])
     assert torch.allclose(logprobs1, logprobs2)
@@ -121,12 +121,12 @@ async def test_mock_async_llm():
 
 
 def test_load_model_by_name_mock():
-    load_model_by_name("gpt2", backend="mock")
+    load_model_by_name("openai-community/gpt2", backend="mock")
 
 
 def test_load_model_by_name_error():
     with pytest.raises(ValueError):
-        load_model_by_name("gpt2", backend="invalid")
+        load_model_by_name("openai-community/gpt2", backend="invalid")
 
 
 @v1_capable

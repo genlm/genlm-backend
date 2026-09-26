@@ -12,7 +12,7 @@ from .util import load_trie
 from genlm.backend.llm.base import MockAsyncLM
 from genlm.backend.trie import AsyncTokenCharacterTrie
 
-mock_llm = MockAsyncLM.from_name("gpt2")
+mock_llm = MockAsyncLM.from_name("openai-community/gpt2")
 
 
 @pytest.mark.benchmark(warmup=True, max_time=5, warmup_iterations=10)

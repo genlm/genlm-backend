@@ -20,7 +20,7 @@ text = get_wikitext()
 
 
 def load_model(backend, batch_size=None):
-    model_name = "gpt2"
+    model_name = "openai-community/gpt2"
     if backend in ["vllm", "sglang"]:
         return load_model_by_name(model_name, backend=backend)
     else:
