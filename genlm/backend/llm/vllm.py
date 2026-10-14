@@ -80,7 +80,7 @@ else:
         def resolve(rows):
             target = ref()
             if target is not None:
-                target._resolve(rows)
+                target._receive_rows(rows)
 
         return resolve
 
@@ -410,10 +410,8 @@ else:
             Returns:
                 result (torch.Tensor): Normalized log probability tensor.
             """
-            rows = await self.batch_next_token_logprobs(
-                [token_ids], lora_name=lora_name
-            )
-            return rows[0]
+            (future,) = await self._enqueue([token_ids], lora_name)
+            return (await future).clone()
 
         async def batch_next_token_logprobs(self, token_ids_list, lora_name=None):
             """Batch request log probabilities for multiple token sequences asynchronously.
@@ -428,6 +426,11 @@ else:
             Returns:
                 (torch.Tensor): A ``[N, vocab]`` tensor of normalized log probabilities.
             """
+            futures = await self._enqueue(token_ids_list, lora_name)
+            return torch.stack(await asyncio.gather(*futures))
+
+        async def _enqueue(self, token_ids_list, lora_name):
+            """Queue requests whose futures share captured rows; public returns copy once."""
             self._check_alive()
             if lora_name is not None and lora_name not in self._lora_requests:
                 raise ValueError(UNKNOWN_ADAPTER.format(lora_name))
@@ -446,7 +449,7 @@ else:
                 queries = self._bind_adapters(batch)
                 if queries:
                     self._work.put(("queries", queries, None, None))
-            return torch.stack(await asyncio.gather(*futures))
+            return futures
 
         def _check_alive(self):
             if self._engine_thread is None:
@@ -599,7 +602,7 @@ else:
 
         # -- delivery -----------------------------------------------------------
 
-        def _resolve(self, rows):
+        def _receive_rows(self, rows):
             """(engine thread) Capture callback: resolve the forward's pending
             futures, one callback per event loop."""
             by_loop = {}
@@ -608,10 +611,8 @@ else:
                 if not waiters:
                     continue
                 self._served += 1
-                for i, (future, loop) in enumerate(waiters):
-                    by_loop.setdefault(loop, []).append(
-                        (future, row if i == 0 else row.clone())
-                    )
+                for future, loop in waiters:
+                    by_loop.setdefault(loop, []).append((future, row))
             for loop, items in by_loop.items():
 
                 def _set(items=items):
