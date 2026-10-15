@@ -1,0 +1,191 @@
+{
+  "created_utc": "2026-10-15T18:07:14.661323+00:00",
+  "source_inputs_sha256": "c52eb9c4bc8f2e45b469ced82fe1bc8a65559f912e557ac8a54fa7d55b199586",
+  "runtime": "cuda",
+  "methods": [
+    "clue",
+    "beam",
+    "lookahead"
+  ],
+  "seed": 20261013,
+  "seed_derivation": "base seed + integer value of first eight SHA256 hex digits of UTF-8 target id",
+  "generator": {
+    "id": "Qwen/Qwen2.5-3B-Instruct",
+    "revision": "aa8e72537993ba99e69dfaafa59ed015b17504d1",
+    "snapshot": "/home/eve/.cache/huggingface/hub/models--Qwen--Qwen2.5-3B-Instruct/snapshots/aa8e72537993ba99e69dfaafa59ed015b17504d1",
+    "options": {
+      "engine_opts": {
+        "gpu_memory_utilization": 0.8,
+        "max_model_len": 1024,
+        "max_num_seqs": 64,
+        "language_model_only": true
+      }
+    }
+  },
+  "encoder": {
+    "id": "facebook/contriever",
+    "revision": "2bd46a25019aeea091fd42d1f0fd4801675cf699",
+    "snapshot": "/home/eve/.cache/huggingface/hub/models--facebook--contriever/snapshots/2bd46a25019aeea091fd42d1f0fd4801675cf699",
+    "device": "cuda",
+    "dtype": "torch.float32",
+    "batch_size": 128
+  },
+  "preprocessing": {
+    "input_text": "unchanged",
+    "tokenizer_max_length": 512,
+    "truncation": true,
+    "padding": true,
+    "pooling": "attention-mask mean including special tokens",
+    "normalization": "L2 unit vector",
+    "generated_decode": {
+      "skip_special_tokens": true,
+      "clean_up_tokenization_spaces": false
+    }
+  },
+  "search_settings": {
+    "generic_prompt": "<|im_start|>user\nWrite a short factual passage.\n<|im_end|>\n<|im_start|>assistant\n",
+    "beam": {
+      "width": 8,
+      "top_k": 16,
+      "max_tokens": 40,
+      "eos_token": 151645,
+      "beta": 32.0,
+      "diversity_penalty": 0.2,
+      "rank_mode": "cosine",
+      "eos_policy": "top_k",
+      "repetition_penalty": 1.0
+    },
+    "clue": {
+      "clue_count": 8,
+      "diversity_penalty": 0.25,
+      "assistant_prefill": ""
+    },
+    "lookahead": {
+      "particles": {
+        "value": 8
+      },
+      "max_tokens": {
+        "value": 40
+      },
+      "rollouts": {
+        "value": 2
+      },
+      "lookahead_interval": {
+        "value": 8
+      },
+      "eos_token": 151645,
+      "beta": 128.0,
+      "ess_fraction": 0.5,
+      "seed": 20261013,
+      "guidance": "completion"
+    },
+    "effective_seed_override": true,
+    "selection": "maximum target cosine over all terminal archive entries; proposal order breaks ties",
+    "cap_semantics": "40 generated content tokens; sampled EOS is omitted from content; reaching cap terminates with probability one"
+  },
+  "bank": {
+    "used": true,
+    "cache_reused": false,
+    "artifact_sha256": "7c65a2da4a4ad5525d45ff0d6cdcb77564ad90c350241ec974acf4ca92e4d4af",
+    "cache_path": "/home/eve/workspace/genlm-inversion-reproduction/.cache/contriever.pt",
+    "provenance": {
+      "encoder": "facebook/contriever",
+      "encoder_revision": "2bd46a25019aeea091fd42d1f0fd4801675cf699",
+      "tokenizer_vocabulary_sha256": "68564f66edb91d6593d0a740d21bfa1fdfcf2db08573f06e17616315c797f572",
+      "selected_words_sha256": "e77f98c32fb8c9af70a440ee2ac8d48a524119522eea7f82914bc69baedbacf1",
+      "vectors_sha256": "61a6175cba47e8a7421864e3ad5df3c8959f1e55ef434964328443927ee796b3",
+      "bank_encoder_queries": 12000,
+      "bank_encoder_batches": 94
+    },
+    "vector_dtype": "torch.float32",
+    "vector_shape": [
+      12000,
+      768
+    ],
+    "build_encoder_queries": 12000,
+    "seconds": 1.5981668643653393,
+    "rebuild_caveat": "Rebuilding on another device or library version can change vector rounding and near-tied clue selections."
+  },
+  "shared_target_cost": {
+    "encoder_queries": 4,
+    "encoder_batches": 1,
+    "seconds": 0.01620123302564025
+  },
+  "initialization_seconds": 147.31119263311848,
+  "source_hashes": {
+    "example/bundle.py": "73c0948173464048fbe4466dfdd2faeb3a27cdbdf3d09609bb24ce4231274b18",
+    "example/runtime.py": "59044eba80adf1467109991301d255541efc27adc8fd4d8b05e10cc231eb9a63",
+    "example/__init__.py": "019bd83b58bcaf08051c1dc74e963103613c0e173464e96830620d4ebe14e246",
+    "example/__main__.py": "47ce5e208e936dd933ba61cfe9f4c0059ec408fcd34df697f2a4e1be3ab1b27c",
+    "example/_algorithms/vocab_probe.py": "2e598e9a2b96ca317bf9a54e4ed68d1f95d992036fa450134df8e950ff3fa09b",
+    "example/_algorithms/lookahead_smc.py": "aca7f52f5d9d00f9cbb42fd292a8ffffc3fd6ff8d21a0efb02187e39be35be5b",
+    "example/_algorithms/scoring.py": "8a470389c786e9169b7b1b8cdc9a18fd91760f0f37cfcf5730775539578ad18a",
+    "example/_algorithms/beam.py": "b1c6868cf15f63bb8baa78d5b0ba893ceb30b29688d37f1e0c01dd54097ed517",
+    "example/_algorithms/__init__.py": "8c462404ddb1341aa634c76a45cec9e2ee615eb83efa6ff2792e552841563a1a",
+    "example/_algorithms/smc.py": "0df3cd9a4aa9e2f9a416a0c121588cbb2af74e3c1ccd1fc73caf276758210c56",
+    "genlm/cache.py": "e11a56df9d0427470c49d7f59e2a2feb41895f7b2de61ff19db8b6d4df346dfa",
+    "genlm/__init__.py": "0a88d3e7c7631189966cfe116ffee64ee189adec0a22edbb84cdfa5b10de87ca",
+    "genlm/trie/base.py": "77de8bfa480724c256969c1934c202ae8a08db58c63df0dc791536eb9d308acc",
+    "genlm/trie/parallel.py": "92204dfab1a5e4ee81a4396e85836f24ae1849a4b68837aefaba263ba3717529",
+    "genlm/trie/async_impl.py": "94a86ee71351b1cfcf2cfbae24b4857b8e0408fb086d8d5f08c91350b0644b06",
+    "genlm/trie/__init__.py": "ee507658cb71c104e78a914f84d4fba08d3c2c9547eca2e748245de2bb762574",
+    "genlm/tokenization/bytes.py": "ead8fa5ad5fdbc144fc2a33d94e3c3205995ca1a3ee2f015da826fbe39f02aa3",
+    "genlm/tokenization/__init__.py": "2472a4ed0e60e1ab2cabd7c50a74aee935eabb608df11783096b0b0866dae8af",
+    "genlm/tokenization/token.py": "a801745cc87924cb6aab1e3d44f716153c79f04112c7061e790fab3528d521f5",
+    "genlm/tokenization/vocab.py": "db181c2c9f5824f895219880450db9ee63fb915a3ee15345aa4dcb53d0939de8",
+    "genlm/llm/base.py": "a368b56e3edf9e975ad2ec0b8f6b4d7b48a456728bdd7299017b3aeb189dbacd",
+    "genlm/llm/vllm.py": "0291080ba619781fa598710b929cee0a0586072fc800a3bf987943e8c3c62a63",
+    "genlm/llm/mlx.py": "62262aaa8d6adbdec9ab0159b2f939159bd4f349344b45cfc3f9d1caef33b4a8",
+    "genlm/llm/hf.py": "d120575903a76f43f7f41758b144674c3e48c6722a883317607d2f4b1d298f07",
+    "genlm/llm/__init__.py": "da7ce208031bbcd4129ff0bb6fe8b3078b0f577b3f1a0374860bd878dac24a34",
+    "genlm/llm/sgl.py": "ac484d9a45db49f3b4fd0434a49211ef0349bfe3c5a61be08be8ba4467af23cb"
+  },
+  "versions": {
+    "genlm-backend": "0.3.1+inversion",
+    "torch": "2.11.0",
+    "transformers": "5.19.0",
+    "huggingface-hub": "1.33.0",
+    "vllm": "0.26.0"
+  },
+  "hardware": {
+    "platform": "Linux-6.17.0-1018-nvidia-aarch64-with-glibc2.39",
+    "machine": "aarch64",
+    "processor": "aarch64",
+    "python": "3.12.3",
+    "gpu": "NVIDIA GB10",
+    "gpu_memory_bytes": 130663165952,
+    "cuda": "13.0"
+  },
+  "caveats": [
+    "Archive maximum-cosine selection is a heuristic output; weighted lookahead particles are separate.",
+    "Clue and generic policies use different fixed sentence/passage instructions.",
+    "Logical LM requests count algorithm calls, not physical GPU forward passes or FLOPs.",
+    "Search counters exclude shared target encoding and bank construction; those costs are reported once.",
+    "Search time includes search-result decoding, excludes initialization, target encoding, bank preparation, artifact writes, and cache release.",
+    "Models remain loaded while per-method scorer and backend caches are cleared; method order is recorded.",
+    "Pinned weights and bank cache are external dependencies; the bundle contains complete rendering and score evidence.",
+    "Floating-point and backend-version differences can change fresh inference despite fixed seeds."
+  ],
+  "wall_seconds": 401.61279152706265,
+  "wall_time_scope": "Input loading through inference, artifact serialization, and generator cleanup; excludes final bundle rendering.",
+  "schema_version": 1,
+  "state": "complete",
+  "task": "target_conditioned_embedding_inversion",
+  "artifacts_sha256": {
+    "inputs.jsonl": "9a248f3dc7832a95ed2b1630588c6fae6418bd94e1d9bb87585849cfaf644992",
+    "targets.jsonl": "ff4bc223a2e46da7d42bba4e3ff851c3a3b144fb2a88d48fcb9dd4aaed4e75e3",
+    "results.jsonl": "6a90c151fd5ab3b81302029c11d5c8e630402acbeae07e2c692b9f19a22dda23",
+    "search/ebc048135ab6b6ec56ba6e6e65c6fb05b77bbd3500ea878048fbe427f7055a25-lookahead.json.gz": "68fc235f954941d47eae13789e516162d0e47c8f1111e4c3f0de7400f9bb5178",
+    "search/aa5fe3c309206ce1e187934b78d45cd412f65f178bad71bc63ae174f9002b96a-clue.json.gz": "06c72236ca140606afd4d6671a83c96c7085837629efaed1279955291767e9f9",
+    "search/d1d5092405ea415ae1d49fac837c4940f192bc1cebac0cfe8ecd3ace4130574d-beam.json.gz": "e6da1163936ee930a62ff220f9db94c95ce82fb5ecb8eb00834b528f73bce74c",
+    "search/aa5fe3c309206ce1e187934b78d45cd412f65f178bad71bc63ae174f9002b96a-lookahead.json.gz": "7f3b09c663255a3361befc097152bd45fff72e0f5a7b8bf241c0c0b9eb0a6138",
+    "search/aa5fe3c309206ce1e187934b78d45cd412f65f178bad71bc63ae174f9002b96a-beam.json.gz": "fa712fe6109c764815694b66989cd137a60db5a32d67a2b2096030d46b6cd6e1",
+    "search/d1d5092405ea415ae1d49fac837c4940f192bc1cebac0cfe8ecd3ace4130574d-clue.json.gz": "a41e0d6496e8f692f275a0cf0632253647a29a93a331da3a335e0b574ba523a0",
+    "search/ebc048135ab6b6ec56ba6e6e65c6fb05b77bbd3500ea878048fbe427f7055a25-beam.json.gz": "9703ab098898de08647022f10e95b4f5b8b5345099931300888a7e7190f6b9d0",
+    "search/d1d5092405ea415ae1d49fac837c4940f192bc1cebac0cfe8ecd3ace4130574d-lookahead.json.gz": "176b0249ea6b22164cd20721ea9cc9f2335c09210adce82eeafe5672d179bf9a",
+    "search/54058ba4025b45dd4cf806ea89cf950acf3fb5784c36b6141569f4921dfc3866-clue.json.gz": "0b1334e19948ae342e11e03609fc5e9efbd9783b3375f9cf59872d96a99e87fd",
+    "search/ebc048135ab6b6ec56ba6e6e65c6fb05b77bbd3500ea878048fbe427f7055a25-clue.json.gz": "ed0acfa190e5d829e500dcd055724199c39977fa3fd56b4a78501e43fa0ab3da",
+    "search/54058ba4025b45dd4cf806ea89cf950acf3fb5784c36b6141569f4921dfc3866-beam.json.gz": "ed0728b7e87dbb975457b9b96d4fd0ba5a2e2e7a1952447a41c337e422ef5851",
+    "search/54058ba4025b45dd4cf806ea89cf950acf3fb5784c36b6141569f4921dfc3866-lookahead.json.gz": "de5e4fdd8ea8511704ecc8af0143881c2ef89b0e31a21b1f99f09f5d439d330f"
+  }
+}

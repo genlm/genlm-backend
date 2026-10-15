@@ -1,0 +1,133 @@
+{
+  "seed": 20261014,
+  "selection_rule": "Exclude the previous eight Qwen3.5 targets; rank the remaining 24 by historical Qwen2.5-1.5B clue-beam selected F1 ascending, with lexical item-ID tie breaking; partition into four groups of six; random.Random(seed).choice once per group, hardest to easiest.",
+  "basis_field": "paired_metrics[item_id].after.selected_f1",
+  "source_sha256": {
+    "data/msmarco32/dev.jsonl": "0961541fefbf55b5e589ad9fab1951da60320d1dc4a5c728fc0cb10b9e78dcf4",
+    "data/msmarco32/dev8.jsonl": "87d9bc35bd6b767fd8b00fffd8cd1a8f43d16bd24544cb802b2971bf42472e9a",
+    "reports/msmarco32_generic_vs_probe_dev32.json": "8bdfbe9113a43f36da9fa019d87665efc45ec1dad5733ab6434c4148d48c5120",
+    "data/msmarco32/canary4_stratified.jsonl": "c52eb9c4bc8f2e45b469ced82fe1bc8a65559f912e557ac8a54fa7d55b199586"
+  },
+  "quartiles": [
+    {
+      "quartile": 1,
+      "eligible": [
+        {
+          "id": "msmarco-validation-1092482-7",
+          "baseline_f1": 0.3137254901960784
+        },
+        {
+          "id": "msmarco-validation-35781-8",
+          "baseline_f1": 0.3137254901960784
+        },
+        {
+          "id": "msmarco-validation-83265-5",
+          "baseline_f1": 0.31746031746031744
+        },
+        {
+          "id": "msmarco-validation-1039442-6",
+          "baseline_f1": 0.3404255319148936
+        },
+        {
+          "id": "msmarco-validation-532593-2",
+          "baseline_f1": 0.3404255319148936
+        },
+        {
+          "id": "msmarco-validation-1088870-3",
+          "baseline_f1": 0.36363636363636365
+        }
+      ],
+      "selected_id": "msmarco-validation-1088870-3"
+    },
+    {
+      "quartile": 2,
+      "eligible": [
+        {
+          "id": "msmarco-validation-1101587-9",
+          "baseline_f1": 0.36666666666666664
+        },
+        {
+          "id": "msmarco-validation-736533-6",
+          "baseline_f1": 0.3728813559322034
+        },
+        {
+          "id": "msmarco-validation-1013026-3",
+          "baseline_f1": 0.38461538461538464
+        },
+        {
+          "id": "msmarco-validation-718688-6",
+          "baseline_f1": 0.38596491228070173
+        },
+        {
+          "id": "msmarco-validation-933824-5",
+          "baseline_f1": 0.4
+        },
+        {
+          "id": "msmarco-validation-506-2",
+          "baseline_f1": 0.4186046511627907
+        }
+      ],
+      "selected_id": "msmarco-validation-933824-5"
+    },
+    {
+      "quartile": 3,
+      "eligible": [
+        {
+          "id": "msmarco-validation-901340-9",
+          "baseline_f1": 0.4406779661016949
+        },
+        {
+          "id": "msmarco-validation-339481-4",
+          "baseline_f1": 0.4444444444444444
+        },
+        {
+          "id": "msmarco-validation-1039686-3",
+          "baseline_f1": 0.4583333333333333
+        },
+        {
+          "id": "msmarco-validation-1066737-2",
+          "baseline_f1": 0.45901639344262296
+        },
+        {
+          "id": "msmarco-validation-902932-3",
+          "baseline_f1": 0.46808510638297873
+        },
+        {
+          "id": "msmarco-validation-59643-2",
+          "baseline_f1": 0.47058823529411764
+        }
+      ],
+      "selected_id": "msmarco-validation-339481-4"
+    },
+    {
+      "quartile": 4,
+      "eligible": [
+        {
+          "id": "msmarco-validation-377535-4",
+          "baseline_f1": 0.49056603773584906
+        },
+        {
+          "id": "msmarco-validation-1019818-6",
+          "baseline_f1": 0.5084745762711864
+        },
+        {
+          "id": "msmarco-validation-1083683-0",
+          "baseline_f1": 0.5172413793103449
+        },
+        {
+          "id": "msmarco-validation-1050342-1",
+          "baseline_f1": 0.5483870967741935
+        },
+        {
+          "id": "msmarco-validation-919153-7",
+          "baseline_f1": 0.5517241379310345
+        },
+        {
+          "id": "msmarco-validation-820084-7",
+          "baseline_f1": 0.56
+        }
+      ],
+      "selected_id": "msmarco-validation-820084-7"
+    }
+  ]
+}
