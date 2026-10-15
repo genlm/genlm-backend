@@ -1,0 +1,4 @@
+vllm==0.26.0
+torch==2.11.0
+transformers==5.19.0
+huggingface-hub==1.33.0

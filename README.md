@@ -145,3 +145,7 @@ This example highlights the following features:
 ## Development
 
 See the [DEVELOPING.md](DEVELOPING.md) file for information on how to install the project for local development.
+
+The [embedding inversion example](examples/embedding_inversion/README.md) runs
+frozen Qwen/Contriever searches and writes portable text, embedding, and search
+artifacts, with a separate command to render saved qualitative results.

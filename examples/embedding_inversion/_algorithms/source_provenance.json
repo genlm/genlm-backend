@@ -1,0 +1,46 @@
+{
+  "source_revision": "9666529d99f9a058a6786f5a5ab7ccc8ee3bfd63",
+  "python_requires": ">=3.12",
+  "transformations": [
+    "Replace zsinvert imports with package-relative imports.",
+    "Remove vocab_probe.main, its __main__ invocation, and CLI-only argparse/fcntl/re imports.",
+    "Apply Ruff formatting and document canonical vocabulary-hash ordering."
+  ],
+  "files": [
+    {
+      "source": "zsinvert/beam.py",
+      "source_sha256": "587ea07033ddda8d1054253b7c576c5f07d2b6163f578da4b39d41877e907a70",
+      "vendored": "examples/embedding_inversion/_algorithms/beam.py",
+      "vendored_sha256": "b1c6868cf15f63bb8baa78d5b0ba893ceb30b29688d37f1e0c01dd54097ed517",
+      "normalized_ast_identical": true
+    },
+    {
+      "source": "zsinvert/smc.py",
+      "source_sha256": "657f8ffe1b601868c67c5695471caddf4c4f54f3ddda351fad73ad8f00235487",
+      "vendored": "examples/embedding_inversion/_algorithms/smc.py",
+      "vendored_sha256": "0df3cd9a4aa9e2f9a416a0c121588cbb2af74e3c1ccd1fc73caf276758210c56",
+      "normalized_ast_identical": true
+    },
+    {
+      "source": "zsinvert/lookahead_smc.py",
+      "source_sha256": "4c3688bf9cc918f1d9d35c1fb930ce459489027958ecdb65884f9314249ae89e",
+      "vendored": "examples/embedding_inversion/_algorithms/lookahead_smc.py",
+      "vendored_sha256": "aca7f52f5d9d00f9cbb42fd292a8ffffc3fd6ff8d21a0efb02187e39be35be5b",
+      "normalized_ast_identical": true
+    },
+    {
+      "source": "zsinvert/scoring.py",
+      "source_sha256": "1946e8df9cbaa5019448a91718ca41b4dbd10deb79dcc7daccc743ff35707f1a",
+      "vendored": "examples/embedding_inversion/_algorithms/scoring.py",
+      "vendored_sha256": "8a470389c786e9169b7b1b8cdc9a18fd91760f0f37cfcf5730775539578ad18a",
+      "normalized_ast_identical": true
+    },
+    {
+      "source": "zsinvert/vocab_probe.py",
+      "source_sha256": "6a7d55cb531377b56a2370deaaa0805b859d4097576283c0f40239c4037088c6",
+      "vendored": "examples/embedding_inversion/_algorithms/vocab_probe.py",
+      "vendored_sha256": "2e598e9a2b96ca317bf9a54e4ed68d1f95d992036fa450134df8e950ff3fa09b",
+      "normalized_ast_identical": true
+    }
+  ]
+}

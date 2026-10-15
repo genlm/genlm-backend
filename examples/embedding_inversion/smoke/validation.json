@@ -1,0 +1,60 @@
+{
+  "status": "passed",
+  "execution_host": "spark",
+  "gpu": "NVIDIA GB10",
+  "cli_wall_seconds": 413.35,
+  "artifact_hashes_verified": 15,
+  "source_hashes_verified": 26,
+  "selected_token_decodes_verified": 12,
+  "independent_encoder_check": {
+    "device": "cpu",
+    "torch": "2.14.1",
+    "targets": 4,
+    "selected_texts": 12,
+    "maximum_target_component_error": 4.470348358154297e-07,
+    "maximum_selected_cosine_error": 5.364418029785156e-07,
+    "absolute_tolerance": 1e-05
+  },
+  "offline_render": {
+    "site_packages_disabled": true,
+    "command": "python3 -S -m examples.embedding_inversion render --bundle examples/embedding_inversion/smoke --output /tmp/genlm-inversion-render-review"
+  },
+  "manifest_sha256": "63d9e5a31cd4ea01951ad678d61a1f57cee67e13b37b791a7a48025633a3245f",
+  "backend_base_revision": "b2b539cdc53f8ddb13e361cdb4cc58e0712b2490",
+  "invocation": ".venv/bin/python -u -m examples.embedding_inversion run --runtime cuda --inputs examples/embedding_inversion/data/public4.jsonl --output smoke-output --methods clue beam lookahead --seed 20261013 --bank-cache .cache/contriever.pt",
+  "independent_archive_audit": {
+    "status": "passed",
+    "target_method_pairs": 12,
+    "archived_candidates": 1444,
+    "selected_f1_oracle_f1_and_maximum_cosine": "verified",
+    "termination_bounds": "verified",
+    "selected_cap_terminations": 10,
+    "selected_eos_terminations": 2,
+    "lookahead_transitions_replayed": 1280,
+    "terminal_particle_weights_verified": 32,
+    "lookahead_checks": [
+      "retained auxiliary potentials",
+      "importance increments",
+      "resampling ancestry",
+      "effective sample size",
+      "normalizer estimates",
+      "archive consistency"
+    ]
+  },
+  "validation_commands": {
+    "tests": {
+      "command": "python -m pytest --confcutdir=tests/embedding_inversion tests/embedding_inversion -q",
+      "passed": 35
+    },
+    "ruff": {
+      "version": "0.9.10",
+      "check": "passed",
+      "format": "passed"
+    },
+    "ty": {
+      "python_version": "3.12",
+      "result": "passed"
+    },
+    "html_visual_review": "passed"
+  }
+}
